@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wassup.dev/schema/findings.json",
+  "title": "wassup findings.yaml",
+  "type": "object",
+  "required": ["version", "findings"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "severity", "title"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" },
+          "severity": { "enum": ["critical", "high", "medium", "low"] },
+          "title": { "type": "string", "minLength": 1 },
+          "component": { "type": "string" },
+          "file": { "type": "string" },
+          "line": { "type": "integer", "minimum": 1 },
+          "evidence": { "type": "string" },
+          "suggested_fix": { "type": "string" },
+          "found_at": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}

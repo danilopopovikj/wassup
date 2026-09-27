@@ -1,0 +1,5 @@
+name: "Cache full, miss storm hits the database"
+symptom: slow again
+start: "2026-09-27T15:00:00Z"
+duration_s: 120
+tick_s: 5

@@ -1,0 +1,5 @@
+name: TLS certificate not renewed
+symptom: browser says not secure
+start: "2026-09-27T12:00:00Z"
+duration_s: 120
+tick_s: 5

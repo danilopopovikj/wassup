@@ -1,0 +1,5 @@
+name: Firewall change blocked observability
+symptom: "SigNoz shows nothing since 11:00"
+start: "2026-09-27T11:40:00Z"
+duration_s: 120
+tick_s: 5

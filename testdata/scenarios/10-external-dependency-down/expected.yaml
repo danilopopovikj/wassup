@@ -1,0 +1,17 @@
+components:
+  github:
+    state: failing
+    label: "failing, timing out for 12 min"
+  docs-sync:
+    state: failing
+    contains: last run failed
+edges:
+  worker->github:
+    state: failing
+    label: "failing, 100 percent errors"
+cause: github
+story_first: the docs sync job failed because GitHub is not responding
+story_contains:
+  - nothing inside the system is at fault
+  - retries every 15 min
+lens_on: true

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wassup.dev/schema/bindings.json",
+  "title": "wassup bindings.yaml",
+  "type": "object",
+  "required": ["version"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "components": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z0-9][a-z0-9-]*$" },
+      "additionalProperties": { "$ref": "#/$defs/probes" }
+    },
+    "edges": {
+      "type": "object",
+      "propertyNames": { "pattern": "^[a-z0-9][a-z0-9-]*->[a-z0-9][a-z0-9-]*$" },
+      "additionalProperties": { "$ref": "#/$defs/probes" }
+    }
+  },
+  "$defs": {
+    "probes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["probe"],
+        "properties": {
+          "probe": { "type": "string", "pattern": "^[a-z0-9]+\\.[a-z0-9_]+$" }
+        }
+      }
+    }
+  }
+}

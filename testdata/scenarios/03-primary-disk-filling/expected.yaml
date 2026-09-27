@@ -1,0 +1,16 @@
+components:
+  db-primary:
+    state: flowing
+edges:
+  db-primary->db-r2:
+    state: failing
+    label: "failing, replica not streaming for 4 h, 40 GB WAL retained"
+  db-primary->db-r1:
+    state: flowing
+notes_contain:
+  db-primary:
+    - full in about 7 h
+cause: "db-primary->db-r2"
+story_contains:
+  - "db-r2 has not been streaming for 4 h, 40 GB of WAL is retained on db-primary"
+lens_on: true

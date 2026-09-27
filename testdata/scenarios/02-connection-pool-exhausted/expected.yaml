@@ -1,0 +1,15 @@
+components:
+  db:
+    state: flowing
+    severity: warn
+  api:
+    state: flowing
+edges:
+  api->db:
+    state: waiting
+    label: "waiting, 38 queued, at the database"
+    severity: warn
+cause: db
+story_contains:
+  - "API is waiting, 38 queued, at the database"
+  - "database is at 100 of 100 connections, CPU 35 percent, so the pool is the limit, not the database"

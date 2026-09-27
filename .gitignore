@@ -1,0 +1,5 @@
+/dist/
+/wassup
+/.wassup/state/
+**/.wassup/state/
+*.test

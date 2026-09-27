@@ -1,0 +1,21 @@
+components:
+  signoz:
+    state: failing
+    label: "failing, no data received for 40 min"
+edges:
+  fw->signoz:
+    state: blocked
+    label: "blocked at firewall since 11:02, rule allow-lb-only"
+  ingress->api:
+    state: idle
+    marker: nodata
+    label: no data
+  api->cache:
+    marker: nodata
+cause: signoz
+story_contains:
+  - "the firewall changed at 11:02"
+  - observability stopped receiving data
+  - traffic rates on this diagram are unknown since then
+  - "last change on this path: terraform apply, 11:02, by danilo"
+lens_on: true

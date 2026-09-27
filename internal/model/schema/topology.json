@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wassup.dev/schema/topology.json",
+  "title": "wassup topology.yaml",
+  "type": "object",
+  "required": ["version", "name", "components"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "name": { "type": "string", "minLength": 1 },
+    "settings": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "auto_lens": { "type": "boolean" },
+        "lookback": { "type": "string" },
+        "tick": { "type": "string" }
+      }
+    },
+    "groups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "kind"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "kind": { "enum": ["cloud", "region", "cluster", "namespace", "zone"] },
+          "label": { "type": "string" },
+          "parent": { "$ref": "#/$defs/id" }
+        }
+      }
+    },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "type"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "$ref": "#/$defs/id" },
+          "type": { "enum": ["dns", "firewall", "lb", "ingress", "node", "workload", "job", "queue", "cache", "db", "storage", "observability", "external", "custom"] },
+          "label": { "type": "string" },
+          "group": { "$ref": "#/$defs/id" },
+          "lane": { "enum": ["edge", "compute", "data", "side"] },
+          "icon": { "type": "string" },
+          "engine": { "type": "string" },
+          "runs_on": { "type": "array", "items": { "$ref": "#/$defs/id" } },
+          "roles": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "primary": { "$ref": "#/$defs/id" },
+              "replicas": { "type": "array", "items": { "$ref": "#/$defs/id" } }
+            }
+          },
+          "notes": { "type": "string" },
+          "owner": { "type": "string" }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["from", "to", "kind"],
+        "additionalProperties": false,
+        "properties": {
+          "from": { "$ref": "#/$defs/id" },
+          "to": { "$ref": "#/$defs/id" },
+          "kind": { "enum": ["http", "grpc", "tcp", "sql", "replication", "queue", "cache", "external"] },
+          "label": { "type": "string" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]*$" }
+  }
+}

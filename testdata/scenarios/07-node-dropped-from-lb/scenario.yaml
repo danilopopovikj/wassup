@@ -1,0 +1,5 @@
+name: Node dropped out of the load balancer
+symptom: "none, slight latency bump"
+start: "2026-09-27T07:30:00Z"
+duration_s: 120
+tick_s: 5

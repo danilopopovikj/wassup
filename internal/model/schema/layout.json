@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wassup.dev/schema/layout.json",
+  "title": "wassup layout.json",
+  "type": "object",
+  "required": ["version"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "components": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["x", "y"],
+        "additionalProperties": false,
+        "properties": {
+          "x": { "type": "integer" },
+          "y": { "type": "integer" },
+          "w": { "type": "integer", "minimum": 0 },
+          "h": { "type": "integer", "minimum": 0 },
+          "auto": { "type": "boolean" }
+        }
+      }
+    },
+    "collapsed": { "type": "array", "items": { "type": "string" } },
+    "waypoints": { "type": "object", "additionalProperties": { "type": "array", "items": { "type": "array", "items": { "type": "integer" }, "minItems": 2, "maxItems": 2 } } },
+    "graph_split": { "type": "integer", "minimum": 30, "maximum": 90 }
+  }
+}

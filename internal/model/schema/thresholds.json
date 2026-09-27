@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://wassup.dev/schema/thresholds.json",
+  "title": "wassup thresholds.yaml",
+  "type": "object",
+  "required": ["version"],
+  "additionalProperties": false,
+  "properties": {
+    "version": { "const": 1 },
+    "defaults": { "$ref": "#/$defs/set" },
+    "components": {
+      "type": "object",
+      "additionalProperties": { "$ref": "#/$defs/set" }
+    }
+  },
+  "$defs": {
+    "set": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gauge_amber_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "gauge_red_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "disk_failing_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "error_rate_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "timeout_rate_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "queue_depth": { "type": "number", "minimum": 0 },
+        "lag_bytes": { "type": "number", "minimum": 0 },
+        "cert_warn_days": { "type": "number", "minimum": 0 },
+        "hit_rate_min_pct": { "type": "number", "minimum": 0, "maximum": 100 },
+        "stale_ticks": { "type": "integer", "minimum": 1 },
+        "stuck_task_factor": { "type": "number", "minimum": 1 },
+        "rate_spike_factor": { "type": "number", "minimum": 1 },
+        "trend_window_min": { "type": "number", "minimum": 1 }
+      }
+    }
+  }
+}
