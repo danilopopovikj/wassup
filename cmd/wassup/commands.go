@@ -165,7 +165,7 @@ func validateCmd() *cobra.Command {
 						continue
 					}
 					p, _ := probe.New(kind)
-					if err := p.Validate(map[string]any(s)); err != nil {
+					if err := p.Validate(s.Plain()); err != nil {
 						issues = append(issues, model.Problem{File: file, Path: fmt.Sprintf("/%s/%d", id, i), Message: kind + ": " + err.Error()})
 					}
 				}

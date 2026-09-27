@@ -94,25 +94,28 @@ def bindings(workers=("worker",)):
         "cache": [{"probe": "redis.info", "addr": "redis.bookstore:6379"}],
         "db": [{"probe": "cnpg.cluster", "namespace": "bookstore", "cluster": "bookstore-db"}],
         "db-primary": [{"probe": "cnpg.instance", "namespace": "bookstore", "cluster": "bookstore-db", "role": "primary"},
-                       {"probe": "pg.stats", "via": "k8s.workload/api", "dsn_env": "WASSUP_PG_DSN"}],
+                       {"probe": "pg.stats", "via": "k8s.workload/api", "dsn_env": "BOOKSTORE_PG_DSN"}],
         "db-r1": [{"probe": "cnpg.instance", "namespace": "bookstore", "cluster": "bookstore-db", "instance": "bookstore-db-2"}],
         "db-r2": [{"probe": "cnpg.instance", "namespace": "bookstore", "cluster": "bookstore-db", "instance": "bookstore-db-3"}],
-        "signoz": [{"probe": "signoz.health", "url": "http://signoz.signoz:8080"}],
+        "signoz": [{"probe": "signoz.health", "url": "http://signoz.signoz:8080", "token_env": "SIGNOZ_TOKEN"}],
         "github": [{"probe": "http.ping", "url": "https://api.github.com"}],
     }
     for w in workers:
         comps[w] = [{"probe": "k8s.workload", "namespace": "bookstore", "selector": "app=" + w}]
+    SIGNOZ = "http://signoz.signoz:8080"
+    def edge(frm, to):
+        return {"probe": "signoz.edge", "url": SIGNOZ, "token_env": "SIGNOZ_TOKEN", "from": frm, "to": to}
     edges = {
-        "lb->ingress": [{"probe": "signoz.edge", "from": "lb", "to": "ingress"}],
-        "ingress->api": [{"probe": "signoz.edge", "from": "ingress", "to": "api"}],
-        "api->db": [{"probe": "pg.pool", "via": "k8s.workload/api"}, {"probe": "signoz.edge", "from": "api", "to": "postgres"}],
-        "api->cache": [{"probe": "signoz.edge", "from": "api", "to": "redis"}],
-        "db-primary->db-r1": [{"probe": "pg.stats", "via": "k8s.workload/api", "replica": "bookstore-db-2"}],
-        "db-primary->db-r2": [{"probe": "pg.stats", "via": "k8s.workload/api", "replica": "bookstore-db-3"}],
+        "lb->ingress": [edge("lb", "ingress")],
+        "ingress->api": [edge("ingress", "api")],
+        "api->db": [{"probe": "pg.pool", "dsn_env": "BOOKSTORE_PGBOUNCER_DSN", "via": "k8s.workload/api"}, edge("api", "postgres")],
+        "api->cache": [edge("api", "redis")],
+        "db-primary->db-r1": [{"probe": "pg.stats", "dsn_env": "BOOKSTORE_PG_DSN", "via": "k8s.workload/api", "replica": "bookstore-db-2"}],
+        "db-primary->db-r2": [{"probe": "pg.stats", "dsn_env": "BOOKSTORE_PG_DSN", "via": "k8s.workload/api", "replica": "bookstore-db-3"}],
         "fw->signoz": [{"probe": "hcloud.firewall", "name": "bookstore", "port": 4317}],
     }
     for w in workers:
-        edges[w + "->github"] = [{"probe": "signoz.edge", "from": w, "to": "api.github.com"}]
+        edges[w + "->github"] = [edge(w, "api.github.com")]
     return {"version": 1, "components": comps, "edges": edges}
 
 # ------------------------------------------------------------- baseline obs

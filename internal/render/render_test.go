@@ -25,10 +25,13 @@ func TestDrawScenario(t *testing.T) {
 	g := layout.Compute(&run.Config.Topology, run.Config.Layout, layout.DefaultOptions())
 	opts := DrawOptions{Topology: &run.Config.Topology, Snapshot: snap, Selected: "api"}
 	plain := Draw(g, opts).Plain()
-	for _, want := range []string{"● API", "38 queued", "conn ████████ 100/100", "Database (postgres)", "•••••"} {
+	for _, want := range []string{"● API", "38 queued", "conn ████████ 100/100", "Database (postgres)"} {
 		if !strings.Contains(plain, want) {
 			t.Errorf("drawing lacks %q", want)
 		}
+	}
+	if strings.Count(plain, "•") < 3 {
+		t.Errorf("waiting edge should pile dots at the arrowhead, found %d", strings.Count(plain, "•"))
 	}
 	if len(snap.Issues) == 0 {
 		t.Fatal("scenario 02 must produce an issue")

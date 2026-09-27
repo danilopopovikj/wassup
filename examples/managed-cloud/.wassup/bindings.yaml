@@ -34,7 +34,7 @@ components:
   db:
     - { probe: pg.stats, dsn_env: SHOP_PG_DSN, disk_total_bytes: 214748364800 }
   media:
-    - { probe: s3.bucket, bucket: shop-media, region: europe-west1 }
+    - { probe: s3.bucket, bucket: shop-media, endpoint: https://storage.googleapis.com, region: europe-west1 }
   metrics:
     - { probe: http.ping, url: http://prometheus.monitoring:9090/-/healthy }
   stripe:

@@ -57,7 +57,7 @@ components:
       role: primary
     - probe: pg.stats
       via: k8s.workload/api
-      dsn_env: WASSUP_PG_DSN
+      dsn_env: BOOKSTORE_PG_DSN
   db-r1:
     - probe: cnpg.instance
       namespace: bookstore
@@ -71,6 +71,7 @@ components:
   signoz:
     - probe: signoz.health
       url: "http://signoz.signoz:8080"
+      token_env: SIGNOZ_TOKEN
   github:
     - probe: http.ping
       url: "https://api.github.com"
@@ -89,28 +90,39 @@ components:
 edges:
   lb->ingress:
     - probe: signoz.edge
+      url: "http://signoz.signoz:8080"
+      token_env: SIGNOZ_TOKEN
       from: lb
       to: ingress
   ingress->api:
     - probe: signoz.edge
+      url: "http://signoz.signoz:8080"
+      token_env: SIGNOZ_TOKEN
       from: ingress
       to: api
   api->db:
     - probe: pg.pool
+      dsn_env: BOOKSTORE_PGBOUNCER_DSN
       via: k8s.workload/api
     - probe: signoz.edge
+      url: "http://signoz.signoz:8080"
+      token_env: SIGNOZ_TOKEN
       from: api
       to: postgres
   api->cache:
     - probe: signoz.edge
+      url: "http://signoz.signoz:8080"
+      token_env: SIGNOZ_TOKEN
       from: api
       to: redis
   db-primary->db-r1:
     - probe: pg.stats
+      dsn_env: BOOKSTORE_PG_DSN
       via: k8s.workload/api
       replica: bookstore-db-2
   db-primary->db-r2:
     - probe: pg.stats
+      dsn_env: BOOKSTORE_PG_DSN
       via: k8s.workload/api
       replica: bookstore-db-3
   fw->signoz:
@@ -119,13 +131,19 @@ edges:
       port: 4317
   worker-1->github:
     - probe: signoz.edge
+      url: "http://signoz.signoz:8080"
+      token_env: SIGNOZ_TOKEN
       from: worker-1
       to: api.github.com
   worker-2->github:
     - probe: signoz.edge
+      url: "http://signoz.signoz:8080"
+      token_env: SIGNOZ_TOKEN
       from: worker-2
       to: api.github.com
   worker-3->github:
     - probe: signoz.edge
+      url: "http://signoz.signoz:8080"
+      token_env: SIGNOZ_TOKEN
       from: worker-3
       to: api.github.com

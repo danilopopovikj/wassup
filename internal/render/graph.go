@@ -620,56 +620,64 @@ func crossChar(existing, ch rune) rune {
 	return ch
 }
 
-// labelRoute writes the short edge label near the middle of the route.
+// labelRoute writes the short edge label next to the route, trying the
+// longest straight segments first and several offsets on both sides, so a
+// label always finds a free spot unless the picture is packed solid.
 func labelRoute(c *Canvas, g *layout.Graph, r *layout.Route, es model.ElementState, st Style, opts DrawOptions) {
 	n := len(r.Cells)
-	if n < 6 {
+	if n < 4 {
 		return
 	}
 	text := shortEdgeLabel(es)
 	if text == "" {
 		return
 	}
-	// find the longest straight segment and put the label next to it
-	bestStart, bestLen := 0, 0
+	w := len([]rune(text))
+	type seg struct{ start, end int }
+	var segs []seg
 	i := 1
 	for i < n-1 {
 		j := i
 		for j+1 < n-1 && dir(r.Cells[j], r.Cells[j+1]) == dir(r.Cells[i], r.Cells[i+1]) {
 			j++
 		}
-		if j-i > bestLen {
-			bestStart, bestLen = i, j-i
+		if j-i >= 1 {
+			segs = append(segs, seg{i, j})
 		}
 		i = j + 1
 	}
-	if bestLen < 2 {
-		return
+	for a := 1; a < len(segs); a++ {
+		for b := a; b > 0 && (segs[b].end-segs[b].start) > (segs[b-1].end-segs[b-1].start); b-- {
+			segs[b], segs[b-1] = segs[b-1], segs[b]
+		}
 	}
-	mid := r.Cells[bestStart+bestLen/2]
-	horizontal := dir(r.Cells[bestStart], r.Cells[bestStart+1]) == 'h'
 	lst := Style{Fg: st.Fg, Dim: st.Dim}
-	if horizontal {
-		w := len([]rune(text))
-		x := mid.X - w/2
-		y := mid.Y - 1
-		if y < 0 || rowBusy(c, x, y, w) {
-			y = mid.Y + 1
+	for _, sg := range segs {
+		horizontal := dir(r.Cells[sg.start], r.Cells[sg.start+1]) == 'h'
+		mid := (sg.start + sg.end) / 2
+		for _, off := range []int{0, -3, 3, -6, 6} {
+			k := mid + off
+			if k <= sg.start || k >= sg.end {
+				continue
+			}
+			p := r.Cells[k]
+			if horizontal {
+				x := p.X - w/2
+				for _, dy := range []int{-1, 1} {
+					if !rowBusy(c, x, p.Y+dy, w) {
+						c.Text(x, p.Y+dy, text, lst, w)
+						return
+					}
+				}
+			} else {
+				for _, x := range []int{p.X + 1, p.X - 1 - w} {
+					if x >= 0 && x+w <= c.W && !rowBusy(c, x, p.Y, w) {
+						c.Text(x, p.Y, text, lst, w)
+						return
+					}
+				}
+			}
 		}
-		if rowBusy(c, x, y, w) {
-			return
-		}
-		c.Text(x, y, text, lst, w)
-	} else {
-		x := mid.X + 1
-		w := len([]rune(text))
-		if x+w > c.W || rowBusy(c, x, mid.Y, w) {
-			x = mid.X - 1 - w
-		}
-		if x < 0 || rowBusy(c, x, mid.Y, w) {
-			return
-		}
-		c.Text(x, mid.Y, text, lst, w)
 	}
 }
 

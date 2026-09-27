@@ -5,6 +5,7 @@ import (
 	_ "github.com/danilopopovikj/wassup/internal/probe/fixture"
 	_ "github.com/danilopopovikj/wassup/internal/probe/gitevents"
 	_ "github.com/danilopopovikj/wassup/internal/probe/hcloudprobe"
+	_ "github.com/danilopopovikj/wassup/internal/probe/k8s"
 	_ "github.com/danilopopovikj/wassup/internal/probe/netprobe"
 	_ "github.com/danilopopovikj/wassup/internal/probe/pgprobe"
 	_ "github.com/danilopopovikj/wassup/internal/probe/redisprobe"

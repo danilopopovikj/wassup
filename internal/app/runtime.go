@@ -271,10 +271,7 @@ func (r *Runtime) startProbes(ctx context.Context) {
 			r.inst = append(r.inst, in)
 			return
 		}
-		s := map[string]any{}
-		for k, v := range spec {
-			s[k] = v
-		}
+		s := spec.Plain()
 		s["_target"] = target
 		s["_tick"] = tick
 		if strings.HasPrefix(kind, "k8s.") || strings.HasPrefix(kind, "cnpg.") {

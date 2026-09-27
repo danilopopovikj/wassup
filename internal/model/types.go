@@ -2,7 +2,10 @@
 // file in .wassup/, their validation, ids and refs.
 package model
 
-import "time"
+import (
+	"fmt"
+	"time"
+)
 
 // DirName is the directory at the repo root that holds every wassup file.
 const DirName = ".wassup"
@@ -361,4 +364,40 @@ type Issue struct {
 	Severity Severity `json:"severity"` // worst severity on the path
 	Path     []string `json:"path"`     // element ids (components and edges) top to bottom
 	Story    []string `json:"story"`    // one sentence per hop, cause last
+}
+
+// Plain returns the spec as nested plain maps and slices, so probes can type
+// switch on map[string]any regardless of how YAML decoded nested mappings.
+func (p ProbeSpec) Plain() map[string]any {
+	out := make(map[string]any, len(p))
+	for k, v := range p {
+		out[k] = plainValue(v)
+	}
+	return out
+}
+
+func plainValue(v any) any {
+	switch t := v.(type) {
+	case ProbeSpec:
+		return t.Plain()
+	case map[string]any:
+		m := make(map[string]any, len(t))
+		for k, val := range t {
+			m[k] = plainValue(val)
+		}
+		return m
+	case map[any]any:
+		m := make(map[string]any, len(t))
+		for k, val := range t {
+			m[fmt.Sprint(k)] = plainValue(val)
+		}
+		return m
+	case []any:
+		s := make([]any, len(t))
+		for i, val := range t {
+			s[i] = plainValue(val)
+		}
+		return s
+	}
+	return v
 }
