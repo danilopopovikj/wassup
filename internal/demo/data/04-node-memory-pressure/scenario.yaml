@@ -1,0 +1,5 @@
+name: "Node memory pressure, workers OOMKilled"
+symptom: my export never finished
+start: "2026-09-27T09:00:00Z"
+duration_s: 120
+tick_s: 5

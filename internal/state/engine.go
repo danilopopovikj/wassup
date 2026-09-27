@@ -591,6 +591,9 @@ func (c *ctx) incidentFlow(id string) (float64, string, bool) {
 		es := c.snap.Edges[e.ID()]
 		if es.State == model.Flowing {
 			flowing = true
+			if e.Kind == "replication" {
+				continue // lag is not a rate
+			}
 			if es.Rate > best {
 				best = es.Rate
 				unit = es.Unit
@@ -1037,4 +1040,11 @@ func WorstSeverity(s *model.Snapshot) (model.Severity, int, int) {
 		count(es)
 	}
 	return worst, warn, crit
+}
+
+// Gauges rebuilds the gauges of a component from an element state (used
+// when replaying compact history frames that carry metrics but no gauges).
+func Gauges(th model.Thresholds, comp model.Component, es model.ElementState) []model.Gauge {
+	c := &ctx{in: Input{Thresholds: th}}
+	return c.gauges(comp, es)
 }

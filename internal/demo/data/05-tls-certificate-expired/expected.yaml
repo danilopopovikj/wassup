@@ -1,0 +1,10 @@
+components:
+  ingress:
+    state: failing
+    contains: certificate expired
+cause: ingress
+story_contains:
+  - "requests arrive, 1.1k/s"
+  - the certificate at the ingress expired 3 h ago
+  - "renewal has failed since 09-19, DNS challenge error"
+lens_on: true

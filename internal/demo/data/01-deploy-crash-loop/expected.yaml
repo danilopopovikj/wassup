@@ -1,0 +1,23 @@
+components:
+  api:
+    state: failing
+    label: "failing, 1 of 3 replicas, 6 restarts in 5 min"
+    severity: crit
+  lb:
+    state: flowing
+  db:
+    state: flowing
+edges:
+  ingress->api:
+    state: failing
+    label: "failing, 30 percent errors"
+  lb->ingress:
+    state: flowing
+    label: "flowing, 1.1k req/s"
+cause: api
+story_contains:
+  - "requests arrive, 1.1k/s"
+  - load balancer passes them to 3 of 3 nodes
+  - "API is failing, 1 of 3 replicas, 6 restarts in 5 min"
+  - "last change on this path: deploy of api b7e9f21, 09:48, by danilo"
+lens_on: true

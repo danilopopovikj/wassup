@@ -1,0 +1,99 @@
+# A managed cloud cluster (GKE / EKS / AKS style): cloud load balancer, ingress
+# controller, two node pools, a managed Postgres and Redis, an object store.
+version: 1
+name: shop
+settings:
+  auto_lens: true
+groups:
+  - id: cloud
+    kind: cloud
+    label: Cloud
+  - id: cluster
+    kind: cluster
+    label: shop-prod
+    parent: cloud
+  - id: shop
+    kind: namespace
+    label: shop
+    parent: cluster
+components:
+  - id: dns
+    type: dns
+    label: shop.example.com
+    group: cloud
+  - id: lb
+    type: lb
+    label: Cloud load balancer
+    group: cloud
+  - id: ingress
+    type: ingress
+    label: Ingress
+    group: cluster
+    runs_on: [web-1, web-2]
+  - id: web-1
+    type: node
+    group: cluster
+  - id: web-2
+    type: node
+    group: cluster
+  - id: jobs-1
+    type: node
+    group: cluster
+  - id: storefront
+    type: workload
+    label: Storefront
+    group: shop
+    runs_on: [web-1, web-2]
+  - id: checkout
+    type: workload
+    label: Checkout
+    group: shop
+    runs_on: [web-1, web-2]
+  - id: worker
+    type: workload
+    label: Workers
+    group: shop
+    runs_on: [jobs-1]
+  - id: orders-queue
+    type: queue
+    label: Orders queue
+    group: shop
+  - id: nightly-report
+    type: job
+    label: Nightly report
+    group: shop
+  - id: cache
+    type: cache
+    label: Redis
+    group: cloud
+  - id: db
+    type: db
+    label: Postgres
+    group: cloud
+    engine: postgres
+  - id: media
+    type: storage
+    label: Media bucket
+    group: cloud
+  - id: metrics
+    type: observability
+    label: Prometheus
+    group: cluster
+  - id: stripe
+    type: external
+    label: Stripe
+edges:
+  - { from: dns, to: lb, kind: tcp }
+  - { from: lb, to: ingress, kind: http, label: requests }
+  - { from: lb, to: web-1, kind: tcp }
+  - { from: lb, to: web-2, kind: tcp }
+  - { from: ingress, to: storefront, kind: http }
+  - { from: ingress, to: checkout, kind: http }
+  - { from: storefront, to: db, kind: sql }
+  - { from: storefront, to: cache, kind: cache }
+  - { from: checkout, to: db, kind: sql }
+  - { from: checkout, to: stripe, kind: external }
+  - { from: checkout, to: orders-queue, kind: queue }
+  - { from: orders-queue, to: worker, kind: queue }
+  - { from: worker, to: db, kind: sql }
+  - { from: nightly-report, to: db, kind: sql }

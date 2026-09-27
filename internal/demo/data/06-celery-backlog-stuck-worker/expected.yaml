@@ -1,0 +1,15 @@
+components:
+  default-queue:
+    state: waiting
+    label: "waiting, 2.4k queued, oldest 35 min"
+  worker-3:
+    state: processing
+    label: "processing send_digest, 20 min"
+    severity: warn
+  worker-1:
+    state: flowing
+cause: worker-3
+story_contains:
+  - "jobs are queued and growing, 2.4k queued, oldest 35 min"
+  - one worker is stuck on send_digest for 20 min
+  - the others are keeping up

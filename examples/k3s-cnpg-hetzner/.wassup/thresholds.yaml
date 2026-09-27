@@ -1,0 +1,11 @@
+# Optional overrides of the default state thresholds.
+version: 1
+defaults:
+  cert_warn_days: 14
+components:
+  exports-queue:
+    queue_depth: 10
+  default-queue:
+    queue_depth: 500
+  db-primary:
+    disk_failing_pct: 92

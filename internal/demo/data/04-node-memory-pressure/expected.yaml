@@ -1,0 +1,16 @@
+components:
+  node-2:
+    state: failing
+    label: "failing, memory at 96 percent, 2 pods killed"
+  worker:
+    state: failing
+    contains: "killed, out of memory"
+  exports-queue:
+    state: waiting
+    label: "waiting, 12 queued, at workers"
+cause: node-2
+story_contains:
+  - "the exports queue is waiting, 12 queued, at workers"
+  - workers are failing on node-2 because the node is out of memory
+  - "last change on this path: scale of workers to 6, 08:55"
+lens_on: true

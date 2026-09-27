@@ -1,0 +1,5 @@
+name: Deploy crash loop
+symptom: site is giving errors
+start: "2026-09-27T09:50:00Z"
+duration_s: 120
+tick_s: 5

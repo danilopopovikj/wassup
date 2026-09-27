@@ -1,0 +1,30 @@
+# Written by the Scan workflow of the wassup skill.
+version: 1
+findings:
+  - id: worker-no-memory-limit
+    severity: high
+    title: worker has no memory limit
+    component: worker
+    file: deploy/worker.yaml
+    line: 41
+    evidence: "containers[0].resources has requests but no limits; two pods were OOMKilled on node-2"
+    suggested_fix: "add resources.limits.memory: 2Gi and requests.memory: 1.5Gi, then move workers off the API nodes"
+    found_at: 2026-09-27T09:05:00Z
+  - id: celery-no-time-limit
+    severity: medium
+    title: Celery tasks have no time limit
+    component: default-queue
+    file: app/celery.py
+    line: 12
+    evidence: "task_time_limit and task_soft_time_limit are unset; send_digest ran 20 min"
+    suggested_fix: "set task_soft_time_limit=300 and task_time_limit=600 in the Celery config"
+    found_at: 2026-09-27T09:05:00Z
+  - id: firewall-otlp-rule
+    severity: medium
+    title: firewall rule allow-lb-only drops OTLP traffic
+    component: fw
+    file: terraform/firewall.tf
+    line: 27
+    evidence: "the inbound rule set has no entry for tcp/4317; SigNoz ingest dropped to 0 after the last apply"
+    suggested_fix: "add an inbound tcp 4317 rule from the cluster CIDR"
+    found_at: 2026-09-27T11:20:00Z

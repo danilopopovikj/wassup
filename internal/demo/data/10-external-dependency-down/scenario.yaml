@@ -1,0 +1,5 @@
+name: External dependency down
+symptom: docs sync failed
+start: "2026-09-27T16:00:00Z"
+duration_s: 120
+tick_s: 5

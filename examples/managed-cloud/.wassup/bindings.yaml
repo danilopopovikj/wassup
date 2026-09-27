@@ -1,0 +1,44 @@
+# Managed services have no Kubernetes objects: bind them with network probes
+# (http.ping, cert.tls, dns.record) and the database/cache probes over a DSN
+# held in an env var.
+version: 1
+components:
+  dns:
+    - probe: dns.record
+      host: shop.example.com
+  lb:
+    - probe: cert.tls
+      addr: shop.example.com:443
+  ingress:
+    - probe: k8s.ingress
+      namespace: shop
+      name: shop
+  web-1:
+    - { probe: k8s.node, name: gke-shop-web-1 }
+  web-2:
+    - { probe: k8s.node, name: gke-shop-web-2 }
+  jobs-1:
+    - { probe: k8s.node, name: gke-shop-jobs-1 }
+  storefront:
+    - { probe: k8s.workload, namespace: shop, selector: app=storefront }
+  checkout:
+    - { probe: k8s.workload, namespace: shop, selector: app=checkout }
+  worker:
+    - { probe: k8s.workload, namespace: shop, selector: app=worker }
+  orders-queue:
+    - { probe: redis.list, url: redis://redis.shop.internal:6379/1, key: orders }
+  nightly-report:
+    - { probe: k8s.cronjob, namespace: shop, name: nightly-report }
+  cache:
+    - { probe: redis.info, addr: redis.shop.internal:6379, password_env: REDIS_PASSWORD }
+  db:
+    - { probe: pg.stats, dsn_env: SHOP_PG_DSN, disk_total_bytes: 214748364800 }
+  media:
+    - { probe: s3.bucket, bucket: shop-media, region: europe-west1 }
+  metrics:
+    - { probe: http.ping, url: http://prometheus.monitoring:9090/-/healthy }
+  stripe:
+    - { probe: http.ping, url: https://api.stripe.com/healthcheck }
+edges:
+  checkout->db:
+    - { probe: pg.pool, dsn_env: SHOP_PGBOUNCER_DSN, via: k8s.workload/checkout }

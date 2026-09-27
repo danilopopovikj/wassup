@@ -1,0 +1,21 @@
+components:
+  node-3:
+    state: failing
+    label: "failing, not ready, rebooted 07:15"
+  lb:
+    state: flowing
+    severity: warn
+edges:
+  lb->node-3:
+    state: blocked
+    label: "blocked, health check failing since 07:16"
+  lb->node-2:
+    state: flowing
+notes_contain:
+  lb:
+    - 2 of 3 targets healthy
+cause: node-3
+story_contains:
+  - traffic reaches 2 of 3 nodes
+  - "node-3 rebooted at 07:15 and did not rejoin the cluster"
+lens_on: true

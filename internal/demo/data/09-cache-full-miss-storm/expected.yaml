@@ -1,0 +1,19 @@
+components:
+  cache:
+    state: failing
+    label: "failing, memory full, 90 percent misses"
+  db:
+    state: flowing
+    severity: warn
+edges:
+  api->cache:
+    state: flowing
+    contains: 90 percent miss
+  api->db:
+    state: flowing
+    contains: double normal
+cause: cache
+story_contains:
+  - the cache is full and missing 90 percent
+  - "the database is taking double its normal load, CPU 85 percent"
+lens_on: true
