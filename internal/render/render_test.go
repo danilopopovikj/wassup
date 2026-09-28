@@ -127,3 +127,92 @@ func keyCode(k string) rune {
 	}
 	return 0
 }
+
+// machines is a system with the api on two machines, a worker on one, and
+// two services of others.
+func machines() *model.Topology {
+	return &model.Topology{Name: "t", Components: []model.Component{
+		{ID: "n1", Type: "node"}, {ID: "n2", Type: "node"},
+		{ID: "api", Type: "workload", Label: "API", RunsOn: []string{"n1", "n2"}},
+		{ID: "worker", Type: "backgroundworker", Label: "Workers", RunsOn: []string{"n1", "n2"}},
+		{ID: "db", Type: "database", Label: "Database"},
+		{ID: "mail", Type: "external", Label: "Mail"},
+		{ID: "pay", Type: "external", Label: "Payments"},
+	}, Edges: []model.Edge{
+		{From: "api", To: "db", Kind: "sql"}, {From: "worker", To: "db", Kind: "sql"},
+		{From: "api", To: "mail", Kind: "external"}, {From: "api", To: "pay", Kind: "external"},
+		{From: "worker", To: "mail", Kind: "external"},
+	}}
+}
+
+// A machine that holds none of a component's pods shows its name, faint,
+// and no box; no wire ends there.
+func TestAnEmptyPlaceIsNoBoxAndHasNoWire(t *testing.T) {
+	top := machines()
+	g := layout.Compute(top, model.Layout{}, layout.DefaultOptions())
+	snap := &model.Snapshot{Edges: map[string]model.ElementState{}, Components: map[string]model.ElementState{
+		"api": {State: model.Flowing, Label: "flowing, 40 req/s"},
+		"n1":  {State: model.Flowing, Label: "flowing", Hosted: []model.Hosted{{ID: "api", Known: true, Pods: 2, Ready: 2, State: model.Flowing}, {ID: "worker", Known: true, Pods: 1, Ready: 1}}},
+		"n2":  {State: model.Flowing, Label: "flowing", Hosted: []model.Hosted{{ID: "api", Known: true, Pods: 0}, {ID: "worker", Known: true, Pods: 1, Ready: 1}}},
+	}}
+	c := Draw(g, DrawOptions{Topology: top, Snapshot: snap})
+	plain := c.Plain()
+	if !strings.Contains(plain, "API, none here") || strings.Count(plain, "API ×2") != 1 {
+		t.Errorf("the api runs on one machine and is named on the other:\n%s", plain)
+	}
+	empty := g.Boxes["api@n2"]
+	if got := c.Get(empty.X, empty.Y).Ch; got != ' ' {
+		t.Errorf("the empty place has a border: %q", got)
+	}
+	for id, r := range g.Routes {
+		if r.From != "api@n2" {
+			continue
+		}
+		// the first cell of a route from the empty place is its own
+		if p := r.Cells[0]; c.Get(p.X, p.Y).Ch != ' ' {
+			t.Errorf("%s is drawn from a place that holds nothing: %q at %v", id, c.Get(p.X, p.Y).Ch, p)
+		}
+	}
+	// without a word of the cluster every copy is drawn
+	plain = Draw(g, DrawOptions{Topology: top, Snapshot: &model.Snapshot{Components: map[string]model.ElementState{}, Edges: map[string]model.ElementState{}}}).Plain()
+	if strings.Contains(plain, "none here") || strings.Count(plain, "API") != 2 {
+		t.Errorf("nothing is known of the machines:\n%s", plain)
+	}
+}
+
+// Where the routes of one net meet they are joined; where two nets meet
+// they cross, and a crossing is drawn as one line over the other, never as
+// a junction.
+func TestNetsCrossAndTheirRoutesJoin(t *testing.T) {
+	top := machines()
+	g := layout.Compute(top, model.Layout{}, layout.DefaultOptions())
+	c := Draw(g, DrawOptions{Topology: top, Snapshot: &model.Snapshot{Components: map[string]model.ElementState{}, Edges: map[string]model.ElementState{}}})
+	nets := map[layout.Point]map[string]bool{}
+	ends := map[layout.Point]bool{}
+	for _, r := range g.Routes {
+		for _, p := range r.Cells {
+			if nets[p] == nil {
+				nets[p] = map[string]bool{}
+			}
+			nets[p][r.Net] = true
+		}
+		ends[r.Cells[len(r.Cells)-1]] = true
+	}
+	crossings, joints := 0, 0
+	for p, of := range nets {
+		ch := c.Get(p.X, p.Y).Ch
+		switch {
+		case ends[p]:
+		case len(of) > 1:
+			crossings++
+			if !strings.ContainsRune("─│┄┆╌╎", ch) {
+				t.Errorf("two nets meet at %v and are drawn as %q", p, ch)
+			}
+		case strings.ContainsRune("┬┴├┤┼", ch):
+			joints++
+		}
+	}
+	if crossings == 0 || joints == 0 {
+		t.Errorf("crossings %d, joints %d: the picture has both", crossings, joints)
+	}
+}
