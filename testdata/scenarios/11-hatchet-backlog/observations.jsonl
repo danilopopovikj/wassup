@@ -10,8 +10,8 @@
 {"at":0,"target":"ingress","probe":"k8s.ingress","metrics":{"rate":1100,"error_rate":0.2,"cert_days":61},"detail":{"hosts":["bookstore.example"]}}
 {"at":0,"target":"lb->ingress","probe":"signoz.edge","metrics":{"rate":1100,"error_rate":0.2,"p95_ms":80}}
 {"at":0,"target":"ingress->api","probe":"signoz.edge","metrics":{"rate":1100,"error_rate":0.2,"p95_ms":78}}
-{"at":0,"target":"api","probe":"k8s.workload","metrics":{"replicas_ready":3,"replicas_desired":3,"cpu_pct":40,"mem_pct":55,"restarts":0},"detail":{"image":"ghcr.io/bookstore/api:a1b2c3d","kind":"Deployment"}}
-{"at":0,"target":"worker","probe":"k8s.workload","metrics":{"replicas_ready":4,"replicas_desired":4,"cpu_pct":35,"mem_pct":60,"restarts":0},"detail":{"image":"ghcr.io/bookstore/worker:a1b2c3d","kind":"Deployment"}}
+{"at":0,"target":"api","probe":"k8s.workload","metrics":{"replicas_ready":3,"replicas_desired":3,"cpu_pct":40,"mem_pct":55,"restarts":0},"detail":{"image":"ghcr.io/bookstore/api:a1b2c3d","kind":"Deployment","placement":{"node-1":{"pods":1,"ready":1},"node-2":{"pods":1,"ready":1},"node-3":{"pods":1,"ready":1}}}}
+{"at":0,"target":"worker","probe":"k8s.workload","metrics":{"replicas_ready":4,"replicas_desired":4,"cpu_pct":35,"mem_pct":60,"restarts":0},"detail":{"image":"ghcr.io/bookstore/worker:a1b2c3d","kind":"Deployment","placement":{"node-1":{"pods":2,"ready":2},"node-2":{"pods":2,"ready":2}}}}
 {"at":0,"target":"default-queue->worker","probe":"celery.queue","metrics":{"rate":12.0}}
 {"at":0,"target":"exports-queue->worker","probe":"celery.queue","metrics":{"rate":0.2}}
 {"at":0,"target":"worker->db","probe":"signoz.edge","metrics":{"rate":50,"error_rate":0}}
@@ -32,13 +32,14 @@
 {"at":0,"target":"signoz","probe":"signoz.health","metrics":{"ingest_rate":2100,"disk_pct":38}}
 {"at":0,"target":"fw->signoz","probe":"hcloud.firewall","metrics":{"rate":500}}
 {"at":0,"target":"github","probe":"http.ping","metrics":{"latency_ms":120,"error_rate":0,"timeout_rate":0}}
-{"at":0,"target":"hatchet","probe":"k8s.workload","metrics":{"replicas_ready":2,"replicas_desired":2,"cpu_pct":22,"mem_pct":48,"restarts":0}}
+{"at":0,"target":"hatchet","probe":"k8s.workload","metrics":{"replicas_ready":2,"replicas_desired":2,"cpu_pct":22,"mem_pct":48,"restarts":0},"detail":{"kind":"Deployment","placement":{"node-1":{"pods":1,"ready":1},"node-2":{"pods":1,"ready":1}}}}
 {"at":0,"target":"hatchet","probe":"hatchet.health","metrics":{"latency_ms":9,"ready":1},"detail":{"version":"v0.62.1"}}
 {"at":0,"target":"hatchet-queue","probe":"hatchet.queue","metrics":{"depth":850,"pending":120,"running":24,"consumers":6,"oldest_age_s":840,"growth_per_min":30}}
-{"at":0,"target":"hatchet-workers","probe":"k8s.workload","metrics":{"replicas_ready":6,"replicas_desired":6,"cpu_pct":44,"mem_pct":57,"restarts":0}}
+{"at":0,"target":"hatchet-workers","probe":"k8s.workload","metrics":{"replicas_ready":6,"replicas_desired":6,"cpu_pct":44,"mem_pct":57,"restarts":0},"detail":{"kind":"Deployment","placement":{"node-2":{"pods":3,"ready":3},"node-3":{"pods":3,"ready":3}}}}
 {"at":0,"target":"hatchet-workers","probe":"hatchet.workers","metrics":{"workers_online":6,"workers_total":6,"pool_used":24,"pool_max":24,"active":24,"waiters":850,"running_s":1500,"p95_s":90},"conditions":[{"kind":"PoolExhausted","ref":"workers/hatchet-worker","since_s":-600,"detail":"all 24 slots busy"},{"kind":"TaskRunning","ref":"task/3f9a","since_s":-1380,"detail":"generate-invoice"}],"detail":{"long_tasks":["generate-invoice 25 min (tenant acme)"]}}
 {"at":0,"target":"billing","probe":"hatchet.workflow","metrics":{"active":0,"succeeded":20,"failed":3,"queued":40},"detail":{"schedule":"cron 0 * * * *","cron":"0 * * * *","last_failure":"8c1d"},"conditions":[{"kind":"JobFailed","ref":"run/8c1d","since_s":-360,"detail":"step generate-invoice timed out after 900 s"}]}
 {"at":0,"target":"hatchet-db","probe":"pg.stats","metrics":{"cpu_pct":18,"mem_pct":40,"disk_pct":35,"connections_used":30,"connections_max":200}}
+{"at":0,"target":"electric","probe":"k8s.workload","metrics":{"replicas_ready":1,"replicas_desired":1,"cpu_pct":12,"mem_pct":30,"restarts":0},"detail":{"kind":"Deployment","placement":{"node-1":{"pods":1,"ready":1}}}}
 {"at":0,"target":"electric","probe":"electric.sync","metrics":{"latency_ms":6,"ready":1,"shape_ms":40,"up_to_date":1,"columns":9},"detail":{"status":"active","table":"public.issues"}}
 {"at":0,"target":"electric","probe":"pg.stats","metrics":{"lag_bytes":1024,"streaming":1}}
 {"at":0,"target":"api->hatchet-queue","probe":"signoz.edge","metrics":{"rate":8}}

@@ -111,6 +111,9 @@ components:
     - probe: pg.stats
       dsn_env: HATCHET_PG_DSN
   electric:
+    - probe: k8s.workload
+      namespace: bookstore
+      selector: app=electric
     - probe: electric.sync
       url: "http://electric.bookstore:3000"
       secret_env: ELECTRIC_SECRET

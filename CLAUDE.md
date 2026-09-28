@@ -89,8 +89,10 @@ Probes (`internal/probe/*`) read a provider and fill a facet
 (`internal/state`) turns each joined view into exactly one state, a label, a
 severity, and computes the issue lens: lit path, cause, story. History
 (`internal/history`) keeps compact frames for the timeline, trends and
-baselines. Layout (`internal/layout`) places lanes and routes edges with an
-orthogonal A*. The renderer (`internal/render`) paints a canvas and hosts the
+baselines. Layout (`internal/layout`) places lanes (edge, machines, compute, data,
+side) and routes edges with an orthogonal A*; the machines row holds the
+nodes in topology order, each listing what runs on it from `runs_on` and the
+live pod placement. The renderer (`internal/render`) paints a canvas and hosts the
 Bubble Tea model. Discovery (`internal/discover`) reads Terraform, manifests,
 Helm values, `.env`, code and the cluster into evidence and proposes topology
 and bindings. The runtime (`internal/app`) wires it all and hot-reloads

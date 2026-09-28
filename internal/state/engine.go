@@ -112,12 +112,7 @@ func Evaluate(in Input) *model.Snapshot {
 			es.Detail = map[string]any{}
 		}
 		if comp.Type == "node" {
-			var hosted []string
-			for _, w := range c.t.Hosted(id) {
-				ws := c.snap.Components[w.ID]
-				hosted = append(hosted, w.ID+":"+string(ws.State))
-			}
-			es.Detail["hosted"] = hosted
+			es.Hosted = c.hostedOn(id)
 		}
 		c.snap.Components[id] = es
 	}
@@ -1085,4 +1080,115 @@ func WorstSeverity(s *model.Snapshot) (model.Severity, int, int) {
 func Gauges(th model.Thresholds, comp model.Component, es model.ElementState) []model.Gauge {
 	c := &ctx{in: Input{Thresholds: th}}
 	return c.gauges(comp, es)
+}
+
+// hostedOn lists what runs on a node: every component whose runs_on names
+// it, plus any whose live placement (the pods the provider saw on this
+// node) does, with the per-node counts when known. The row takes the
+// component's state, except that live counts tell the truth locally: a
+// failing workload whose pods on this node are all ready and quiet reads
+// flowing here, and a pod that is not ready on this node fails here even
+// when the workload as a whole still has enough replicas.
+func (c *ctx) hostedOn(nodeID string) []model.Hosted {
+	var out []model.Hosted
+	seen := map[string]bool{}
+	add := func(comp model.Component) {
+		if seen[comp.ID] {
+			return
+		}
+		seen[comp.ID] = true
+		ws := c.snap.Components[comp.ID]
+		h := model.Hosted{ID: comp.ID, Label: comp.DisplayLabel(), State: ws.State, Marker: ws.Marker}
+		if pl, ok := c.placementOf(comp.ID)[nodeID]; ok {
+			h.Known, h.Pods, h.Ready, h.Restarts = true, pl.Pods, pl.Ready, pl.Restarts
+			switch {
+			case pl.Pods == 0:
+				h.State = model.Idle
+			case pl.Ready < pl.Pods:
+				h.State = model.Failing
+			case ws.State == model.Failing && pl.Restarts == 0:
+				h.State = model.Flowing
+			}
+		}
+		out = append(out, h)
+	}
+	for _, comp := range c.t.Hosted(nodeID) {
+		add(comp)
+	}
+	var extra []model.Component
+	for _, comp := range c.t.Components {
+		if seen[comp.ID] {
+			continue
+		}
+		if _, ok := c.placementOf(comp.ID)[nodeID]; ok {
+			extra = append(extra, comp)
+		}
+	}
+	sort.Slice(extra, func(i, j int) bool { return extra[i].ID < extra[j].ID })
+	for _, comp := range extra {
+		add(comp)
+	}
+	return out
+}
+
+// placement is what a provider reported about one component on one node.
+type placement struct{ Pods, Ready, Restarts int }
+
+// placementOf reads the "placement" detail a workload probe leaves: node
+// name -> pods, ready, restarts. Node names are matched to node ids
+// directly, then by slug, so "worker-node-2" finds worker-node-2.
+func (c *ctx) placementOf(compID string) map[string]placement {
+	j := c.joined(compID)
+	if j == nil {
+		return nil
+	}
+	raw, ok := j.Detail["placement"]
+	if !ok {
+		return nil
+	}
+	out := map[string]placement{}
+	each := func(node string, fields map[string]any) {
+		id := node
+		if _, ok := c.t.Component(id); !ok {
+			id = model.SlugifyID(node)
+		}
+		out[id] = placement{Pods: toInt(fields["pods"]), Ready: toInt(fields["ready"]), Restarts: toInt(fields["restarts"])}
+	}
+	switch m := raw.(type) {
+	case map[string]any:
+		for node, v := range m {
+			switch f := v.(type) {
+			case map[string]any:
+				each(node, f)
+			case map[string]int:
+				fa := map[string]any{}
+				for k, n := range f {
+					fa[k] = n
+				}
+				each(node, fa)
+			}
+		}
+	case map[string]map[string]int:
+		for node, f := range m {
+			fa := map[string]any{}
+			for k, n := range f {
+				fa[k] = n
+			}
+			each(node, fa)
+		}
+	}
+	return out
+}
+
+// toInt reads a JSON or Go number.
+func toInt(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	}
+	return 0
 }

@@ -5,14 +5,17 @@ type Lane string
 
 // Lanes top to bottom, side on the right.
 const (
-	LaneEdge    Lane = "edge"
-	LaneCompute Lane = "compute"
-	LaneData    Lane = "data"
-	LaneSide    Lane = "side"
+	LaneEdge Lane = "edge"
+	// LaneMachines holds the nodes: the actual machines, drawn as a row
+	// between the edge and the workloads, each listing what runs on it.
+	LaneMachines Lane = "machines"
+	LaneCompute  Lane = "compute"
+	LaneData     Lane = "data"
+	LaneSide     Lane = "side"
 )
 
 // AllLanes in drawing order.
-var AllLanes = []Lane{LaneEdge, LaneCompute, LaneData, LaneSide}
+var AllLanes = []Lane{LaneEdge, LaneMachines, LaneCompute, LaneData, LaneSide}
 
 // GaugeSpec describes one gauge a type shows in its box.
 type GaugeSpec struct {
@@ -58,7 +61,7 @@ var Catalog = map[string]TypeSpec{
 		{Name: "errors", Short: "err", Metric: "error_rate", Unit: "%"},
 		{Name: "cert", Metric: "cert_days", Unit: "d", Countdown: true},
 	}, Probes: []string{"k8s.ingress", "cert.tls"}, Entry: true, Notes: "Merges into lb box when both exist and user prefers"},
-	"node": {Type: "node", Lane: LaneCompute, Facets: []string{"NodeFacet"}, Gauges: []GaugeSpec{
+	"node": {Type: "node", Lane: LaneMachines, Facets: []string{"NodeFacet"}, Gauges: []GaugeSpec{
 		{Name: "cpu", Metric: "cpu_pct"},
 		{Name: "ram", Metric: "mem_pct"},
 		{Name: "disk", Metric: "disk_pct"},
@@ -169,7 +172,7 @@ func RateUnit(kind string) string {
 // LaneOf returns the lane of a component, honoring the lane override.
 func LaneOf(c Component) Lane {
 	switch Lane(c.Lane) {
-	case LaneEdge, LaneCompute, LaneData, LaneSide:
+	case LaneEdge, LaneMachines, LaneCompute, LaneData, LaneSide:
 		return Lane(c.Lane)
 	}
 	if t, ok := Catalog[c.Type]; ok {

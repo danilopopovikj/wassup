@@ -347,27 +347,27 @@ func drawBox(c *Canvas, g *layout.Graph, b *layout.Box, snap *model.Snapshot, op
 		drawGauge(c, x, y, inner, gg)
 		y++
 	}
-	// Hosted workloads for nodes: one line normally, one per row in full.
-	if comp.Type == "node" && opts.Detail != model.DetailMinimal {
-		hosted := hostedList(es)
-		if opts.Detail == model.DetailFull {
-			for _, h := range hosted {
-				if y >= b.Bottom()-1 {
-					break
-				}
-				c.Text(x, y, h.state.Glyph()+" "+h.id, Style{Fg: StateColor(h.state)}, inner)
+	// What runs on a node: one row per component, the troubled ones first
+	// so they survive the clipping, "+N more" when the box is short.
+	if comp.Type == "node" && opts.Detail != model.DetailMinimal && len(es.Hosted) > 0 {
+		hosted := append([]model.Hosted(nil), es.Hosted...)
+		sort.SliceStable(hosted, func(i, j int) bool { return stateRank(hosted[i].State) > stateRank(hosted[j].State) })
+		limit := len(hosted)
+		if opts.Detail != model.DetailFull && limit > model.MaxHostedRows {
+			limit = model.MaxHostedRows
+		}
+		for i, h := range hosted {
+			if y >= b.Bottom()-1 {
+				break
+			}
+			if i == limit-1 && len(hosted) > limit {
+				c.Text(x, y, fmt.Sprintf("+%d more", len(hosted)-i), Style{Fg: ColGray, Dim: true}, inner)
 				y++
+				break
 			}
-		} else if len(hosted) > 0 && y < b.Bottom()-1 {
-			// failing workloads first so they survive the clipping
-			sort.SliceStable(hosted, func(i, j int) bool { return stateRank(hosted[i].state) > stateRank(hosted[j].state) })
-			xx := x
-			for _, h := range hosted {
-				if xx-x+len([]rune(h.id))+2 > inner {
-					break
-				}
-				xx += c.Text(xx, y, h.state.Glyph()+" "+h.id+" ", Style{Fg: StateColor(h.state)}, inner-(xx-x))
-			}
+			glyph, text, st := hostedRow(h)
+			c.Text(x, y, glyph+" ", st, 2)
+			c.Text(x+2, y, ellipsis(text, inner-2), st, inner-2)
 			y++
 		}
 	}
@@ -411,30 +411,38 @@ func ellipsis(s string, w int) string {
 	return string(r[:w-1]) + "…"
 }
 
-type hostedEntry struct {
-	id    string
-	state model.State
-}
-
-func hostedList(es model.ElementState) []hostedEntry {
-	var out []hostedEntry
-	add := func(h string) {
-		id, stt, _ := strings.Cut(h, ":")
-		out = append(out, hostedEntry{id: id, state: model.State(stt)})
+// hostedRow words one row of a node box: "● API ×2", "✗ API ×1 · 0 of 1
+// ready", "┄ Ingress" for a component with no probe data.
+func hostedRow(h model.Hosted) (glyph, text string, st Style) {
+	glyph = h.State.Glyph()
+	st = Style{Fg: StateColor(h.State)}
+	switch h.Marker {
+	case model.MarkerUnbound:
+		glyph, st = "┄", Style{Fg: ColGray, Dim: true}
+	case model.MarkerStale:
+		glyph, st.Dim = "◷", true
 	}
-	switch v := es.Detail["hosted"].(type) {
-	case []string:
-		for _, h := range v {
-			add(h)
-		}
-	case []any:
-		for _, h := range v {
-			if s, ok := h.(string); ok {
-				add(s)
-			}
-		}
+	if h.State == model.Idle && h.Marker == "" {
+		st.Dim = true
 	}
-	return out
+	text = h.Label
+	switch {
+	case !h.Known:
+		if h.State != model.Flowing && h.State != model.Idle {
+			text += " · " + string(h.State)
+		}
+	case h.Pods == 0:
+		text += " · none here"
+	case h.Ready < h.Pods:
+		text += fmt.Sprintf(" · %d of %d ready", h.Ready, h.Pods)
+	case h.Restarts > 0:
+		text += fmt.Sprintf(" ×%d · %d restarts", h.Pods, h.Restarts)
+	case h.State != model.Flowing && h.State != model.Idle:
+		text += fmt.Sprintf(" ×%d · %s", h.Pods, h.State)
+	default:
+		text += fmt.Sprintf(" ×%d", h.Pods)
+	}
+	return glyph, text, st
 }
 
 // isStamp reports whether a note is a change marker ("deploy 09:48 b7e9f21").
@@ -802,14 +810,14 @@ func labelRoute(c *Canvas, g *layout.Graph, r *layout.Route, es model.ElementSta
 			if horizontal {
 				x := p.X - w/2
 				for _, dy := range []int{-1, 1} {
-					if !rowBusy(c, x, p.Y+dy, w) {
+					if !rowBusy(c, x, p.Y+dy, w) && !overBox(g, x, p.Y+dy, w) {
 						c.Text(x, p.Y+dy, text, lst, w)
 						return
 					}
 				}
 			} else {
 				for _, x := range []int{p.X + 1, p.X - 1 - w} {
-					if x >= 0 && x+w <= c.W && !rowBusy(c, x, p.Y, w) {
+					if x >= 0 && x+w <= c.W && !rowBusy(c, x, p.Y, w) && !overBox(g, x, p.Y, w) {
 						c.Text(x, p.Y, text, lst, w)
 						return
 					}
@@ -817,6 +825,17 @@ func labelRoute(c *Canvas, g *layout.Graph, r *layout.Route, es model.ElementSta
 			}
 		}
 	}
+}
+
+// overBox reports whether a label of width w at (x, y) would touch a box.
+// Boxes are painted after labels, so a label allowed there would be cut.
+func overBox(g *layout.Graph, x, y, w int) bool {
+	for _, b := range g.Boxes {
+		if y >= b.Y && y < b.Bottom() && x+w > b.X-1 && x-1 < b.Right() {
+			return true
+		}
+	}
+	return false
 }
 
 func rowBusy(c *Canvas, x, y, w int) bool {

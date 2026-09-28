@@ -290,15 +290,31 @@ func Compute(t *model.Topology, l model.Layout, opts Options) *Graph {
 			pos[items[idx].id] = float64(k)
 		}
 	}
-	main := []model.Lane{model.LaneEdge, model.LaneCompute, model.LaneData}
+	main := []model.Lane{model.LaneEdge, model.LaneMachines, model.LaneCompute, model.LaneData}
+	// The machines row keeps the topology's order (node-1, node-2, ...): a
+	// machine is where it is, not where its traffic pulls it. For the
+	// barycenter the row is transparent: the edge and compute lanes still
+	// order themselves by each other.
+	adjacent := func(i, step int) func(model.Lane) bool {
+		set := map[model.Lane]bool{}
+		for j := i + step; j >= 0 && j < len(main); j += step {
+			set[main[j]] = true
+			if main[j] != model.LaneMachines {
+				break
+			}
+		}
+		return func(l model.Lane) bool { return set[l] }
+	}
 	for sweepN := 0; sweepN < 2; sweepN++ {
 		for i := 1; i < len(main); i++ {
-			prev := main[i-1]
-			sweep(main[i], func(l model.Lane) bool { return l == prev })
+			if main[i] != model.LaneMachines {
+				sweep(main[i], adjacent(i, -1))
+			}
 		}
 		for i := len(main) - 2; i >= 0; i-- {
-			next := main[i+1]
-			sweep(main[i], func(l model.Lane) bool { return l == next })
+			if main[i] != model.LaneMachines {
+				sweep(main[i], adjacent(i, +1))
+			}
 		}
 	}
 	sweep(model.LaneSide, func(l model.Lane) bool { return l != model.LaneSide })
@@ -329,27 +345,37 @@ func Compute(t *model.Topology, l model.Layout, opts Options) *Graph {
 		if w < 25 && gauges > 0 {
 			w = 25
 		}
+		// A node lists what runs on it, one row each: "● API ×2".
+		hosted := 0
+		if c.Type == "node" {
+			for _, hc := range t.Hosted(c.ID) {
+				hosted++
+				// room for "Workers · 1 of 3 ready" beside the glyph
+				if lw := len([]rune(hc.DisplayLabel())) + 20; lw > w {
+					w = lw
+				}
+			}
+			if w < 28 {
+				w = 28
+			}
+		}
 		switch opts.Detail {
 		case model.DetailMinimal:
 			// border(2) + label + state + one note line
 			h = 2 + 1 + 1 + 1
 		case model.DetailFull:
-			// border(2) + label + state + gauges + note lines
-			h = 2 + 1 + 1 + gauges + 2
-			if c.Type == "node" {
-				hosted := len(t.Hosted(c.ID))
-				if hosted > 4 {
-					hosted = 4
-				}
-				h += hosted
-			}
+			// border(2) + label + state + gauges + note lines + every row
+			h = 2 + 1 + 1 + gauges + 2 + hosted
 		default:
 			if gauges > 3 {
 				gauges = 3
 			}
-			// border(2) + label + state + up to three gauges + one line for
-			// hosted workloads or a change stamp
+			// border(2) + label + state + up to three gauges + one line for a
+			// change stamp; nodes add their rows (at most maxHostedRows)
 			h = 2 + 1 + 1 + gauges + 1
+			if hosted > 0 {
+				h += min(hosted, model.MaxHostedRows)
+			}
 		}
 		if opts.Compact {
 			h = 2 + 1 + 1 + 1

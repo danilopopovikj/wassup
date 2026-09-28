@@ -131,7 +131,8 @@ def bindings(workers=("worker",), extras=False):
                                 {"probe": "hatchet.workers", "long_task": "10m", **HATCHET}],
             "billing": [{"probe": "hatchet.workflow", "workflow": "billing", **HATCHET}],
             "hatchet-db": [{"probe": "pg.stats", "dsn_env": "HATCHET_PG_DSN"}],
-            "electric": [{"probe": "electric.sync", "url": "http://electric.bookstore:3000", "secret_env": "ELECTRIC_SECRET", "table": "public.issues"},
+            "electric": [{"probe": "k8s.workload", "namespace": "bookstore", "selector": "app=electric"},
+                         {"probe": "electric.sync", "url": "http://electric.bookstore:3000", "secret_env": "ELECTRIC_SECRET", "table": "public.issues"},
                          {"probe": "pg.stats", "dsn_env": "BOOKSTORE_PG_DSN", "replica": "electric_slot_default"}],
         })
     SIGNOZ = "http://signoz.signoz:8080"
@@ -155,6 +156,23 @@ def bindings(workers=("worker",), extras=False):
     return {"version": 1, "components": comps, "edges": edges}
 
 # ------------------------------------------------------------- baseline obs
+def place(*nodes):
+    """Pod placement as the k8s.workload probe reports it: node -> pods, ready
+    (and restarts in the window). Each argument is (node, pods) or
+    (node, pods, ready) or (node, pods, ready, restarts)."""
+    out = {}
+    for n in nodes:
+        node, pods = n[0], n[1]
+        ready = n[2] if len(n) > 2 else pods
+        entry = {"pods": pods, "ready": ready}
+        if len(n) > 3 and n[3]:
+            entry["restarts"] = n[3]
+        out[node] = entry
+    return out
+
+API_PLACE = place(("node-1", 1), ("node-2", 1), ("node-3", 1))
+WORKER_PLACE = place(("node-1", 2), ("node-2", 2))
+
 def baseline(workers=("worker",), extras=False):
     """A healthy system at t=0."""
     o = []
@@ -175,10 +193,10 @@ def baseline(workers=("worker",), extras=False):
     rec("lb->ingress", "signoz.edge", {"rate": 1100, "error_rate": 0.2, "p95_ms": 80})
     rec("ingress->api", "signoz.edge", {"rate": 1100, "error_rate": 0.2, "p95_ms": 78})
     rec("api", "k8s.workload", {"replicas_ready": 3, "replicas_desired": 3, "cpu_pct": 40, "mem_pct": 55, "restarts": 0},
-        detail={"image": "ghcr.io/bookstore/api:a1b2c3d", "kind": "Deployment"})
+        detail={"image": "ghcr.io/bookstore/api:a1b2c3d", "kind": "Deployment", "placement": API_PLACE})
     for w in workers:
         rec(w, "k8s.workload", {"replicas_ready": 4, "replicas_desired": 4, "cpu_pct": 35, "mem_pct": 60, "restarts": 0},
-            detail={"image": "ghcr.io/bookstore/worker:a1b2c3d", "kind": "Deployment"})
+            detail={"image": "ghcr.io/bookstore/worker:a1b2c3d", "kind": "Deployment", "placement": WORKER_PLACE})
         rec("default-queue->" + w, "celery.queue", {"rate": 12 / len(workers)})
         rec("exports-queue->" + w, "celery.queue", {"rate": 0.2 / len(workers)})
         rec(w + "->db", "signoz.edge", {"rate": 50, "error_rate": 0})
@@ -200,13 +218,17 @@ def baseline(workers=("worker",), extras=False):
     rec("fw->signoz", "hcloud.firewall", {"rate": 500})
     rec("github", "http.ping", {"latency_ms": 120, "error_rate": 0, "timeout_rate": 0})
     if extras:
-        rec("hatchet", "k8s.workload", {"replicas_ready": 2, "replicas_desired": 2, "cpu_pct": 22, "mem_pct": 48, "restarts": 0})
+        rec("hatchet", "k8s.workload", {"replicas_ready": 2, "replicas_desired": 2, "cpu_pct": 22, "mem_pct": 48, "restarts": 0},
+            detail={"kind": "Deployment", "placement": place(("node-1", 1), ("node-2", 1))})
         rec("hatchet", "hatchet.health", {"latency_ms": 9, "ready": 1}, detail={"version": "v0.62.1"})
         rec("hatchet-queue", "hatchet.queue", {"depth": 4, "pending": 0, "running": 12, "consumers": 6, "oldest_age_s": 3})
-        rec("hatchet-workers", "k8s.workload", {"replicas_ready": 6, "replicas_desired": 6, "cpu_pct": 44, "mem_pct": 57, "restarts": 0})
+        rec("hatchet-workers", "k8s.workload", {"replicas_ready": 6, "replicas_desired": 6, "cpu_pct": 44, "mem_pct": 57, "restarts": 0},
+            detail={"kind": "Deployment", "placement": place(("node-2", 3), ("node-3", 3))})
         rec("hatchet-workers", "hatchet.workers", {"workers_online": 6, "workers_total": 6, "pool_used": 12, "pool_max": 24, "active": 12, "waiters": 4})
         rec("billing", "hatchet.workflow", {"active": 0, "succeeded": 23, "failed": 0, "queued": 0}, detail={"schedule": "cron 0 * * * *", "cron": "0 * * * *"})
         rec("hatchet-db", "pg.stats", {"cpu_pct": 18, "mem_pct": 40, "disk_pct": 35, "connections_used": 30, "connections_max": 200})
+        rec("electric", "k8s.workload", {"replicas_ready": 1, "replicas_desired": 1, "cpu_pct": 12, "mem_pct": 30, "restarts": 0},
+            detail={"kind": "Deployment", "placement": place(("node-1", 1))})
         rec("electric", "electric.sync", {"latency_ms": 6, "ready": 1, "shape_ms": 40, "up_to_date": 1, "columns": 9}, detail={"status": "active", "table": "public.issues"})
         rec("electric", "pg.stats", {"lag_bytes": 1024, "streaming": 1})
         rec("api->hatchet-queue", "signoz.edge", {"rate": 8})
@@ -246,6 +268,7 @@ override(obs, "api", metrics={"replicas_ready": 2, "replicas_desired": 3, "cpu_p
                       "detail": "migration 0042_add_invoice_index failed: relation \"invoices\" does not exist"}],
          events=[{"at_s": -120, "kind": "deploy", "summary": "deploy of api b7e9f21", "author": "danilo", "ref": "b7e9f21"}],
          detail={"image": "ghcr.io/bookstore/api:b7e9f21", "kind": "Deployment",
+                 "placement": place(("node-1", 1), ("node-2", 1, 0, 6), ("node-3", 1)),
                  "last_logs": ["django.db.utils.ProgrammingError: relation \"invoices\" does not exist",
                                "  File \"manage.py\", line 22, in <module>", "Error: migration failed, exiting"]})
 override(obs, "ingress->api", metrics={"rate": 1100, "error_rate": 30, "p95_ms": 95})
@@ -315,7 +338,9 @@ override(obs, "node-2", metrics={"cpu_pct": 55, "mem_pct": 96, "disk_pct": 48, "
 override(obs, "worker", metrics={"replicas_ready": 4, "replicas_desired": 6, "cpu_pct": 70, "mem_pct": 92, "restarts": 2, "killed": 2, "evicted": 1},
          conditions=[{"kind": "OOMKilled", "ref": "pod/worker-6c9d-k2pq", "since_s": -400, "detail": "limit 2Gi"},
                      {"kind": "Evicted", "ref": "pod/worker-6c9d-m1nn", "since_s": -300}],
-         events=[{"at_s": -300, "kind": "scale", "summary": "scale of workers to 6", "author": "danilo"}])
+         events=[{"at_s": -300, "kind": "scale", "summary": "scale of workers to 6", "author": "danilo"}],
+         detail={"image": "ghcr.io/bookstore/worker:a1b2c3d", "kind": "Deployment",
+                 "placement": place(("node-1", 3), ("node-2", 3, 1, 2))})
 override(obs, "exports-queue", metrics={"depth": 12, "oldest_age_s": 0, "consumers": 4})
 scenario(4, "node-memory-pressure", "Node memory pressure, workers OOMKilled", "my export never finished", "2026-09-27T09:00:00Z", 120, obs, {
     "components": {

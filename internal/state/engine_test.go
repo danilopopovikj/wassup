@@ -169,3 +169,42 @@ func TestFormatting(t *testing.T) {
 		t.Errorf("Bytes: %s %s", Bytes(40<<30), Bytes(2048))
 	}
 }
+
+func TestHostedRowsFollowPlacement(t *testing.T) {
+	// The api runs on n1 by topology; the cluster also sees a pod on n2,
+	// crash-looping. n1's row must read flowing (its pod is fine) and n2 must
+	// list the api although runs_on never named it.
+	tp := topo()
+	tp.Components = append(tp.Components, model.Component{ID: "n2", Type: "node"})
+	b := bind.New()
+	b.Apply(probe.Observation{Target: "api", At: now,
+		Metrics:    map[string]float64{"replicas_ready": 1, "replicas_desired": 2, "restarts": 5, "restart_window_s": 300},
+		Conditions: []model.Condition{{Kind: model.CondCrashLoopBackOff, Ref: "pod/api-2", Since: now.Add(-time.Minute)}},
+		Detail: map[string]any{"placement": map[string]any{
+			"n1": map[string]any{"pods": 1.0, "ready": 1.0},
+			"n2": map[string]any{"pods": 1.0, "ready": 0.0, "restarts": 5.0},
+		}}})
+	for _, n := range []string{"n1", "n2"} {
+		b.Apply(probe.Observation{Target: n, At: now, Metrics: map[string]float64{"cpu_pct": 30, "mem_pct": 40, "disk_pct": 50}})
+	}
+	s := Evaluate(Input{Topology: tp, Joined: b.All(), Now: now, Tick: 1, TickEvery: 5 * time.Second})
+	if s.Components["api"].State != model.Failing {
+		t.Fatalf("api should be failing, got %s", s.Components["api"].State)
+	}
+	n1 := s.Components["n1"].Hosted
+	if len(n1) != 1 || n1[0].ID != "api" || !n1[0].Known || n1[0].State != model.Flowing || n1[0].Pods != 1 || n1[0].Ready != 1 {
+		t.Errorf("n1 rows = %+v", n1)
+	}
+	n2 := s.Components["n2"].Hosted
+	if len(n2) != 1 || n2[0].ID != "api" || !n2[0].Known || n2[0].State != model.Failing || n2[0].Ready != 0 || n2[0].Restarts != 5 {
+		t.Errorf("n2 rows = %+v", n2)
+	}
+	// Without placement the row comes from runs_on alone and takes the
+	// component's state.
+	s = eval(t, probe.Observation{Target: "api", Metrics: map[string]float64{"replicas_ready": 2, "replicas_desired": 2}},
+		probe.Observation{Target: "n1", Metrics: map[string]float64{"cpu_pct": 30}})
+	rows := s.Components["n1"].Hosted
+	if len(rows) != 1 || rows[0].Known || rows[0].Label != "API" {
+		t.Errorf("runs_on rows = %+v", rows)
+	}
+}

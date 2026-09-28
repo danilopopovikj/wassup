@@ -346,11 +346,32 @@ type ElementState struct {
 	Gauges     []Gauge            `json:"gauges,omitempty"`
 	Notes      []string           `json:"notes,omitempty"`
 	Detail     map[string]any     `json:"detail,omitempty"`
+	// Hosted is set on nodes: what runs on this machine, one row per
+	// component, with the live pod counts when the provider reports them.
+	Hosted []Hosted `json:"hosted,omitempty"`
 	// Edge-only fields.
 	Rate      float64 `json:"rate,omitempty"`
 	Queued    float64 `json:"queued,omitempty"`
 	ErrorRate float64 `json:"error_rate,omitempty"`
 	Unit      string  `json:"unit,omitempty"`
+}
+
+// MaxHostedRows bounds the rows a node box lists at the normal detail
+// level; the rest is summed up as "+N more" and shown in full.
+const MaxHostedRows = 6
+
+// Hosted is one component as seen from the node it runs on. Known is true
+// when the counts come from the cluster (the provider reported which pods
+// sit on this node); otherwise only runs_on in the topology says it is here.
+type Hosted struct {
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	State    State  `json:"state"`
+	Marker   Marker `json:"marker,omitempty"`
+	Known    bool   `json:"known,omitempty"`
+	Pods     int    `json:"pods,omitempty"`
+	Ready    int    `json:"ready,omitempty"`
+	Restarts int    `json:"restarts,omitempty"`
 }
 
 // Gauge is one horizontal bar inside a box.

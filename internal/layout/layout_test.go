@@ -82,3 +82,27 @@ func TestSavedPositionsWinAndCollapse(t *testing.T) {
 		t.Errorf("collapsed group box missing: %+v", b)
 	}
 }
+
+func TestMachinesRow(t *testing.T) {
+	tp := sample()
+	// declared out of order on purpose: the row must follow the topology
+	tp.Components = append(tp.Components, model.Component{ID: "n0", Type: "node", Group: "k"})
+	g := Compute(tp, model.Layout{}, DefaultOptions())
+	n1, n2, n0 := g.Boxes["n1"], g.Boxes["n2"], g.Boxes["n0"]
+	if !(g.Boxes["lb"].Y < n1.Y && n1.Y < g.Boxes["api"].Y) {
+		t.Errorf("machines must sit between the edge and the workloads: lb %d n1 %d api %d", g.Boxes["lb"].Y, n1.Y, g.Boxes["api"].Y)
+	}
+	if n1.Y != n2.Y || n2.Y != n0.Y {
+		t.Errorf("nodes must share one row: %d %d %d", n1.Y, n2.Y, n0.Y)
+	}
+	if !(n1.X < n2.X && n2.X < n0.X) {
+		t.Errorf("nodes must keep the topology order: n1 %d n2 %d n0 %d", n1.X, n2.X, n0.X)
+	}
+	// a node with residents is tall enough to list them
+	if n1.H < DefaultOptions().MinBoxH+1 {
+		t.Errorf("n1 hosts api, its box must have a row for it: h=%d", n1.H)
+	}
+	if n0.H >= n1.H {
+		t.Errorf("an empty node needs no rows: n0 %d n1 %d", n0.H, n1.H)
+	}
+}

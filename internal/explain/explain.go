@@ -364,13 +364,26 @@ func render(src Source, res *Result, ref model.Ref, es model.ElementState, found
 			add("  %s", s)
 		}
 	}
+	if len(es.Hosted) > 0 {
+		add("")
+		add("runs here:")
+		for _, h := range es.Hosted {
+			line := "  " + h.Label + ", " + string(h.State)
+			if h.Known {
+				line += fmt.Sprintf(", %d pods, %d ready", h.Pods, h.Ready)
+				if h.Restarts > 0 {
+					line += fmt.Sprintf(", %d restarts", h.Restarts)
+				}
+			} else {
+				line += " (from runs_on, no pod placement reported)"
+			}
+			add("%s", line)
+		}
+	}
 	// Detail: top waiting queries, kills, tasks, anything a probe left.
 	if len(es.Detail) > 0 {
 		keys := make([]string, 0, len(es.Detail))
 		for k := range es.Detail {
-			if k == "hosted" {
-				continue
-			}
 			keys = append(keys, k)
 		}
 		sort.Strings(keys)

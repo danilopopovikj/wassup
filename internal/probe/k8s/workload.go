@@ -353,7 +353,21 @@ func (w *workloadProbe) observe(ctx context.Context, c *Clients, ls workloadList
 	restartCounts := map[string]any{}
 	evicted := 0
 	ready := 0
+	// placement is node name -> pods, ready, restarts (in the window): the
+	// machine view draws it as "API ×2" inside each node.
+	placement := map[string]map[string]int{}
+	nodeOfPod := map[string]string{}
 	for _, p := range pods {
+		if n := p.Spec.NodeName; n != "" {
+			nodeOfPod[p.Name] = n
+			if placement[n] == nil {
+				placement[n] = map[string]int{}
+			}
+			placement[n]["pods"]++
+			if podReady(p) {
+				placement[n]["ready"]++
+			}
+		}
 		if podReady(p) {
 			ready++
 			readyPods = append(readyPods, p.Name)
@@ -432,6 +446,14 @@ func (w *workloadProbe) observe(ctx context.Context, c *Clients, ls workloadList
 		o.Detail["image"] = t.image
 	}
 	o.Detail["pods"] = len(pods)
+	for _, r := range w.restarts {
+		if n := nodeOfPod[r.pod]; n != "" && within(r.at, restartWindow, now) {
+			placement[n]["restarts"]++
+		}
+	}
+	if len(placement) > 0 {
+		o.Detail["placement"] = placement
+	}
 	o.Detail["ready_pods"] = readyPods
 	o.Detail["restart_counts"] = restartCounts
 	if ev := recentWarnings(ls.events, ns, pods, t, now); len(ev) > 0 {

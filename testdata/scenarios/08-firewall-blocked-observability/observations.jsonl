@@ -8,8 +8,8 @@
 {"at":0,"target":"lb->node-3","probe":"hcloud.lb","metrics":{"healthy":1,"rate":366}}
 {"at":0,"target":"node-3","probe":"k8s.node","metrics":{"cpu_pct":42,"mem_pct":61,"disk_pct":48,"pods":12}}
 {"at":0,"target":"ingress","probe":"k8s.ingress","metrics":{"rate":1100,"error_rate":0.2,"cert_days":61},"detail":{"hosts":["bookstore.example"]}}
-{"at":0,"target":"api","probe":"k8s.workload","metrics":{"replicas_ready":3,"replicas_desired":3,"cpu_pct":40,"mem_pct":55,"restarts":0},"detail":{"image":"ghcr.io/bookstore/api:a1b2c3d","kind":"Deployment"}}
-{"at":0,"target":"worker","probe":"k8s.workload","metrics":{"replicas_ready":4,"replicas_desired":4,"cpu_pct":35,"mem_pct":60,"restarts":0},"detail":{"image":"ghcr.io/bookstore/worker:a1b2c3d","kind":"Deployment"}}
+{"at":0,"target":"api","probe":"k8s.workload","metrics":{"replicas_ready":3,"replicas_desired":3,"cpu_pct":40,"mem_pct":55,"restarts":0},"detail":{"image":"ghcr.io/bookstore/api:a1b2c3d","kind":"Deployment","placement":{"node-1":{"pods":1,"ready":1},"node-2":{"pods":1,"ready":1},"node-3":{"pods":1,"ready":1}}}}
+{"at":0,"target":"worker","probe":"k8s.workload","metrics":{"replicas_ready":4,"replicas_desired":4,"cpu_pct":35,"mem_pct":60,"restarts":0},"detail":{"image":"ghcr.io/bookstore/worker:a1b2c3d","kind":"Deployment","placement":{"node-1":{"pods":2,"ready":2},"node-2":{"pods":2,"ready":2}}}}
 {"at":0,"target":"default-queue->worker","probe":"celery.queue","metrics":{"rate":12.0}}
 {"at":0,"target":"exports-queue->worker","probe":"celery.queue","metrics":{"rate":0.2}}
 {"at":0,"target":"default-queue","probe":"celery.queue","metrics":{"depth":3,"oldest_age_s":2,"consumers":4}}
