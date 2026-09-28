@@ -8,6 +8,7 @@ import (
 
 	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 // KindWorkflow is the probe kind of the workflow probe.
@@ -247,26 +248,16 @@ func (p *WorkflowProbe) applyRuns(o *probe.Observation, st *workflowState, runs 
 	if lastFailure != nil {
 		o.Detail["last_failure"] = firstOf(lastFailure.FinishedAt, lastFailure.CreatedAt)
 	}
+	job := facet.Job{Known: true,
+		Active: int(o.Metrics["active"]), Succeeded: int(o.Metrics["succeeded"]), Failed: int(o.Metrics["failed"]), Queued: int(o.Metrics["queued"])}
 	if latestFinished != nil && latestFinished.Status == statusFailed {
-		o.Conditions = append(o.Conditions, model.Condition{
-			Kind:   model.CondJobFailed,
-			Ref:    "run/" + latestFinished.runID(),
-			Since:  firstOf(latestFinished.FinishedAt, latestFinished.CreatedAt),
-			Detail: truncate(latestFinished.ErrorMessage, errorMessageLen),
-		})
+		job.LastFailure = &facet.Failure{Ref: "run/" + latestFinished.runID(), At: firstOf(latestFinished.FinishedAt, latestFinished.CreatedAt), Reason: truncate(latestFinished.ErrorMessage, errorMessageLen)}
 	}
 	if running != nil {
-		o.Conditions = append(o.Conditions, model.Condition{
-			Kind:   model.CondJobRunning,
-			Ref:    "run/" + running.runID(),
-			Since:  firstOf(running.StartedAt, running.CreatedAt),
-			Detail: running.DisplayName,
-		})
-		if age, ok := running.age(now); ok {
-			if age < 0 {
-				age = 0
-			}
-			o.Metrics["running_s"] = age.Seconds()
-		}
+		job.Running = &facet.Task{ID: "run/" + running.runID(), Name: running.DisplayName, Started: firstOf(running.StartedAt, running.CreatedAt)}
+	}
+	facet.EmitJob(o, job, now)
+	if v, ok := o.Metrics["running_s"]; ok && v < 0 {
+		o.Metrics["running_s"] = 0
 	}
 }

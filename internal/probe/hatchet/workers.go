@@ -9,6 +9,7 @@ import (
 
 	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 // KindWorkers is the probe kind of the workers probe.
@@ -156,15 +157,16 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 		list = append(list, entry)
 	}
 	o.Detail["workers"] = list
-	o.Metrics["workers_online"] = float64(online)
-	o.Metrics["workers_total"] = float64(len(workers))
+	pool := facet.WorkerPool{
+		Known: true, Online: online, Total: len(workers), LongTask: st.longTask,
+		NotReadyDetail: "no active Hatchet workers",
+		Since:          func(key string, at time.Time) time.Time { return st.seen.mark(key, at) },
+	}
 	if slotsKnown {
-		o.Metrics["pool_used"] = poolUsed
-		o.Metrics["pool_max"] = poolMax
+		pool.SlotsUsed, pool.SlotsMax = int(poolUsed), int(poolMax)
 	}
 
 	var problems []string
-	live := map[string]bool{}
 
 	running, err := st.c.runs(ctx, runQuery{
 		since:     now.Add(-runningLookback),
@@ -175,36 +177,13 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 	if err != nil {
 		problems = append(problems, "running tasks: "+err.Error())
 	} else {
-		o.Metrics["active"] = float64(len(running))
-		type aged struct {
-			run taskRun
-			age time.Duration
-		}
-		var ages []aged
-		for _, r := range running {
-			if age, ok := r.age(now); ok {
-				ages = append(ages, aged{r, age})
-			}
-		}
-		sort.Slice(ages, func(i, j int) bool { return ages[i].age > ages[j].age })
-		if len(ages) > 0 {
-			o.Metrics["running_s"] = ages[0].age.Seconds()
-		}
+		pool.Active, pool.HasActive = len(running), true
 		var long []map[string]any
-		for _, a := range ages {
-			if a.age < st.longTask {
-				break
-			}
-			long = append(long, map[string]any{
-				"task": a.run.DisplayName, "id": a.run.TaskExternalID, "running_s": a.age.Seconds(),
-			})
-			if len(o.Conditions) < maxLongTasks {
-				o.Conditions = append(o.Conditions, model.Condition{
-					Kind:   model.CondTaskRunning,
-					Ref:    a.run.TaskExternalID,
-					Since:  firstOf(a.run.StartedAt, a.run.CreatedAt),
-					Detail: a.run.DisplayName,
-				})
+		for _, r := range running {
+			started := firstOf(r.StartedAt, r.CreatedAt)
+			pool.Running = append(pool.Running, facet.Task{ID: r.TaskExternalID, Name: r.DisplayName, Started: started})
+			if age, ok := r.age(now); ok && age >= st.longTask {
+				long = append(long, map[string]any{"task": r.DisplayName, "id": r.TaskExternalID, "running_s": age.Seconds()})
 			}
 		}
 		if len(long) > 0 {
@@ -216,7 +195,7 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 	if err != nil {
 		problems = append(problems, "queue metrics: "+err.Error())
 	} else {
-		o.Metrics["waiters"] = qm.total().depth()
+		pool.Backlog, pool.HasBacklog = int(qm.total().depth()), true
 	}
 
 	done, err := st.c.runs(ctx, runQuery{
@@ -235,27 +214,22 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 			}
 		}
 		if len(durations) >= p95MinSamples {
-			o.Metrics["p95_s"] = percentile(durations, 95)
+			pool.TypicalDuration = time.Duration(percentile(durations, 95) * float64(time.Second))
 		}
 		o.Detail["completed_last_hour"] = len(done)
 	}
 
-	waiters, haveWaiters := o.Metrics["waiters"]
-	if slotsKnown && poolMax > 0 && poolUsed >= poolMax && haveWaiters && waiters > 0 {
-		live["pool"] = true
-		o.Conditions = append(o.Conditions, model.Condition{
-			Kind:   model.CondPoolExhausted,
-			Since:  st.seen.mark("pool", now),
-			Detail: fmt.Sprintf("all %g slots busy", poolMax),
-		})
-	}
-	if online == 0 {
-		live["notready"] = true
-		o.Conditions = append(o.Conditions, model.Condition{
-			Kind:   model.CondNotReady,
-			Since:  st.seen.mark("notready", now),
-			Detail: "no active Hatchet workers",
-		})
+	// The facet writes the canonical form: metrics, TaskRunning,
+	// PoolExhausted, NotReady, the same for every worker backend.
+	facet.EmitWorkerPool(&o, pool, now)
+	live := map[string]bool{}
+	for _, c := range o.Conditions {
+		switch c.Kind {
+		case model.CondPoolExhausted:
+			live[facet.KeyPoolExhausted] = true
+		case model.CondNotReady:
+			live[facet.KeyNoWorkers] = true
+		}
 	}
 	st.seen.keep(live)
 

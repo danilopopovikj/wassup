@@ -178,5 +178,9 @@ make demo          # build and run the demo
 python3 testdata/scenarios/gen.py   # regenerate fixtures after editing gen.py
 ```
 
-New infrastructure comes in as a probe (see `internal/probe/README.md`) and,
-when it is a new shape, a catalog type in `internal/model/catalog.go`.
+New infrastructure comes in as a probe (see `internal/probe/README.md`).
+Worker fleets, queues, replication consumers and jobs have typed facets in
+`internal/probe/facet`: a backend fills a struct and the facet writes the
+canonical observation, so Hatchet, Celery and RabbitMQ read the same on the
+diagram and the next backend needs no engine or UI change. Only a genuinely
+new shape needs a catalog type in `internal/model/catalog.go`.

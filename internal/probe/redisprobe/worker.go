@@ -11,6 +11,7 @@ import (
 
 	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 const (
@@ -250,7 +251,7 @@ func (p *WorkerProbe) round(ctx context.Context, flower *flowerClient, c workerC
 	var online, active, poolMax int
 	var longest time.Duration
 	queues := map[string]bool{}
-	var long []longTaskInfo
+	var long, allActive []longTaskInfo
 	workerDetail := make([]map[string]any, 0, len(names))
 	for _, n := range names {
 		w := workers[n]
@@ -283,23 +284,14 @@ func (p *WorkerProbe) round(ctx context.Context, flower *flowerClient, c workerC
 			started := parseTime(t.TimeStart)
 			running := max(now.Sub(started), 0)
 			longest = max(longest, running)
+			allActive = append(allActive, longTaskInfo{id: t.ID, name: t.Name, worker: n, started: started})
 			if running >= c.longTask {
 				long = append(long, longTaskInfo{id: t.ID, name: t.Name, worker: n, started: started})
 			}
 		}
 	}
 
-	o.Metrics = map[string]float64{
-		"workers_online": float64(online),
-		"workers_total":  float64(len(names)),
-		"active":         float64(active),
-		"pool_used":      float64(active),
-		"pool_max":       float64(poolMax),
-		"queues":         float64(len(queues)),
-	}
-	if active > 0 {
-		o.Metrics["running_s"] = longest.Seconds()
-	}
+	o.Metrics = map[string]float64{"queues": float64(len(queues))}
 	o.Detail["workers"] = workerDetail
 	queueNames := make([]string, 0, len(queues))
 	for q := range queues {
@@ -308,43 +300,51 @@ func (p *WorkerProbe) round(ctx context.Context, flower *flowerClient, c workerC
 	sort.Strings(queueNames)
 	o.Detail["queues"] = queueNames
 
-	// Longest-running first, at most workerMaxLongTasks conditions.
+	pool := facet.WorkerPool{
+		Known: true, Online: online, Total: len(names), Active: active, HasActive: true, LongTask: c.longTask,
+		NotReadyDetail: "no Celery workers online",
+		Since:          func(key string, at time.Time) time.Time { return seen.mark(key, at) },
+	}
+	if poolMax > 0 {
+		pool.SlotsUsed, pool.SlotsMax = active, poolMax
+	}
+	for _, t := range allActive {
+		pool.Running = append(pool.Running, facet.Task{ID: t.id, Name: t.name, Worker: t.worker, Started: t.started})
+	}
+	// Longest-running first in the detail, every long task listed.
 	sort.Slice(long, func(i, j int) bool { return long[i].started.Before(long[j].started) })
-	live := map[string]bool{}
 	longDetail := make([]map[string]any, 0, len(long))
-	for i, t := range long {
+	for _, t := range long {
 		longDetail = append(longDetail, map[string]any{
 			"id": t.id, "name": t.name, "worker": t.worker, "running_s": now.Sub(t.started).Seconds(),
-		})
-		if i >= workerMaxLongTasks {
-			continue
-		}
-		live[t.id] = true
-		seen.mark(t.id, t.started)
-		o.Conditions = append(o.Conditions, model.Condition{
-			Kind: model.CondTaskRunning, Ref: t.id, Since: t.started, Detail: t.name,
 		})
 	}
 	if len(longDetail) > 0 {
 		o.Detail["long_tasks"] = longDetail
 	}
-	if online == 0 {
-		live[workerNotReadyKey] = true
-		o.Conditions = append(o.Conditions, model.Condition{
-			Kind: model.CondNotReady, Ref: c.target, Since: seen.mark(workerNotReadyKey, now), Detail: "no Celery workers online",
-		})
-	}
-	seen.keep(live)
 
 	// p95 of recent successful runtimes, best effort.
 	var finished map[string]FlowerFinished
 	if err := flower.get(rctx, "/api/tasks", url.Values{"state": {"SUCCESS"}, "limit": {"200"}}, &finished); err == nil {
 		if p95, ok := p95Runtimes(finished); ok {
-			o.Metrics["p95_s"] = p95
+			pool.TypicalDuration = time.Duration(p95 * float64(time.Second))
 		}
 	} else {
 		o.Detail["tasks_error"] = err.Error()
 	}
+
+	facet.EmitWorkerPool(&o, pool, now)
+	live := map[string]bool{}
+	for _, cond := range o.Conditions {
+		switch cond.Kind {
+		case model.CondTaskRunning:
+			live[cond.Ref] = true
+			seen.mark(cond.Ref, cond.Since)
+		case model.CondNotReady:
+			live[facet.KeyNoWorkers] = true
+		}
+	}
+	seen.keep(live)
 
 	p.h.Set(probe.HealthOK, "")
 	return o

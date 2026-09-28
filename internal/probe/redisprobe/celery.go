@@ -16,6 +16,7 @@ import (
 
 	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 // Envelope is the part of a Celery message (kombu's JSON envelope on the
@@ -360,10 +361,10 @@ func (p *CeleryProbe) round(ctx context.Context, client *redis.Client, flower *f
 		p.h.Set(probe.HealthDegraded, o.Err)
 		return o
 	}
-	o.Metrics["depth"] = float64(depth)
+	q := facet.Queue{Known: true, Depth: int(depth), LongTask: longTask}
 	ring.push(o.At, float64(depth))
 	if g, ok := ring.growth(); ok {
-		o.Metrics["growth_per_min"] = g
+		q.GrowthPerMin, q.HasGrowth = g, true
 	}
 	if oldest && depth > 0 {
 		raw, err := client.LIndex(rctx, queue, -1).Result()
@@ -371,7 +372,7 @@ func (p *CeleryProbe) round(ctx context.Context, client *redis.Client, flower *f
 			if env, perr := ParseEnvelope([]byte(raw)); perr == nil {
 				o.Detail["oldest_task"] = env.Task
 				if age, ok := env.Age(o.At); ok {
-					o.Metrics["oldest_age_s"] = age.Seconds()
+					q.Oldest, q.HasOldest = age, true
 				}
 			}
 		}
@@ -384,34 +385,30 @@ func (p *CeleryProbe) round(ctx context.Context, client *redis.Client, flower *f
 			health, msg = probe.HealthDegraded, "flower: "+err.Error()
 			o.Detail["flower_error"] = err.Error()
 		} else {
-			o.Metrics["consumers"] = float64(s.Consumers)
+			q.Consumers, q.HasConsumers = s.Consumers, true
 			if s.HasP95 {
-				o.Metrics["p95_s"] = s.P95
+				q.TypicalDuration = time.Duration(s.P95 * float64(time.Second))
 			}
-			live := map[string]bool{}
-			var longest float64
 			for _, task := range s.Running {
 				if task.TimeStart <= 0 {
 					continue
 				}
-				started := parseTime(task.TimeStart)
-				running := o.At.Sub(started)
-				longest = max(longest, running.Seconds())
-				if running >= longTask {
-					live[task.ID] = true
-					seen.mark(task.ID, started)
-					o.Conditions = append(o.Conditions, model.Condition{
-						Kind: model.CondTaskRunning, Ref: task.ID, Since: started, Detail: task.Name,
-					})
-				}
+				q.Running_ = append(q.Running_, facet.Task{ID: task.ID, Name: task.Name, Started: parseTime(task.TimeStart)})
 			}
-			seen.keep(live)
 			if len(s.Running) > 0 {
-				o.Metrics["running_s"] = longest
 				o.Detail["running"] = len(s.Running)
 			}
 		}
 	}
+	facet.EmitQueue(&o, q, o.At)
+	live := map[string]bool{}
+	for _, cond := range o.Conditions {
+		if cond.Kind == model.CondTaskRunning {
+			live[cond.Ref] = true
+			seen.mark(cond.Ref, cond.Since)
+		}
+	}
+	seen.keep(live)
 	p.h.Set(health, msg)
 	return o
 }

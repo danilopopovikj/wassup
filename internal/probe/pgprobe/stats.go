@@ -11,6 +11,7 @@ import (
 
 	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 // ReplicationRow is one row of pg_stat_replication.
@@ -147,28 +148,33 @@ func Observe(s Stats, opts StatsOptions) (map[string]float64, []model.Condition,
 		}
 		streaming := hasRep && (rep.State == "streaming" || rep.State == "catchup")
 		if hasRep {
-			m["lag_bytes"] = rep.LagBytes
 			detail["state"] = rep.State
 		}
-		if hasSlot {
-			m["wal_retained_bytes"] = slot.RetainedBytes
-		}
 		broken := !streaming || (hasSlot && !slot.Active)
-		if broken {
-			m["streaming"] = 0
-			d := fmt.Sprintf("replication slot %s inactive", name)
-			if !hasSlot && !hasRep {
-				d = fmt.Sprintf("no replication connection or slot for %s", opts.Replica)
-			} else if !hasSlot {
-				d = fmt.Sprintf("replica %s not streaming (state %q)", opts.Replica, rep.State)
-			}
-			conds = append(conds, model.Condition{Kind: model.CondReplicationBroken, Ref: "slot/" + name, Detail: d})
-			if hasSlot && !slot.Active {
-				conds = append(conds, model.Condition{Kind: model.CondSlotInactive, Ref: "slot/" + name, Detail: fmt.Sprintf("%s retains %s of WAL", name, humanBytes(slot.RetainedBytes))})
-			}
-		} else {
-			m["streaming"] = 1
+		r := facet.Replication{Known: true, Slot: name, Streaming: !broken}
+		if hasRep {
+			r.Lag, r.HasLag = int64(rep.LagBytes), true
 		}
+		if hasSlot {
+			r.WALRetained, r.HasWALRetained = int64(slot.RetainedBytes), true
+			r.SlotDetail = fmt.Sprintf("%s retains %s of WAL", name, humanBytes(slot.RetainedBytes))
+		}
+		if broken {
+			r.Detail = fmt.Sprintf("replication slot %s inactive", name)
+			if !hasSlot && !hasRep {
+				r.Detail = fmt.Sprintf("no replication connection or slot for %s", opts.Replica)
+			} else if !hasSlot {
+				r.Detail = fmt.Sprintf("replica %s not streaming (state %q)", opts.Replica, rep.State)
+			}
+		}
+		// The facet writes the canonical form shared by every replication
+		// consumer: replicas, Electric, CDC connectors.
+		var o probe.Observation
+		facet.EmitReplication(&o, r, time.Time{})
+		for k, v := range o.Metrics {
+			m[k] = v
+		}
+		conds = append(conds, o.Conditions...)
 		return m, conds, detail
 	}
 

@@ -39,6 +39,43 @@ type Probe interface {
 * Everything a probe learns that the detail panel or `explain` may show goes
   in `Detail` (JSON-friendly values only).
 
+## Facets: the typed contract for common shapes
+
+Most infrastructure falls into a few shapes, and the engine and the UI only
+care about the shape, never about the product behind it. `internal/probe/facet`
+defines one struct per shape and one `Emit*` function that writes the
+canonical observation (the metric keys below, the conditions, the "stuck",
+"exhausted" and "broken" rules) so every backend reads the same on the
+diagram. A new backend fills the struct; it never touches the engine.
+
+| Facet | Fill it for | Backends today | What the engine makes of it |
+| --- | --- | --- | --- |
+| `WorkerPool` | any fleet of background workers: online/total, slots used/max, active tasks, backlog behind the pool, running tasks, typical duration | `hatchet.workers`, `celery.worker` (Flower) | "waiting, all 24 slots busy, 850 queued", "processing send_digest, 20 min" (stuck at 10× the p95), "not ready, no workers online", `slots` and `workers` gauges |
+| `Queue` | any queue: depth, pending, running, consumers, oldest item, rates, growth | `hatchet.queue`, `celery.queue` (Redis), `amqp.queue` (RabbitMQ management API), `redis.list` | "waiting, 2.4k queued, oldest 35 min", the growing pile, "growing 40 per minute" |
+| `Replication` | any consumer of the primary's replication stream: slot, streaming, lag, WAL retained | `pg.stats` with `replica:` (CNPG replicas, Electric SQL) | failing replication edge "replica not streaming for 3 h, 40 GB WAL retained" or "sync slot inactive …", the disk trend on the primary |
+| `Job` | any scheduled or one-off unit of work: counts, last failure, current run, schedule | `k8s.cronjob`, `hatchet.workflow` | "failing, last run failed 16:54, timed out", "processing run, 12 min" |
+
+Where the numbers come from, per backend:
+
+- **Celery**: queue depth is `LLEN` on the Redis list or `messages_ready`
+  from RabbitMQ; oldest age from the head message's `published_at`/`eta`
+  (Redis) or `head_message_timestamp` (RabbitMQ); growth from a one-minute
+  ring; workers, concurrency, running tasks and runtimes from Flower's
+  `/api/workers` and `/api/tasks`; the deployment's replicas from
+  `k8s.workload` on the same box.
+- **Hatchet**: `queue-metrics` (queued, pending, running per queue and
+  workflow), `worker` (slots), `workflow-runs` (running and failed tasks),
+  `task-metrics` (counts), `workflows/crons` (schedules).
+- **Postgres replication**: `pg_stat_replication` (state, lag as
+  `pg_wal_lsn_diff`), `pg_replication_slots` (`active`, WAL retained as the
+  distance from `restart_lsn` to the current LSN), keyed by the consumer's
+  slot or application name; CNPG's operator status through `cnpg.cluster`.
+
+To add a backend (Sidekiq, BullMQ, Temporal, Kafka consumer groups): write a
+probe that reads its API and fills `facet.WorkerPool` or `facet.Queue`,
+call `facet.EmitWorkerPool` / `facet.EmitQueue`, register it, and add the
+kind to the type's probe list in the catalog. Nothing else changes.
+
 ## Metrics vocabulary
 
 Metric keys are shared across probes so thresholds stay portable. Percentages

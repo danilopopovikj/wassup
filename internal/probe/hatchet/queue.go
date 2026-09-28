@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 // KindQueue is the probe kind of the queue probe.
@@ -131,7 +132,7 @@ func (p *QueueProbe) poll(ctx context.Context, st *queueState) probe.Observation
 		Target:  st.cfg.target,
 		Probe:   KindQueue,
 		At:      now,
-		Metrics: map[string]float64{"depth": s.depth()},
+		Metrics: map[string]float64{},
 		Detail: map[string]any{
 			"url":    st.cfg.base,
 			"tenant": st.cfg.tenant,
@@ -139,10 +140,10 @@ func (p *QueueProbe) poll(ctx context.Context, st *queueState) probe.Observation
 			"legacy": qm.legacy,
 		},
 	}
+	q := facet.Queue{Known: true, Depth: int(s.queued)}
 	if s.known {
-		o.Metrics["pending"] = s.pending
-		o.Metrics["running"] = s.running
-		o.Metrics["active"] = s.running
+		q.Pending, q.HasPending = int(s.pending), true
+		q.Running, q.HasRunning = int(s.running), true
 	}
 	if t := qm.total(); t.known {
 		o.Detail["total"] = map[string]any{"queued": t.queued, "pending": t.pending, "running": t.running}
@@ -159,7 +160,7 @@ func (p *QueueProbe) poll(ctx context.Context, st *queueState) probe.Observation
 	}
 	st.ring.push(now, s.depth())
 	if g, ok := st.ring.growth(); ok {
-		o.Metrics["growth_per_min"] = g
+		q.GrowthPerMin, q.HasGrowth = g, true
 	}
 
 	var problems []string
@@ -177,15 +178,16 @@ func (p *QueueProbe) poll(ctx context.Context, st *queueState) probe.Observation
 				consumers++
 			}
 		}
-		o.Metrics["consumers"] = float64(consumers)
+		q.Consumers, q.HasConsumers = consumers, true
 	}
 
 	if age, scope, err := p.oldestQueued(ctx, st, now); err != nil {
 		problems = append(problems, "queued runs: "+err.Error())
 	} else if scope != "" {
-		o.Metrics["oldest_age_s"] = age.Seconds()
+		q.Oldest, q.HasOldest = age, true
 		o.Detail["oldest_scope"] = scope
 	}
+	facet.EmitQueue(&o, q, now)
 
 	if len(problems) > 0 {
 		p.h.Set(probe.HealthDegraded, joinProblems(problems))

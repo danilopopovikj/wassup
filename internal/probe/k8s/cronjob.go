@@ -15,8 +15,8 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	batchlisters "k8s.io/client-go/listers/batch/v1"
 
-	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 const kindCronJob = "k8s.cronjob"
@@ -172,12 +172,9 @@ func observeCronJob(cronjobs batchlisters.CronJobLister, jobs batchlisters.JobLi
 			}
 		}
 	}
-	o.Metrics["active"] = float64(active)
-	o.Metrics["succeeded"] = float64(succeeded)
-	o.Metrics["failed"] = float64(failed)
+	job := facet.Job{Known: true, Active: active, Succeeded: succeeded, Failed: failed}
 	if !oldestActive.IsZero() {
-		o.Metrics["running_s"] = float64(int(now.Sub(oldestActive).Seconds()))
-		o.Conditions = append(o.Conditions, model.Condition{Kind: model.CondJobRunning, Ref: "cronjob/" + cj.Name, Since: oldestActive, Detail: fmt.Sprintf("%d active", active)})
+		job.Running = &facet.Task{ID: "cronjob/" + cj.Name, Name: fmt.Sprintf("%d active", active), Started: oldestActive}
 	}
 	// JobFailed when the most recent finished job failed.
 	if lastFailure != nil && (lastSuccess == nil || lastFailureAt.After(lastSuccessAt)) {
@@ -187,7 +184,11 @@ func observeCronJob(cronjobs batchlisters.CronJobLister, jobs batchlisters.JobLi
 			detail = strings.TrimSpace(strings.TrimSpace(fail.Reason) + ": " + strings.TrimSpace(fail.Message))
 			detail = strings.TrimSuffix(strings.TrimPrefix(detail, ": "), ":")
 		}
-		o.Conditions = append(o.Conditions, model.Condition{Kind: model.CondJobFailed, Ref: "job/" + lastFailure.Name, Since: lastFailureAt, Detail: detail})
+		job.LastFailure = &facet.Failure{Ref: "job/" + lastFailure.Name, At: lastFailureAt, Reason: detail}
+	}
+	facet.EmitJob(&o, job, now)
+	if v, ok := o.Metrics["running_s"]; ok {
+		o.Metrics["running_s"] = float64(int(v))
 	}
 
 	o.Detail["cron"] = cj.Spec.Schedule

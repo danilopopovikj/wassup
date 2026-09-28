@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 // KindQueue is the probe kind.
@@ -319,33 +320,34 @@ func (p *Queue) poll(ctx context.Context, c config) probe.Observation {
 	}
 
 	o.Metrics = map[string]float64{}
+	f := facet.Queue{Known: q.MessagesReady != nil}
 	if q.MessagesReady != nil {
-		depth := float64(*q.MessagesReady)
-		o.Metrics["depth"] = depth
-		p.ring.push(now, depth)
+		f.Depth = int(*q.MessagesReady)
+		p.ring.push(now, float64(f.Depth))
 		if g, ok := p.ring.growth(); ok {
-			o.Metrics["growth_per_min"] = g
+			f.GrowthPerMin, f.HasGrowth = g, true
 		}
 	}
 	if q.MessagesUnacked != nil {
 		o.Metrics["unacked"] = float64(*q.MessagesUnacked)
 	}
 	if q.Consumers != nil {
-		o.Metrics["consumers"] = float64(*q.Consumers)
+		f.Consumers, f.HasConsumers = int(*q.Consumers), true
 	}
 	if q.MessageStats != nil {
 		if r := rateOf(q.MessageStats.DeliverGet); r != nil {
-			o.Metrics["rate"] = *r
+			f.Rate, f.HasRate = *r, true
 		} else if r := rateOf(q.MessageStats.Ack); r != nil {
-			o.Metrics["rate"] = *r
+			f.Rate, f.HasRate = *r, true
 		}
 		if r := rateOf(q.MessageStats.Publish); r != nil {
-			o.Metrics["publish_rate"] = *r
+			f.PublishRate, f.HasPublishRate = *r, true
 		}
 	}
 	if q.HeadMessageTimestamp != nil && *q.HeadMessageTimestamp > 0 {
-		o.Metrics["oldest_age_s"] = max(now.Sub(time.Unix(*q.HeadMessageTimestamp, 0)).Seconds(), 0)
+		f.Oldest, f.HasOldest = max(now.Sub(time.Unix(*q.HeadMessageTimestamp, 0)), 0), true
 	}
+	facet.EmitQueue(&o, f, now)
 
 	if q.State != "" {
 		o.Detail["state"] = q.State
