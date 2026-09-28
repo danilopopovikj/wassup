@@ -45,6 +45,9 @@ func TestShots(t *testing.T) {
 			m.panelMode = panelDetail
 			m.follow()
 		}},
+		{"03-replica-behind", "03-primary-disk-filling", func(m *Model) { m.lensOn = true; m.selected = "db"; m.follow() }},
+		{"05-certificate-expired", "05-tls-certificate-expired", func(m *Model) { m.lensOn = true; m.selected = "ingress"; m.follow() }},
+		{"10-external-down", "10-external-dependency-down", func(m *Model) { m.lensOn = true; m.selected = "docs-sync"; m.follow() }},
 		{"11-hatchet-backlog", "11-hatchet-backlog", func(m *Model) { m.lensOn = true; m.selected = "hatchet-workers"; m.follow() }},
 		{"12-electric-slot", "12-electric-slot-inactive", func(m *Model) { m.lensOn = true; m.selected = "electric"; m.follow() }},
 		{"06-celery-findings", "06-celery-backlog-stuck-worker", func(m *Model) {
