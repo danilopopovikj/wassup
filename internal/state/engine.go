@@ -212,13 +212,18 @@ func (c *ctx) evalComponent(comp model.Component) (model.ElementState, bool) {
 		}
 		es.LastData = j.LastAt
 	}
-	// Rule 1: unbound / stale.
+	if j != nil && len(j.Errors) > 0 {
+		es.Detail["probe_errors"] = append([]string(nil), j.Errors...)
+	}
+	// Rule 1: unbound / stale. A probe that failed, timed out or may not
+	// read its source delivered nothing: the component is drawn unbound and
+	// says "no data" with the reason. Nothing is concluded from the failure.
 	if j == nil || !j.Bound {
 		es.State = model.Idle
 		es.Marker = model.MarkerUnbound
 		es.Label = "unbound, no probe data"
 		if j != nil && len(j.Errors) > 0 {
-			es.Label = "unbound, " + shortErr(j.Errors[0])
+			es.Label = "no data, " + shortErr(j.Errors[0])
 		}
 		return es, true
 	}
@@ -261,9 +266,17 @@ func (c *ctx) evalComponent(comp model.Component) (model.ElementState, bool) {
 	return es, false
 }
 
+// shortErr makes a probe error fit a label: without the probe's name, and
+// when it is long, the last part, which is where a wrapped error says what
+// happened ("connection refused"). The whole error stays in the detail.
 func shortErr(s string) string {
 	if i := strings.Index(s, ": "); i > 0 {
 		s = s[i+2:]
+	}
+	if len(s) > 60 {
+		if i := strings.LastIndex(s, ": "); i >= 0 && i+2 < len(s) {
+			s = s[i+2:]
+		}
 	}
 	if len(s) > 60 {
 		s = s[:57] + "..."
@@ -675,8 +688,19 @@ func (c *ctx) evalEdge(e model.Edge) model.ElementState {
 		dstLabel = Lower(dstComp.DisplayLabel())
 	}
 
-	// Rule 1: unbound ends.
+	// Rule 1: no data of its own, or unbound ends. An edge whose probes all
+	// failed says so: it must not read idle, and it must not take the flow
+	// of its ends as if it had been measured.
 	own := j != nil && j.Bound && !c.isStale(j, th)
+	if j != nil && len(j.Errors) > 0 {
+		es.Detail["probe_errors"] = append([]string(nil), j.Errors...)
+		if !j.Bound {
+			es.State = model.Idle
+			es.Marker = model.MarkerNoData
+			es.Label = "no data, " + shortErr(j.Errors[0])
+			return es
+		}
+	}
 	if (src.Marker == model.MarkerUnbound || dst.Marker == model.MarkerUnbound) && !own {
 		es.State = model.Idle
 		es.Marker = model.MarkerUnbound

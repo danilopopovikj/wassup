@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signoz
+  namespace: platform
+  labels:
+    app.kubernetes.io/instance: signoz
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: signoz
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: signoz
+    spec:
+      containers:
+        - name: signoz
+          image: signoz/signoz:0.50.0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: signoz
+  namespace: platform
+spec:
+  selector:
+    app.kubernetes.io/name: signoz
+  ports:
+    - port: 8080
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signoz-otel-collector
+  namespace: platform
+  labels:
+    app.kubernetes.io/instance: signoz
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: otel-collector
+    spec:
+      containers:
+        - name: collector
+          image: signoz/signoz-otel-collector:0.111.0
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: signoz-otel-collector
+  namespace: platform
+spec:
+  selector:
+    app.kubernetes.io/name: otel-collector
+  ports:
+    - port: 4317
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: signoz-zookeeper
+  namespace: platform
+  labels:
+    app.kubernetes.io/instance: signoz
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: zookeeper
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: zookeeper
+    spec:
+      containers:
+        - name: zookeeper
+          image: bitnami/zookeeper:3.9
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: chi-signoz-clickhouse-cluster-0-0
+  namespace: platform
+spec:
+  selector:
+    matchLabels:
+      clickhouse.altinity.com/chi: signoz-clickhouse
+  template:
+    metadata:
+      labels:
+        clickhouse.altinity.com/chi: signoz-clickhouse
+    spec:
+      containers:
+        - name: clickhouse
+          image: clickhouse/clickhouse-server:24.1
+          env:
+            - name: CLICKHOUSE_PASSWORD
+              value: Ch-Pa55-c0ffee
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: signoz-k8s-infra-otel-agent
+  namespace: platform
+  labels:
+    app.kubernetes.io/instance: signoz-k8s-infra
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-agent
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: otel-agent
+    spec:
+      containers:
+        - name: agent
+          image: otel/opentelemetry-collector-contrib:0.109.0

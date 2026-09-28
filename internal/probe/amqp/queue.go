@@ -44,6 +44,7 @@ func init() {
 		SpecFields:  []string{"management_url", "queue", "vhost", "user", "password_env", "interval", "timeout"},
 		Needs:       "a management user with the monitoring tag; the password in the environment variable named by password_env (default RABBITMQ_PASSWORD)",
 		Implemented: true,
+		Tier:        probe.TierToken,
 		Facets:      []string{facet.NameQueue},
 	}, func() probe.Probe { return &Queue{} })
 }
@@ -203,7 +204,7 @@ func (p *Queue) Start(ctx context.Context, spec map[string]any, out chan<- probe
 func newClient(timeout time.Duration) *http.Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.DisableKeepAlives = true
-	return &http.Client{Timeout: timeout, Transport: tr}
+	return &http.Client{Timeout: timeout, Transport: probe.ReadOnly(tr)}
 }
 
 // loop runs check once, then every interval, re-emitting the last

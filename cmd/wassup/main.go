@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"syscall"
 
 	tea "charm.land/bubbletea/v2"
@@ -21,16 +22,61 @@ import (
 	"github.com/danilopopovikj/wassup/prompts"
 )
 
-// Version is set by goreleaser.
+// Version is set by goreleaser and the Makefile. A binary built by
+// `go install ...@version` has no such flag; version reads the module
+// version the toolchain recorded instead.
 var Version = "dev"
+
+// version returns the version to print.
+func version() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return Version
+	}
+	return versionFrom(Version, info)
+}
+
+// versionFrom picks the version set at link time, else the module version,
+// else the commit the binary was built from.
+func versionFrom(linked string, info *debug.BuildInfo) string {
+	if linked != "" && linked != "dev" {
+		return linked
+	}
+	if v := info.Main.Version; v != "" && v != "(devel)" {
+		return v
+	}
+	var rev, dirty string
+	for _, s := range info.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			rev = s.Value
+		case "vcs.modified":
+			if s.Value == "true" {
+				dirty = "-dirty"
+			}
+		}
+	}
+	if rev != "" {
+		if len(rev) > 12 {
+			rev = rev[:12]
+		}
+		return "dev-" + rev + dirty
+	}
+	return "dev"
+}
 
 var flags struct {
 	dir        string
 	kubeconfig string
 	kcontext   string
+	envFile    string
 	noColor    bool
 	jsonOut    bool
 	split      int
+	// clusterChosen is set when the kubeconfig or the context was named for
+	// wassup, by a flag or in the settings, and not left to the default of
+	// the machine.
+	clusterChosen bool
 }
 
 func main() {
@@ -46,11 +92,15 @@ draws on the diagram; wassup itself needs no AI to run.`,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE:          runTUI,
+		// Every command starts with the settings of this machine, so
+		// nothing has to be exported before wassup runs.
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error { return loadSettings() },
 	}
 	pf := root.PersistentFlags()
 	pf.StringVar(&flags.dir, "dir", "", "path to the .wassup directory (default: found upward from the cwd)")
-	pf.StringVar(&flags.kubeconfig, "kubeconfig", "", "kubeconfig path for k8s probes (default: $KUBECONFIG or ~/.kube/config)")
-	pf.StringVar(&flags.kcontext, "context", "", "kubeconfig context")
+	pf.StringVar(&flags.kubeconfig, "kubeconfig", "", "kubeconfig path for k8s probes (default: $WASSUP_KUBECONFIG, $KUBECONFIG or ~/.kube/config)")
+	pf.StringVar(&flags.kcontext, "context", "", "kubeconfig context (default: $WASSUP_CONTEXT or the current context)")
+	pf.StringVar(&flags.envFile, "env-file", "", "a file of NAME=value lines to read before .wassup/local.env")
 	pf.BoolVar(&flags.jsonOut, "json", false, "machine readable output")
 	root.Flags().BoolVar(&flags.noColor, "no-color", false, "glyphs only, no colors")
 	root.Flags().IntVar(&flags.split, "split", 0, "graph width in percent when the panel is open")
@@ -58,7 +108,7 @@ draws on the diagram; wassup itself needs no AI to run.`,
 	root.AddCommand(
 		initCmd(), discoverCmd(), validateCmd(), probeCmd(), snapshotCmd(), explainCmd(),
 		logsCmd(), eventsCmd(), annotateCmd(), clearAnnotationsCmd(), exportCmd(), remapCmd(),
-		replayCmd(), skillCmd(), demoCmd(), probesCmd(), syncCmd(), versionCmd(),
+		replayCmd(), skillCmd(), demoCmd(), probesCmd(), syncCmd(), versionCmd(), accessCmd(),
 	)
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "wassup:", err)
@@ -96,6 +146,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		fmt.Println(prompts.Setup)
 		render.CopyText(prompts.Setup)
 		fmt.Fprintln(os.Stderr, "(the prompt was copied to the clipboard; `wassup init` creates .wassup/ with it)")
+		printPathHint()
 		return nil
 	}
 	rt, err := app.New(app.Options{Dir: dir, Kubeconfig: flags.kubeconfig, Context: flags.kcontext, Logf: logf(dir)})
@@ -111,6 +162,7 @@ func runProgram(rt *app.Runtime, opts render.Options) error {
 	if err := rt.Start(ctx); err != nil {
 		return err
 	}
+	defer rt.Stop()
 	m := render.New(rt, opts)
 	p := tea.NewProgram(m, tea.WithContext(ctx))
 	_, err := p.Run()
@@ -131,5 +183,13 @@ func logf(dir string) func(string, ...any) {
 		}
 		defer f.Close()
 		fmt.Fprintf(f, format+"\n", args...)
+	}
+}
+
+// printPathHint tells a person who ran wassup by its full path how to run
+// it by its name.
+func printPathHint() {
+	if hint := pathHint(); hint != "" {
+		fmt.Fprintln(os.Stderr, "\nnote: "+hint)
 	}
 }

@@ -10,11 +10,21 @@ build you have; `wassup probes --json` gives the same as data.
 
 - One entry per component or edge id in `bindings.yaml`, each a list of probes.
   The `probe` key names the kind; every other key is that probe's spec.
-- Secrets never live in `.wassup/`. Spec fields ending in `_env` name the
-  environment variable that holds the credential (`dsn_env: SHOP_PG_DSN`,
-  `token_env: HCLOUD_TOKEN`). Kubernetes access uses the kubeconfig context
-  (`--kubeconfig`, `--context`, or `WASSUP_KUBECONFIG` / `WASSUP_CONTEXT` /
-  `KUBECONFIG`).
+- Spec fields ending in `_env` name the environment variable that holds the
+  credential (`password_env: SHOP_DB_PASSWORD`, `token_env: HCLOUD_TOKEN`).
+  The values live in `.wassup/local.env`, which git ignores and wassup
+  reads on every run, or in the environment; never in any other file of
+  `.wassup/`. Kubernetes access uses the kubeconfig context (`--kubeconfig`,
+  `--context`, or `WASSUP_KUBECONFIG` / `WASSUP_CONTEXT` in `local.env`,
+  else `KUBECONFIG`).
+- A connection is named by its parts, so nobody builds a URL or encodes a
+  password: `host`, `port`, `user`, `database`, `sslmode`, `password_env`
+  on the PostgreSQL probes, `host`, `port`, `user`, `db`, `tls`,
+  `password_env` on the Redis probes. `dsn_env`, `url` and `addr` still
+  work; naming the parts and a DSN at once is an error.
+- Every probe has a tier, which is how far it reaches: 0 needs the
+  kubeconfig and the network, 1 a token or a key for an API, 2 a connection
+  to a data store. `wassup probe --tier <n>` runs the bindings up to a tier.
 - Every metric is a ratio or a rate where possible so thresholds are portable.
 - Rates come from `signoz.edge` when it is bound, else from the component's
   own rate, else the edge is derived from Kubernetes connectivity only.
@@ -23,58 +33,205 @@ build you have; `wassup probes --json` gives the same as data.
 - A `spec only` probe validates its spec but reports failed health, so the
   bound element draws as unbound. Bind something else meanwhile (an
   `http.ping` on the health endpoint, a `k8s.workload` on the collector).
+- A probe that fails, times out or may not read its source delivers nothing:
+  the element reads `no data, <reason>`, never `failing`. `failing` is only
+  ever concluded from data that was read.
+
+## Read only
+
+wassup reads. It has no way to change a cluster or a database, and that
+does not depend on the account it runs as:
+
+| Source | What is sent | What holds it to that |
+| --- | --- | --- |
+| Kubernetes | `get`, `list`, `watch`, and the request that opens a port-forward | the transport of every client refuses any other request before it is sent |
+| PostgreSQL | `SELECT` and `SHOW`, one statement at a time | every round runs in a read-only transaction, so the server refuses a write too |
+| pgbouncer | `SHOW` | any other command is refused before it is sent |
+| Redis | `INFO`, `LLEN`, `LINDEX` | any other command is refused before it is sent |
+| HTTP APIs | `GET` and `HEAD` | any other method is refused before it is sent |
+
+The account is the second lock, and the one that holds whatever runs with
+it. Give wassup one that can only read: the ClusterRole below, a PostgreSQL
+role with `pg_monitor` and nothing else, a Redis user with
+`+info +llen +lindex`, read-only API tokens.
+
+One request reads and still has an effect, and it is off by default:
+`electric.sync` with `table` (below).
+
+## Reaching a database inside the cluster: `via`
+
+`pg.stats` and `pg.pool` take `via`. With
+`via: k8s.service/<namespace>/<name>:<port>` (or
+`k8s.pod/<namespace>/<name>:<port>`) wassup opens its own port-forward
+through the kubeconfig, connects through it and closes it when it stops: no
+`kubectl port-forward` in a second terminal. The DSN then only says who
+connects to which database; its host and port are not dialled (its host is
+still the name a TLS certificate is checked against). `kubeconfig` and
+`context` in the spec override the defaults. This needs `create` on
+`pods/portforward`.
+
+Any other value of `via` (`via: bastion`) is a label for the detail panel
+and opens nothing: the DSN must then be reachable from where wassup runs.
+When you do run `kubectl port-forward` yourself, wassup closes its
+connections with a goodbye, so the tunnel survives one probe run after
+another.
+
+## The role `pg.stats` connects as
+
+Any role that can connect works, the application's own role included. What
+PostgreSQL shows depends on the role:
+
+| | with `pg_read_all_stats` or `pg_monitor` | without |
+| --- | --- | --- |
+| connections | counted | counted |
+| active connections, lock waiters, waiting queries | read | omitted (hidden by PostgreSQL) |
+| replica state and lag | from `pg_stat_replication` | state hidden; lag from `pg_replication_slots` |
+| slot activity, WAL retained | from `pg_replication_slots` | the same |
+
+Slot activity always comes from `pg_replication_slots.active`. A state
+PostgreSQL hides is never read as "not streaming". When the lag comes from
+the slot the detail says so (`lag_source: pg_replication_slots`).
+
+`replica:` names one replica on a replication edge. It matches the slot
+name (`electric_slot_default`), the `application_name`, or the instance of
+a CloudNativePG cluster: instance `bookstore-db-2` has the slot
+`_cnpg_bookstore_db_2`.
+
+## `electric.sync` and `table`
+
+Without `table` the probe only calls `/v1/health`, which costs Electric
+nothing. **With `table` it requests a shape for the whole table, and
+Electric runs a snapshot query against the database to build it.** On a
+large table that is a full read of the table on the primary. When no
+client of yours syncs that table yet, Electric also changes the database to
+serve the shape: it adds the table to its publication and sets the table's
+replica identity to full (unless Electric runs with
+`ELECTRIC_MANUAL_TABLE_PUBLISHING=true`). wassup sends a GET; the change is
+Electric's. Set `table` only on a small table your application already
+syncs, never on a large one, and never by default; `wassup discover` does
+not propose it.
 
 ## Kubernetes RBAC
 
-One ClusterRole with `get`, `list`, `watch` on: pods, nodes, events,
-persistentvolumeclaims, secrets (TLS secrets only, for certificate expiry),
-deployments, statefulsets, daemonsets, replicasets, cronjobs, jobs,
-ingresses, `postgresql.cnpg.io/clusters` and `backups`,
-`cert-manager.io/certificates`, plus `metrics.k8s.io` podmetrics and
-nodemetrics, `nodes/stats` and `nodes/proxy` for kubelet stats, and
-`pods/log` for `wassup logs`. `pods/portforward` is only needed when
-`pg.stats` reaches the database through a port-forward.
+`wassup access` prints the account for the probes that are bound in
+`bindings.yaml`, and nothing more: a ServiceAccount, a ClusterRole with
+`get`, `list`, `watch` on what those probes read, and the commands that
+write a kubeconfig with a token that expires. It contacts nothing and runs
+nothing; the user applies it with the kubeconfig they have.
+
+With every Kubernetes probe bound the role covers: pods, nodes, events,
+persistentvolumeclaims, deployments, statefulsets, daemonsets, replicasets,
+cronjobs, jobs, ingresses, `postgresql.cnpg.io/clusters` and `backups`,
+`cert-manager.io/certificates`, and `metrics.k8s.io` pods and nodes.
+
+Never part of it:
+
+- `nodes/proxy`. `k8s.node` and `k8s.pvc` read disk usage through it, and
+  it reaches every endpoint of the kubelet. Without it disk usage is not
+  known, and everything else is.
+- `pods/exec` and `pods/attach`. wassup has no use for them.
+- secrets (below).
+
+Only when asked for:
+
+- `pods/log`, with `wassup access --logs`: for `wassup logs` and the log
+  lines in `wassup explain`.
+- `create` on `pods/portforward`, with `get` on services and `get`, `list`
+  on pods: for `via: k8s.service/...` or `via: k8s.pod/...` on `pg.stats`
+  and `pg.pool`. `wassup access` grants it in the namespaces a `via`
+  reaches into, and in no other.
+- `get` on secrets: only for a `k8s.ingress` binding with
+  `read_tls_secret: true`. A TLS secret holds the private key next to the
+  certificate, so `k8s.ingress` does not read it by default: it takes the
+  expiry from the cert-manager Certificate, else from a TLS handshake with
+  the ingress host.
+
+wassup never reads Secrets for discovery. `wassup discover` stores the names
+of environment variables and the hosts they resolve to, never the value of a
+variable that looks like a credential, and no URL with its user and password.
 
 ## Testing a binding
 
 ```sh
 wassup validate            # spec shape, ids, catalog fit
-wassup probe --once        # runs every binding once; exit code 3 when something is unbound
+wassup probe               # runs every binding; exit code 3 when something is unbound
+wassup probe --tier 0      # runs the bindings that need the kubeconfig only
+wassup probe <id>          # runs the bindings of one element, prints every value
 wassup explain <id>        # shows the binding and the last observation
 ```
 
+`wassup probe` takes two samples of every probe (one tick apart), so rates
+that need two readings are there, and closes every connection in order
+before it exits. While it runs it prints a line per probe as its first
+round comes in (`[12/47] ok k8s.workload api 1.2s`), so a run that waits
+says what it waits for. A probe that failed is not waited for a second
+time. Per element it prints:
+
+- `bound`: at least one of its probes delivered data in this run. Probes of
+  the element that failed are listed under it with the reason, and so is
+  what a probe says about its own reading (`note:`), such as a role that
+  may not see replication detail and the grant that would let it.
+- `later`: the bindings of the element belong to a tier that did not run.
+  It is not counted as unbound.
+- `UNBOUND` with `no data, <probe>: <reason>`: none of its probes delivered.
+  A failed probe never prints as `idle`.
+- `no rate measured` instead of `idle`: nothing bound to the element or its
+  edges reports a rate, so idle is not known. `idle` means a rate was read
+  and it is zero.
+
+With `--json` every element carries `probe_results`: per probe its `status`
+(`ok`, `error`, `failed` to start, `silent` within the timeout), its `error`
+text and the `metrics` it returned. Verify a binding from that, not from the
+label alone. `--samples 1` is faster and shows no rates; `--timeout` bounds
+the whole run.
+
+`wassup probe <id>` takes a component id, an edge (`api->db`) or a
+`wassup://` ref. It starts the bindings of that element alone and prints
+the metrics of every probe, the conditions and the detail. Use it while you
+fix one binding.
+
+## `s3.bucket` and `list_objects`
+
+By default `s3.bucket` asks whether the bucket is there (one HEAD request)
+and reads nothing else: reachable, latency. The size and the number of
+objects are then not known, and the box says so. `list_objects: true` sizes
+the bucket, **which lists every object under `prefix`, one request per
+thousand objects, every round**. `max_objects` bounds it; past the bound
+the listing is skipped and the probe says what to set. Ask the user before
+you turn it on for a bucket you do not know the size of.
+
 ## Catalog
 
-| Probe | Facets | Source | Delivers | Spec fields | Needs | Status |
-| --- | --- | --- | --- | --- | --- | --- |
-| `amqp.queue` | QueueFacet | the RabbitMQ management API (GET /api/queues/<vhost>/<queue>) | depth (messages ready), unacked, consumers, rate (deliver/get per second, ack rate as fallback), publish_rate, growth_per_min over the last minute, oldest_age_s when the queue exposes head_message_timestamp; detail: state, memory, node, vhost | `management_url`, `queue`, `vhost`, `user`, `password_env`, `interval`, `timeout` | a management user with the monitoring tag; the password in the environment variable named by password_env (default RABBITMQ_PASSWORD) | shipped |
-| `celery.queue` | QueueFacet | the Celery queue list on a Redis broker (LLEN, LINDEX) and, when flower_url is set, Flower's REST API | depth, oldest_age_s (when the oldest envelope carries published_at or eta), growth_per_min; with Flower: consumers, running_s, p95_s and TaskRunning for tasks older than long_task | `broker`, `queue`, `password_env`, `flower_url`, `oldest`, `long_task` | network access to the broker (password via password_env) and, optionally, to Flower | shipped |
-| `celery.worker` | BackgroundWorkerFacet | Flower's REST API (/api/workers with and without status=true, /api/tasks?state=SUCCESS) | workers_online, workers_total, active, pool_max, pool_used, running_s, p95_s (when at least 10 finished tasks are known), queues; TaskRunning for tasks older than long_task, NotReady when no worker is online | `flower_url`, `name`, `long_task`, `interval`, `timeout` | HTTP access to Flower; no credentials | shipped |
-| `cert.tls` | CertificateFacet | a TLS handshake with the endpoint | cert_days until the leaf certificate expires, CertExpiring and CertExpired, subject, issuer and SANs | `addr`, `servername`, `interval` | TCP access to host:port; no credentials | shipped |
-| `cnpg.cluster` | DatabaseFacet, ReplicationFacet | CloudNativePG Cluster (postgresql.cnpg.io/v1) and Backup objects through the dynamic client, plus the pod informer | replicas_ready, replicas_desired; ReplicationBroken, Backup, Switchover; switchover events | `namespace (required)`, `cluster (required)`, `kubeconfig`, `context` | get/list on clusters.postgresql.cnpg.io and backups.postgresql.cnpg.io; list/watch on pods in the namespace | shipped |
-| `cnpg.instance` | DatabaseFacet, WorkloadFacet | the instance pod of a CloudNativePG cluster (pod informer) and metrics.k8s.io PodMetrics | cpu_pct, mem_pct; NotReady | `namespace (required)`, `cluster (required)`, `role (primary|replica) or instance (pod name)`, `kubeconfig`, `context` | list/watch on pods in the namespace; get/list on pods.metrics.k8s.io | shipped |
-| `dns.record` | DNSFacet | the system resolver | resolves (1/0), addresses count, the CNAME and whether the record matches the expected target | `host`, `expect`, `interval` | DNS resolution from the machine running wassup; no credentials | shipped |
-| `electric.sync` | SyncEngineFacet | the Electric SQL HTTP API: GET /v1/health and, when table is set, a /v1/shape handshake plus one short live poll | latency_ms of the health request, ready 1/0; with table: shape_ms, up_to_date 1/0, columns, busy on 429; NotReady while Electric waits for Postgres or the shape is unavailable, ConnectionRefused when the service cannot be reached | `url`, `secret_env`, `table`, `interval`, `timeout` | HTTP access to Electric; the ELECTRIC_SECRET in the environment variable named by secret_env when the service requires one | shipped |
-| `fixture` |  | a recorded fixture directory | whatever was recorded | `dir`, `speed` | read access to the directory | shipped |
-| `git.events` |  | git log of a local working copy | deploy events for every commit on the branch within the lookback, plus the branch head in detail | `repo`, `branch`, `interval`, `lookback`, `author_format` | the git binary and read access to the repository; no credentials | shipped |
-| `hatchet.health` | WorkloadFacet | the Hatchet API's /api/ready and /api/live endpoints and /api/v1/meta | latency_ms, ready (1/0), live (1/0); NotReady while /api/ready is not 200; detail: version, url | `url`, `token_env`, `tenant`, `interval`, `timeout` | HTTP access to the Hatchet API; the token named by token_env is sent when present but not required | shipped |
-| `hatchet.queue` | QueueFacet | the Hatchet REST API: tenant queue metrics, the worker list and the queued task runs | depth (queued + pending), pending, running, active, growth_per_min, consumers (active workers), oldest_age_s (age of the oldest queued task); detail: queues, total, the queue or workflow filter, url | `url`, `token_env`, `tenant`, `interval`, `timeout`, `queue`, `workflow` | a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token | shipped |
-| `hatchet.workers` | BackgroundWorkerFacet | the Hatchet REST API: the worker list, running and completed task runs and the tenant queue metrics | workers_online, workers_total, pool_used, pool_max (slots), active (running tasks), waiters (queued + pending tasks), running_s (longest running task), p95_s (task duration over the last hour); TaskRunning past long_task, PoolExhausted, NotReady; detail: workers, long tasks | `url`, `token_env`, `tenant`, `interval`, `timeout`, `name`, `long_task` | a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token | shipped |
-| `hatchet.workflow` | ScheduledJobFacet | the Hatchet REST API: the workflow list, per-workflow task metrics, the latest workflow runs and the cron triggers | succeeded, failed, active, queued, cancelled over the window, running_s; JobFailed when the latest finished run failed, JobRunning while a run is running; a job event per failed run; detail: schedule, cron, last_success, last_failure, workflow_id | `url`, `token_env`, `tenant`, `interval`, `timeout`, `workflow`, `window` | a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token | shipped |
-| `hcloud.firewall` | FirewallFacet, TrafficFacet | the Hetzner Cloud API firewall resource | rules (count); on an edge with port set: allowed (1/0) and FirewallDenied when no inbound rule lets the port through; detail: rules (direction, protocol, port, source ips, description), applied_to. No events: terraform.state owns change markers | `name`, `id`, `token_env`, `port`, `protocol`, `interval`, `endpoint` | a read-only Cloud API token in the environment variable named by token_env (default HCLOUD_TOKEN) | shipped |
-| `hcloud.lb` | LoadBalancerFacet | the Hetzner Cloud API: load balancer targets' health and the load balancer metrics endpoint | connections, rate (requests per second), targets_healthy, targets_total, TargetUnhealthy when no target is healthy; per entry of targets an observation for the edge <lb>-><component> with healthy (1/0) and HealthCheckFailing; detail: services, targets, algorithm, location | `name`, `id`, `token_env`, `targets`, `interval`, `endpoint` | a read-only Cloud API token in the environment variable named by token_env (default HCLOUD_TOKEN) | shipped |
-| `http.ping` | ExternalFacet, WorkloadFacet, ObservabilityFacet | an HTTP endpoint | latency_ms, error_rate and timeout_rate over the last 10 attempts, the last status, Timeout after 3 consecutive failures | `url`, `method`, `timeout`, `interval`, `expect_status` | outbound HTTPS to the endpoint; no credentials | shipped |
-| `k8s.cronjob` | ScheduledJobFacet | Kubernetes API (cronjob and job informers) | active, succeeded, failed (last 24h), running_s; JobFailed, JobRunning | `namespace (required)`, `name (required)`, `kubeconfig`, `context` | get/list/watch on cronjobs and jobs in the namespace | shipped |
-| `k8s.ingress` | IngressFacet, CertificateFacet | Kubernetes API (ingress informer), the TLS secrets it names and, when installed, cert-manager Certificates | cert_days; CertExpired, CertExpiring, CertRenewalFailed; cert (renewal) events | `namespace (required)`, `name (required)`, `kubeconfig`, `context` | get/list/watch on ingresses; get on the TLS secrets in the namespace; list on certificates.cert-manager.io (optional) | shipped |
-| `k8s.node` | NodeFacet | Kubernetes API (node, pod and event informers), metrics.k8s.io NodeMetrics and the kubelet /stats/summary through the API server proxy | cpu_pct, mem_pct, disk_pct, pods, killed; NotReady, MemoryPressure, DiskPressure, Rebooted; node (reboot) events | `name (required)`, `kubeconfig`, `context` | get/list/watch on nodes, pods and events; get on nodes.metrics.k8s.io; get on nodes/proxy for disk usage (optional) | shipped |
-| `k8s.pvc` | StorageFacet | Kubernetes API (persistentvolumeclaim and pod informers) and the kubelet /stats/summary of the node mounting the claim | used_bytes, total_bytes, disk_pct (disk_pct only when the kubelet stats are readable) | `namespace (required)`, `name (required)`, `kubeconfig`, `context` | get/list/watch on persistentvolumeclaims and pods in the namespace; get on nodes/proxy for usage (optional) | shipped |
-| `k8s.workload` | WorkloadFacet | Kubernetes API (informers on pods, deployments, statefulsets, daemonsets, replicasets, events) and metrics.k8s.io PodMetrics | replicas_ready, replicas_desired, restarts, restart_window_s, cpu_pct, mem_pct, killed, evicted; CrashLoopBackOff, ImagePullBackOff, OOMKilled, Evicted; deploy and scale events | `namespace (required)`, `selector (label selector; required unless name and kind are set)`, `name`, `kind (Deployment|StatefulSet|DaemonSet)`, `kubeconfig`, `context` | get/list/watch on pods, replicasets, deployments, statefulsets, daemonsets and events in the namespace; get/list on pods.metrics.k8s.io | shipped |
-| `kubelet.stats` | NodeFacet | the kubelet summary API (/stats/summary) of one node, through the API server proxy | cpu_pct, mem_pct, disk_pct of the node root and image filesystems, iops and used_bytes per volume, finer than metrics-server and without it; detail: per-filesystem capacity, inode pressure | `node`, `kubeconfig`, `context` | RBAC get on nodes/proxy for the kubeconfig's identity | spec only, not implemented yet |
-| `pg.pool` |  | pgbouncer's admin console (SHOW POOLS, CONFIG, DATABASES, STATS) | pool_used, pool_max, waiters, queued, rate; PoolExhausted when every server connection is busy and clients wait; detail: pools table, maxwait, default_pool_size, max_client_conn | `dsn_env`, `pool`, `via`, `interval` | a DSN for database "pgbouncer" in the environment variable named by dsn_env, as a stats_users or admin_users role | shipped |
-| `pg.stats` |  | pg_stat_activity, pg_stat_replication, pg_replication_slots and pg_database_size over a read-only connection | connections_used, connections_max, active_connections, waiters, lag_bytes, wal_retained_bytes, used_bytes, disk_pct; on a replication edge (replica set): lag_bytes, streaming, wal_retained_bytes and ReplicationBroken/SlotInactive; detail: version, replicas, slots, top_waiting | `dsn_env`, `via`, `replica`, `disk_total_bytes`, `interval` | a DSN in the environment variable named by dsn_env for a role with pg_read_all_stats (or pg_monitor) | shipped |
-| `redis.info` | CacheFacet | the Redis INFO command | mem_pct, hit_rate (per tick), evictions (per minute), clients; CacheFull when memory is at the limit and the policy is noeviction or the hit rate collapsed; detail: maxmemory, maxmemory_policy, used_memory_human, keys, keys_without_ttl, redis_version | `addr`, `url`, `password_env`, `db`, `tls` | network access to the Redis port; a password in the environment variable named by password_env when AUTH is on | shipped |
-| `redis.list` | QueueFacet | LLEN on one Redis list | depth | `addr`, `url`, `key`, `password_env`, `db`, `tls` | network access to the Redis port; a password in the environment variable named by password_env when AUTH is on | shipped |
-| `s3.bucket` | StorageFacet | an S3-compatible object store (AWS S3, Hetzner Object Storage, MinIO, Spaces, R2): HeadBucket, then a paged ListObjectsV2 under the optional prefix | used_bytes and objects summed over the listing, latency_ms of HeadBucket, total_bytes and disk_pct when quota_bytes is set; NotReady when the bucket does not exist, ConnectionRefused when the endpoint does not answer; detail: last_write, region, endpoint. A bucket with more than max_objects keys reports only lower bounds in the detail | `bucket`, `endpoint`, `region`, `prefix`, `path_style`, `access_key_env`, `secret_key_env`, `session_token_env`, `quota_bytes`, `max_objects`, `interval`, `timeout` | read-only credentials (s3:ListBucket) in the environment variables named by access_key_env and secret_key_env (default AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY) | shipped |
-| `signoz.edge` | TrafficFacet | SigNoz's ClickHouse-backed query API over the traces between two services | for the edge from->to: rate (calls per second), error_rate, timeout_rate, p95_ms and rate_baseline from the service map spans of the last minute; detail: the top failing operations | `from`, `to`, `url`, `token_env`, `window` | a SigNoz API key in the environment variable named by token_env with read access to the query service | spec only, not implemented yet |
-| `signoz.health` | ObservabilityFacet | SigNoz's own health and ingestion metrics (otel-collector, query-service, ClickHouse) | ingest_rate (spans and metrics per second), disk_pct of the ClickHouse volume; NoData when the collector stops receiving, so every signoz.edge reads as no data instead of healthy | `url`, `token_env` | HTTP access to the SigNoz query service; a SigNoz API key in token_env when auth is on | spec only, not implemented yet |
-| `terraform.state` |  | terraform show -json in a working directory | terraform events per added, removed or changed resource, the rules count of hcloud firewalls and FirewallDenied when no firewall allows inbound TCP to the edge's port | `dir`, `interval`, `watch`, `resource`, `port`, `binary` | the terraform binary, an initialised working directory and read access to its state backend | shipped |
+| Probe | Tier | Facets | Source | Delivers | Spec fields | Needs | Status |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| `amqp.queue` | 1 | QueueFacet | the RabbitMQ management API (GET /api/queues/<vhost>/<queue>) | depth (messages ready), unacked, consumers, rate (deliver/get per second, ack rate as fallback), publish_rate, growth_per_min over the last minute, oldest_age_s when the queue exposes head_message_timestamp; detail: state, memory, node, vhost | `management_url`, `queue`, `vhost`, `user`, `password_env`, `interval`, `timeout` | a management user with the monitoring tag; the password in the environment variable named by password_env (default RABBITMQ_PASSWORD) | shipped |
+| `celery.queue` | 2 | QueueFacet | the Celery queue list on a Redis broker (LLEN, LINDEX) and, when flower_url is set, Flower's REST API | depth, oldest_age_s (when the oldest envelope carries published_at or eta), growth_per_min; with Flower: consumers, running_s, p95_s and TaskRunning for tasks older than long_task | `broker`, `host`, `port`, `queue`, `user`, `password_env`, `db`, `tls`, `flower_url`, `oldest`, `long_task` | network access to the broker, named by broker (a redis:// URL) or by host and port with db and tls; its password in the environment variable named by password_env (taken as it is, nothing to encode); optionally, access to Flower | shipped |
+| `celery.worker` | 0 | BackgroundWorkerFacet | Flower's REST API (/api/workers with and without status=true, /api/tasks?state=SUCCESS) | workers_online, workers_total, active, pool_max, pool_used, running_s, p95_s (when at least 10 finished tasks are known), queues; TaskRunning for tasks older than long_task, NotReady when no worker is online | `flower_url`, `name`, `long_task`, `interval`, `timeout` | HTTP access to Flower; no credentials | shipped |
+| `cert.tls` | 0 | CertificateFacet | a TLS handshake with the endpoint | cert_days until the leaf certificate expires, CertExpiring and CertExpired, subject, issuer and SANs | `addr`, `servername`, `interval` | TCP access to host:port; no credentials | shipped |
+| `cnpg.cluster` | 0 | DatabaseFacet, ReplicationFacet | CloudNativePG Cluster (postgresql.cnpg.io/v1) and Backup objects through the dynamic client, plus the pod informer | replicas_ready, replicas_desired; ReplicationBroken, Backup, Switchover; switchover events | `namespace (required)`, `cluster (required)`, `kubeconfig`, `context` | get/list on clusters.postgresql.cnpg.io and backups.postgresql.cnpg.io; list/watch on pods in the namespace | shipped |
+| `cnpg.instance` | 0 | DatabaseFacet, WorkloadFacet | the instance pod of a CloudNativePG cluster (pod informer) and metrics.k8s.io PodMetrics | cpu_pct, mem_pct; NotReady | `namespace (required)`, `cluster (required)`, `role (primary|replica) or instance (pod name)`, `kubeconfig`, `context` | list/watch on pods in the namespace; get/list on pods.metrics.k8s.io | shipped |
+| `dns.record` | 0 | DNSFacet | the system resolver | resolves (1/0), addresses count, the CNAME and whether the record matches the expected target | `host`, `expect`, `interval` | DNS resolution from the machine running wassup; no credentials | shipped |
+| `electric.sync` | 1 | SyncEngineFacet | the Electric SQL HTTP API: GET /v1/health and, when table is set, a /v1/shape handshake plus one short live poll | latency_ms of the health request, ready 1/0; with table: shape_ms, up_to_date 1/0, columns, busy on 429; NotReady while Electric waits for Postgres or the shape is unavailable, ConnectionRefused when the service cannot be reached | `url`, `secret_env`, `table`, `interval`, `timeout` | HTTP access to Electric; the ELECTRIC_SECRET in the environment variable named by secret_env when the service requires one | shipped |
+| `fixture` | 0 |  | a recorded fixture directory | whatever was recorded | `dir`, `speed` | read access to the directory | shipped |
+| `git.events` | 0 |  | git log of a local working copy | deploy events for every commit on the branch within the lookback, plus the branch head in detail | `repo`, `branch`, `interval`, `lookback`, `author_format` | the git binary and read access to the repository; no credentials | shipped |
+| `hatchet.health` | 1 | WorkloadFacet | the Hatchet API's /api/ready and /api/live endpoints and /api/v1/meta | latency_ms, ready (1/0), live (1/0); NotReady while /api/ready is not 200; detail: version, url | `url`, `token_env`, `tenant`, `interval`, `timeout` | HTTP access to the Hatchet API; the token named by token_env is sent when present but not required | shipped |
+| `hatchet.queue` | 1 | QueueFacet | the Hatchet REST API: tenant queue metrics, the worker list and the queued task runs | depth (queued + pending), pending, running, active, growth_per_min, consumers (active workers), oldest_age_s (age of the oldest queued task); detail: queues, total, the queue or workflow filter, url | `url`, `token_env`, `tenant`, `interval`, `timeout`, `queue`, `workflow` | a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token | shipped |
+| `hatchet.workers` | 1 | BackgroundWorkerFacet | the Hatchet REST API: the worker list, running and completed task runs and the tenant queue metrics | workers_online, workers_total, pool_used, pool_max (slots), active (running tasks), waiters (queued + pending tasks), running_s (longest running task), p95_s (task duration over the last hour); TaskRunning past long_task, PoolExhausted, NotReady; detail: workers, long tasks | `url`, `token_env`, `tenant`, `interval`, `timeout`, `name`, `long_task` | a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token | shipped |
+| `hatchet.workflow` | 1 | ScheduledJobFacet | the Hatchet REST API: the workflow list, per-workflow task metrics, the latest workflow runs and the cron triggers | succeeded, failed, active, queued, cancelled over the window, running_s; JobFailed when the latest finished run failed, JobRunning while a run is running; a job event per failed run; detail: schedule, cron, last_success, last_failure, workflow_id | `url`, `token_env`, `tenant`, `interval`, `timeout`, `workflow`, `window` | a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token | shipped |
+| `hcloud.firewall` | 1 | FirewallFacet, TrafficFacet | the Hetzner Cloud API firewall resource | rules (count); on an edge with port set: allowed (1/0) and FirewallDenied when no inbound rule lets the port through; detail: rules (direction, protocol, port, source ips, description), applied_to. No events: terraform.state owns change markers | `name`, `id`, `token_env`, `port`, `protocol`, `interval`, `endpoint` | a read-only Cloud API token in the environment variable named by token_env (default HCLOUD_TOKEN) | shipped |
+| `hcloud.lb` | 1 | LoadBalancerFacet | the Hetzner Cloud API: load balancer targets' health and the load balancer metrics endpoint | connections, rate (requests per second), targets_healthy, targets_total, TargetUnhealthy when no target is healthy; per entry of targets an observation for the edge <lb>-><component> with healthy (1/0) and HealthCheckFailing; detail: services, targets, algorithm, location | `name`, `id`, `token_env`, `targets`, `interval`, `endpoint` | a read-only Cloud API token in the environment variable named by token_env (default HCLOUD_TOKEN) | shipped |
+| `http.ping` | 0 | ExternalFacet, WorkloadFacet, ObservabilityFacet | an HTTP endpoint | latency_ms, error_rate and timeout_rate over the last 10 attempts, the last status, Timeout after 3 consecutive failures | `url`, `method`, `timeout`, `interval`, `expect_status` | outbound HTTPS to the endpoint; no credentials | shipped |
+| `k8s.cronjob` | 0 | ScheduledJobFacet | Kubernetes API (cronjob and job informers) | active, succeeded, failed (last 24h), running_s; JobFailed, JobRunning | `namespace (required)`, `name (required)`, `kubeconfig`, `context` | get/list/watch on cronjobs and jobs in the namespace | shipped |
+| `k8s.ingress` | 0 | IngressFacet, CertificateFacet | Kubernetes API (ingress informer); the certificate's expiry from cert-manager Certificates when installed, else from a TLS handshake with the ingress host; the TLS secrets only when read_tls_secret is true | cert_days; CertExpired, CertExpiring, CertRenewalFailed; cert (renewal) events | `namespace (required)`, `name (required)`, `read_tls_secret`, `kubeconfig`, `context` | get/list/watch on ingresses; list on certificates.cert-manager.io (optional); TCP access to the ingress hosts on port 443 (optional); get on the TLS secrets in the namespace only when read_tls_secret is true | shipped |
+| `k8s.node` | 0 | NodeFacet | Kubernetes API (node, pod and event informers), metrics.k8s.io NodeMetrics and the kubelet /stats/summary through the API server proxy | cpu_pct, mem_pct, disk_pct, pods, killed; NotReady, MemoryPressure, DiskPressure, Rebooted; node (reboot) events | `name (required)`, `kubeconfig`, `context` | get/list/watch on nodes, pods and events; get on nodes.metrics.k8s.io; get on nodes/proxy for disk usage (optional) | shipped |
+| `k8s.pvc` | 0 | StorageFacet | Kubernetes API (persistentvolumeclaim and pod informers) and the kubelet /stats/summary of the node mounting the claim | used_bytes, total_bytes, disk_pct (disk_pct only when the kubelet stats are readable) | `namespace (required)`, `name (required)`, `kubeconfig`, `context` | get/list/watch on persistentvolumeclaims and pods in the namespace; get on nodes/proxy for usage (optional) | shipped |
+| `k8s.workload` | 0 | WorkloadFacet | Kubernetes API (informers on pods, deployments, statefulsets, daemonsets, replicasets, events) and metrics.k8s.io PodMetrics | replicas_ready, replicas_desired, restarts, restart_window_s, cpu_pct, mem_pct, killed, evicted; CrashLoopBackOff, ImagePullBackOff, OOMKilled, Evicted; deploy and scale events | `namespace (required)`, `selector (label selector; required unless name and kind are set)`, `name`, `kind (Deployment|StatefulSet|DaemonSet)`, `kubeconfig`, `context` | get/list/watch on pods, replicasets, deployments, statefulsets, daemonsets and events in the namespace; get/list on pods.metrics.k8s.io | shipped |
+| `kubelet.stats` | 0 | NodeFacet | the kubelet summary API (/stats/summary) of one node, through the API server proxy | cpu_pct, mem_pct, disk_pct of the node root and image filesystems, iops and used_bytes per volume, finer than metrics-server and without it; detail: per-filesystem capacity, inode pressure | `node`, `kubeconfig`, `context` | RBAC get on nodes/proxy for the kubeconfig's identity | spec only, not implemented yet |
+| `pg.pool` | 2 |  | pgbouncer's admin console (SHOW POOLS, CONFIG, DATABASES, STATS) | pool_used, pool_max, waiters, queued, rate; PoolExhausted when every server connection is busy and clients wait; detail: pools table, maxwait, default_pool_size, max_client_conn | `dsn_env`, `host`, `port`, `user`, `database`, `sslmode`, `password_env`, `pool`, `via`, `interval`, `kubeconfig`, `context` | a connection to database "pgbouncer" as a stats_users or admin_users role: either a DSN in the environment variable named by dsn_env, or host, port, user and sslmode with the password in the variable named by password_env (taken as it is, nothing to encode; database defaults to pgbouncer). With via set to k8s.service/<namespace>/<name>:<port> (or k8s.pod/...) wassup opens its own port-forward, which needs create on pods/portforward; host and port may then be left out | shipped |
+| `pg.stats` | 2 |  | pg_stat_activity, pg_stat_replication, pg_replication_slots and pg_database_size over a read-only connection | connections_used, connections_max, active_connections, waiters, lag_bytes, wal_retained_bytes, used_bytes, disk_pct; on a replication edge (replica set): lag_bytes, streaming, wal_retained_bytes and ReplicationBroken/SlotInactive; detail: version, replicas, slots, top_waiting | `dsn_env`, `host`, `port`, `user`, `database`, `sslmode`, `password_env`, `via`, `replica`, `disk_total_bytes`, `interval` | a connection for a role that may log in: either a DSN in the environment variable named by dsn_env, or host, port, user, database and sslmode with the password in the variable named by password_env (taken as it is, nothing to encode). With via naming a tunnel, host and port may be left out. Every role reads connections, slots and sizes; state and lag of replicas and what other sessions do take pg_read_all_stats (or pg_monitor), and the detail says how to grant it | shipped |
+| `redis.info` | 2 | CacheFacet | the Redis INFO command | mem_pct, hit_rate (per tick), evictions (per minute), clients; CacheFull when memory is at the limit and the policy is noeviction or the hit rate collapsed; detail: maxmemory, maxmemory_policy, used_memory_human, keys, keys_without_ttl, redis_version | `addr`, `url`, `host`, `port`, `user`, `password_env`, `db`, `tls` | network access to the Redis port, named by url, by addr (host:port) or by host and port; a password in the environment variable named by password_env when AUTH is on (taken as it is, nothing to encode), and user for an ACL user | shipped |
+| `redis.list` | 2 | QueueFacet | LLEN on one Redis list | depth | `addr`, `url`, `host`, `port`, `key`, `user`, `password_env`, `db`, `tls` | network access to the Redis port, named by url, by addr (host:port) or by host and port; a password in the environment variable named by password_env when AUTH is on (taken as it is, nothing to encode), and user for an ACL user | shipped |
+| `s3.bucket` | 1 | StorageFacet | an S3-compatible object store (AWS S3, Hetzner Object Storage, MinIO, Spaces, R2): HeadBucket, one request a round; with list_objects: true also a paged ListObjectsV2 under the optional prefix, one request per 1000 objects a round | latency_ms of HeadBucket; NotReady when the bucket does not exist, ConnectionRefused when the endpoint does not answer; detail: region, endpoint. With list_objects: true also used_bytes and objects summed over the listing, last_write, and disk_pct when quota_bytes is set; a bucket with more than max_objects keys (default 20000) is not sized and reports only lower bounds in the detail. Without the listing the size and the object count are not read and not shown | `bucket`, `endpoint`, `region`, `list_objects`, `prefix`, `path_style`, `access_key_env`, `secret_key_env`, `session_token_env`, `quota_bytes`, `max_objects`, `interval`, `timeout` | read-only credentials in the environment variables named by access_key_env and secret_key_env (default AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY), allowed s3:ListBucket on the bucket, which HeadBucket and the listing both take. The check costs one request a round; the listing costs one more per 1000 objects, which a store that bills requests charges for | shipped |
+| `signoz.edge` | 1 | TrafficFacet | SigNoz's ClickHouse-backed query API over the traces between two services | for the edge from->to: rate (calls per second), error_rate, timeout_rate, p95_ms and rate_baseline from the service map spans of the last minute; detail: the top failing operations | `from`, `to`, `url`, `token_env`, `window` | a SigNoz API key in the environment variable named by token_env with read access to the query service | spec only, not implemented yet |
+| `signoz.health` | 1 | ObservabilityFacet | SigNoz's own health and ingestion metrics (otel-collector, query-service, ClickHouse) | ingest_rate (spans and metrics per second), disk_pct of the ClickHouse volume; NoData when the collector stops receiving, so every signoz.edge reads as no data instead of healthy | `url`, `token_env` | HTTP access to the SigNoz query service; a SigNoz API key in token_env when auth is on | spec only, not implemented yet |
+| `terraform.state` | 0 |  | terraform show -json in a working directory | terraform events per added, removed or changed resource, the rules count of hcloud firewalls and FirewallDenied when no firewall allows inbound TCP to the edge's port | `dir`, `interval`, `watch`, `resource`, `port`, `binary` | the terraform binary, an initialised working directory and read access to its state backend | shipped |

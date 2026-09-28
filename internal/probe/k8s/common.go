@@ -53,14 +53,31 @@ func (b *base) connect(spec map[string]any) (*Clients, error) {
 	return c, nil
 }
 
-// syncOrFail waits for the informers and marks the probe failed when the
-// caches never fill.
-func (b *base) syncOrFail(ctx context.Context, c *Clients, infs ...cache.SharedIndexInformer) error {
-	if err := c.informers().sync(ctx, syncTimeout, infs...); err != nil {
-		b.h.Set(probe.HealthFailed, "informer sync: "+err.Error())
-		return err
+// await waits until the API server answers and the caches of the informers
+// are filled. A server that does not answer is reported at once, as an
+// observation with the reason, and asked again until it does: a cache that
+// never fills says nothing for half a minute, which looks like a hang, and
+// a cluster that was away for a moment must not end the probe. It returns
+// an error only when ctx is done.
+func (b *base) await(ctx context.Context, c *Clients, out chan<- probe.Observation, target string, infs ...cache.SharedIndexInformer) error {
+	for {
+		err := c.reach(ctx)
+		if err == nil {
+			if err = c.informers().sync(ctx, syncTimeout, infs...); err == nil {
+				return nil
+			}
+			err = fmt.Errorf("%w: the account may not be allowed to list and watch what %s reads; `wassup access` prints the role it needs", err, b.kind)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		b.fail(ctx, out, target, err)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(reachRetry):
+		}
 	}
-	return nil
 }
 
 // fail sends an error observation and records degraded health.

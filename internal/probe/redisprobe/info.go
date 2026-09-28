@@ -8,8 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
 	"github.com/danilopopovikj/wassup/internal/probe/facet"
@@ -217,20 +215,23 @@ var infoAccess = probe.Access{
 	Delivers: "mem_pct, hit_rate (per tick), evictions (per minute), clients; " +
 		"CacheFull when memory is at the limit and the policy is noeviction or the hit rate collapsed; " +
 		"detail: maxmemory, maxmemory_policy, used_memory_human, keys, keys_without_ttl, redis_version",
-	SpecFields:  []string{"addr", "url", "password_env", "db", "tls"},
-	Needs:       "network access to the Redis port; a password in the environment variable named by password_env when AUTH is on",
+	SpecFields: []string{"addr", "url", "host", "port", "user", "password_env", "db", "tls"},
+	Needs: "network access to the Redis port, named by url, by addr (host:port) or by host and port; " +
+		"a password in the environment variable named by password_env when AUTH is on (taken as it is, nothing to encode), and user for an ACL user",
 	Implemented: true,
 	Facets:      []string{facet.NameCache},
+	Tier:        probe.TierData,
 }
 
 func init() {
 	probe.Register(infoAccess, func() probe.Probe { return &InfoProbe{} })
 }
 
-// InfoProbe is redis.info. Spec: addr (host:port) or url (redis://…),
-// password_env, db, tls.
+// InfoProbe is redis.info. Spec: url (redis://…), addr (host:port) or host
+// and port; user, password_env, db, tls.
 type InfoProbe struct {
 	h probe.Health
+	probe.Lifetime
 }
 
 // Kind implements probe.Probe.
@@ -249,10 +250,11 @@ func (p *InfoProbe) Start(ctx context.Context, spec map[string]any, out chan<- p
 		p.h.Set(probe.HealthFailed, err.Error())
 		return err
 	}
-	client := redis.NewClient(opt)
+	client := newClient(opt)
+	srv := serverOf(opt, spec)
 	tgt := target(spec)
 	every := tick(spec)
-	go func() {
+	p.Go(func() {
 		defer client.Close()
 		var prev *Sample
 		seen := firstSeen{}
@@ -260,14 +262,16 @@ func (p *InfoProbe) Start(ctx context.Context, spec map[string]any, out chan<- p
 		defer t.Stop()
 		for {
 			o := probe.Observation{Target: tgt, Probe: p.Kind(), At: time.Now()}
-			rctx, cancel := context.WithTimeout(ctx, roundTimeout)
+			// A command in flight when the probe stops may finish: cutting it
+			// closes the connection with the answer unread.
+			rctx, cancel := probe.RoundContext(ctx, roundTimeout)
 			text, err := client.Info(rctx).Result()
 			cancel()
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				o.Err = "INFO: " + err.Error()
+				o.Err = srv.explain("INFO", err)
 				p.h.Set(probe.HealthDegraded, o.Err)
 			} else {
 				info := ParseInfo(text)
@@ -291,6 +295,6 @@ func (p *InfoProbe) Start(ctx context.Context, spec map[string]any, out chan<- p
 			case <-t.C:
 			}
 		}
-	}()
+	})
 	return nil
 }

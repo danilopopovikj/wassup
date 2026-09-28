@@ -184,7 +184,7 @@ func poolRef(filter string, table []map[string]any) string {
 }
 
 // showRows runs a pgbouncer SHOW command and returns its rows as maps.
-func showRows(ctx context.Context, conn *pgx.Conn, what string) ([]map[string]any, error) {
+func showRows(ctx context.Context, conn reads, what string) ([]map[string]any, error) {
 	rows, err := conn.Query(ctx, "SHOW "+what)
 	if err != nil {
 		return nil, fmt.Errorf("SHOW %s: %w", what, err)
@@ -196,8 +196,9 @@ func showRows(ctx context.Context, conn *pgx.Conn, what string) ([]map[string]an
 	return out, nil
 }
 
-// collectPools runs SHOW POOLS, CONFIG, DATABASES and STATS.
-func collectPools(ctx context.Context, conn *pgx.Conn) (PoolInput, error) {
+// collectPools runs SHOW POOLS, CONFIG, DATABASES and STATS. The admin console
+// has no transactions; what keeps it to reading is that only SHOW is sent.
+func collectPools(ctx context.Context, conn reads) (PoolInput, error) {
 	var in PoolInput
 	rows, err := showRows(ctx, conn, "POOLS")
 	if err != nil {
@@ -239,25 +240,34 @@ func collectPools(ctx context.Context, conn *pgx.Conn) (PoolInput, error) {
 	return in, nil
 }
 
+// adminDatabase is the database of pgbouncer's admin console.
+const adminDatabase = "pgbouncer"
+
 // poolAccess documents pg.pool.
 var poolAccess = probe.Access{
 	Kind:   "pg.pool",
 	Source: "pgbouncer's admin console (SHOW POOLS, CONFIG, DATABASES, STATS)",
 	Delivers: "pool_used, pool_max, waiters, queued, rate; PoolExhausted when every server connection is busy and clients wait; " +
 		"detail: pools table, maxwait, default_pool_size, max_client_conn",
-	SpecFields:  []string{"dsn_env", "pool", "via", "interval"},
-	Needs:       "a DSN for database \"pgbouncer\" in the environment variable named by dsn_env, as a stats_users or admin_users role",
+	SpecFields: []string{"dsn_env", "host", "port", "user", "database", "sslmode", "password_env", "pool", "via", "interval", "kubeconfig", "context"},
+	Needs: "a connection to database \"pgbouncer\" as a stats_users or admin_users role: either a DSN in the environment variable named by dsn_env, " +
+		"or host, port, user and sslmode with the password in the variable named by password_env (taken as it is, nothing to encode; database defaults to pgbouncer). " +
+		"With via set to k8s.service/<namespace>/<name>:<port> (or k8s.pod/...) wassup opens its own port-forward, which needs create on pods/portforward; " +
+		"host and port may then be left out",
 	Implemented: true,
+	Tier:        probe.TierData,
 }
 
 func init() {
 	probe.Register(poolAccess, func() probe.Probe { return &PoolProbe{} })
 }
 
-// PoolProbe is pg.pool. Spec: dsn_env (required, database "pgbouncer"),
-// pool (database, user or "database/user" filter), via, interval.
+// PoolProbe is pg.pool. Spec: dsn_env (database "pgbouncer"), or host, port,
+// user, sslmode and password_env (database defaults to "pgbouncer"); pool
+// (database, user or "database/user" filter), via, interval.
 type PoolProbe struct {
 	h probe.Health
+	lifetime
 }
 
 // Kind implements probe.Probe.
@@ -265,15 +275,18 @@ func (p *PoolProbe) Kind() string { return poolAccess.Kind }
 
 // Validate implements probe.Probe.
 func (p *PoolProbe) Validate(spec map[string]any) error {
-	if err := probe.RequireString(spec, "dsn_env"); err != nil {
+	if err := validateConn(spec, "dsn_env"); err != nil {
 		return err
+	}
+	if db := probe.Str(spec, "database", adminDatabase); db != adminDatabase {
+		return fmt.Errorf("database must be %q, the admin console of pgbouncer, got %q", adminDatabase, db)
 	}
 	if v, ok := spec["interval"].(string); ok {
 		if _, err := time.ParseDuration(v); err != nil {
 			return fmt.Errorf("interval: %w", err)
 		}
 	}
-	return nil
+	return probe.ValidateVia(probe.Str(spec, "via", ""))
 }
 
 // Health implements probe.Probe.
@@ -281,13 +294,13 @@ func (p *PoolProbe) Health() probe.ProbeHealth { return p.h.Get() }
 
 // Start implements probe.Probe.
 func (p *PoolProbe) Start(ctx context.Context, spec map[string]any, out chan<- probe.Observation) error {
-	c, err := newConnector(spec, "dsn_env", "")
+	c, err := newConnector(spec, "dsn_env", "", adminDatabase)
 	if err != nil {
 		p.h.Set(probe.HealthFailed, err.Error())
 		return err
 	}
-	if db := c.database(); db != "" && db != "pgbouncer" {
-		err := fmt.Errorf("dsn_env must point at the pgbouncer admin database, got %q", db)
+	if db := c.database(); db != "" && db != adminDatabase {
+		err := fmt.Errorf("the connection must point at the pgbouncer admin database, got %q", db)
 		p.h.Set(probe.HealthFailed, err.Error())
 		return err
 	}
@@ -297,14 +310,12 @@ func (p *PoolProbe) Start(ctx context.Context, spec map[string]any, out chan<- p
 	every := tick(spec)
 	interval := probe.Dur(spec, "interval", every)
 	since := map[string]time.Time{}
-	poll := func(ctx context.Context) probe.Observation {
+	poll := func(rctx context.Context) probe.Observation {
 		o := probe.Observation{Target: tgt, Probe: p.Kind(), At: time.Now()}
-		rctx, cancel := context.WithTimeout(ctx, roundTimeout)
-		defer cancel()
 		conn, err := c.acquire(rctx)
 		if err == nil {
 			var in PoolInput
-			in, err = collectPools(rctx, conn)
+			in, err = collectPools(rctx, reads{conn})
 			if err == nil {
 				o.Metrics, o.Conditions, o.Detail = ObservePools(in, filter)
 				if via != "" {
@@ -319,15 +330,12 @@ func (p *PoolProbe) Start(ctx context.Context, spec map[string]any, out chan<- p
 				return o
 			}
 		}
+		// Worded while the tunnel is still known: drop forgets it.
+		err = c.explain(err, conn != nil)
 		c.drop()
-		o.Err = err.Error()
-		if isMisconfigured(err) {
-			p.h.Set(probe.HealthFailed, o.Err)
-		} else {
-			p.h.Set(probe.HealthDegraded, o.Err)
-		}
+		failed(ctx, &p.h, &o, err)
 		return o
 	}
-	go run(ctx, out, every, interval, c, poll)
+	p.spawn(ctx, out, every, interval, c, poll)
 	return nil
 }

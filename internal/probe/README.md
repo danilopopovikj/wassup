@@ -20,9 +20,30 @@ type Probe interface {
 * Register in `init()` with `probe.Register(probe.Access{...}, factory)`.
   `Access` documents the kind, source, what it delivers, its spec fields and
   the credentials or RBAC it needs. It is rendered into the skill reference.
+* A probe reads and never writes, and its client is what holds it to that:
+  an HTTP client is built with `Transport: probe.ReadOnly(...)` and sends
+  GET and HEAD only; a client of another protocol refuses what does not read
+  before it is sent and returns `probe.ErrReadOnly` (see `reads` in
+  `pgprobe` and `readOnlyHook` in `redisprobe`), and asks the server for a
+  read-only session where the server has one. A request that reads but also
+  makes its source do work (a shape on Electric) is off unless the binding
+  asks for it, and the probe's documentation says what it sets off.
 * The runtime builds one probe instance per binding and calls `Start` once.
   `Start` must return promptly and push observations from a goroutine until
   `ctx` is done. The runtime closes nothing; stop when `ctx` ends.
+* A probe that holds a connection releases it in order when `ctx` ends (for
+  PostgreSQL: the terminate message, sent on a context of its own, never on
+  the cancelled `ctx`) and implements `probe.Closer`, so the runtime waits
+  for the goodbye before the process exits. A connection that is cut instead
+  takes a port-forward or a tunnel down with it. Do not run a query on
+  `ctx` itself: cancelling it halfway cuts the connection just the same.
+  Run each round on `probe.RoundContext(ctx, timeout)` and start the loop
+  with an embedded `probe.Lifetime`; a round that was cut short by the stop
+  is not reported and does not change the probe's health.
+* A probe that connects into the cluster takes `via` and opens its path with
+  `probe.OpenTunnel`. The provider registers the opener
+  (`probe.RegisterTunnel("k8s.service", ...)`), so the probe never imports
+  the provider.
 * The runtime injects the bound element id as `spec["_target"]` and the tick
   as `spec["_tick"]` (a `time.Duration`). Set `Observation.Target` to that id
   unless the probe deliberately reports for other ids too (a load balancer
@@ -35,7 +56,10 @@ type Probe interface {
   fields ending in `_env` name an environment variable holding the secret.
 * On read errors: send `Observation{Target, Err: msg}` and set health to
   degraded (transient) or failed (misconfigured). Never fabricate a healthy
-  observation.
+  observation, and never a failing one: a read that failed, timed out or
+  was not permitted says nothing about the system. The element then reads
+  "no data" with the reason. A column the source hides (NULL for a role
+  without the privilege) is "not known", not a value: omit the metric.
 * Everything a probe learns that the detail panel or `explain` may show goes
   in `Detail` (JSON-friendly values only).
 
@@ -83,10 +107,14 @@ Where the numbers come from, per backend:
 - **Hatchet**: `queue-metrics` (queued, pending, running per queue and
   workflow), `worker` (slots), `workflow-runs` (running and failed tasks),
   `task-metrics` (counts), `workflows/crons` (schedules).
-- **Postgres replication**: `pg_stat_replication` (state, lag as
-  `pg_wal_lsn_diff`), `pg_replication_slots` (`active`, WAL retained as the
-  distance from `restart_lsn` to the current LSN), keyed by the consumer's
-  slot or application name; CNPG's operator status through `cnpg.cluster`.
+- **Postgres replication**: `pg_replication_slots` for slot activity
+  (`active`, always), WAL retained (the distance from `restart_lsn` to the
+  current LSN) and the consumer's position (`confirmed_flush_lsn` for a
+  logical slot, `restart_lsn` for a physical one); `pg_stat_replication`
+  for state and lag (`pg_wal_lsn_diff`) when the role may see them, which
+  takes `pg_read_all_stats`. Keyed by the consumer's slot, application name
+  or CloudNativePG instance (`_cnpg_<instance>`); CNPG's operator status
+  through `cnpg.cluster`.
 
 To add a provider (ECS, Nomad, VMs, RDS, Sidekiq, Temporal): write probes
 that read its API and fill the matching facets, call the `Emit*` functions,

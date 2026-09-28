@@ -18,6 +18,7 @@ func init() {
 		SpecFields: []string{"from", "to", "url", "token_env", "window"},
 		Needs:      "a SigNoz API key in the environment variable named by token_env with read access to the query service",
 		Facets:     []string{facet.NameTraffic},
+		Tier:       probe.TierToken,
 	}, "from", "to", "url")
 
 	probe.Stub(probe.Access{
@@ -28,6 +29,7 @@ func init() {
 		SpecFields: []string{"url", "token_env"},
 		Needs:      "HTTP access to the SigNoz query service; a SigNoz API key in token_env when auth is on",
 		Facets:     []string{facet.NameObservability},
+		Tier:       probe.TierToken,
 	}, "url")
 
 	probe.Stub(probe.Access{

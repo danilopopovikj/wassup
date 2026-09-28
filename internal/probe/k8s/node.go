@@ -29,6 +29,12 @@ func init() {
 		Needs:       "get/list/watch on nodes, pods and events; get on nodes.metrics.k8s.io; get on nodes/proxy for disk usage (optional)",
 		Implemented: true,
 		Facets:      []string{facet.NameNode},
+		// Not nodes/proxy: it reaches every endpoint of the kubelet, not
+		// only the disk usage this probe reads through it.
+		RBAC: []probe.Rule{
+			probe.Reads("", "nodes", "pods", "events"),
+			probe.Reads("metrics.k8s.io", "nodes"),
+		},
 	}, func() probe.Probe { return &nodeProbe{base: base{kind: kindNode}} })
 }
 
@@ -79,8 +85,7 @@ func (n *nodeProbe) Start(ctx context.Context, spec map[string]any, out chan<- p
 	}, notify)
 
 	go func() {
-		if err := n.syncOrFail(ctx, c, nodeInf, inf.pods, evInf); err != nil {
-			probe.Send(ctx, out, probe.Observation{Target: target, Probe: kindNode, At: time.Now(), Err: err.Error()})
+		if err := n.await(ctx, c, out, target, nodeInf, inf.pods, evInf); err != nil {
 			return
 		}
 		runLoop(ctx, tickOf(spec), kick, func() {

@@ -2,12 +2,15 @@ package discover
 
 import (
 	"os"
+	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/danilopopovikj/wassup/internal/discover/redact"
 	"github.com/danilopopovikj/wassup/internal/model"
 )
 
@@ -72,6 +75,43 @@ type k8sObj struct {
 	Kind       string         `yaml:"kind"`
 	Metadata   map[string]any `yaml:"metadata"`
 	Spec       map[string]any `yaml:"spec"`
+	Data       map[string]any `yaml:"data"` // ConfigMap
+}
+
+// envEntry is one variable of a container, as the manifest states it.
+type envEntry struct {
+	name, value string
+	secret      string // "<secret>/<key>"
+	configMap   string // name of the ConfigMap the value comes from
+	key         string // key in that ConfigMap
+}
+
+// envSource is one envFrom entry.
+type envSource struct {
+	configMap, secret, prefix string
+}
+
+// pendingContainer is a container whose environment is not resolved yet.
+type pendingContainer struct {
+	env  []envEntry
+	from []envSource
+	args []string // command and args
+}
+
+// pendingWorkload is a pod template read from a manifest. Its ConfigMaps
+// may live in a file that is read later, so it waits for the end.
+type pendingWorkload struct {
+	id, ns     string
+	rel        string
+	line       int
+	containers []pendingContainer
+}
+
+// pendingService is a Service waiting for the workloads it may select.
+type pendingService struct {
+	name, ns string
+	selector map[string]string
+	ev       Evidence
 }
 
 func scanManifest(a *accumulator, path, rel string) {
@@ -80,13 +120,11 @@ func scanManifest(a *accumulator, path, rel string) {
 		return
 	}
 	dec := yaml.NewDecoder(strings.NewReader(string(b)))
-	docIndex := 0
 	for {
 		var node yaml.Node
 		if err := dec.Decode(&node); err != nil {
 			break
 		}
-		docIndex++
 		var obj k8sObj
 		if err := node.Decode(&obj); err != nil || obj.Kind == "" {
 			continue
@@ -94,6 +132,10 @@ func scanManifest(a *accumulator, path, rel string) {
 		line := node.Line
 		if line == 0 {
 			line = 1
+		}
+		if policyKinds[obj.Kind] {
+			scanPolicy(a, rel, line, &node)
+			continue
 		}
 		manifestObject(a, rel, line, obj, "manifest")
 	}
@@ -116,7 +158,12 @@ func str(m map[string]any, keys ...string) string {
 			return ""
 		}
 	}
-	switch v := cur.(type) {
+	return scalar(cur)
+}
+
+// scalar renders a YAML scalar as text.
+func scalar(v any) string {
+	switch v := v.(type) {
 	case string:
 		return v
 	case int:
@@ -150,28 +197,89 @@ func asMap(v any) map[string]any {
 	return m
 }
 
+// stringMap flattens a YAML mapping of scalars.
+func stringMap(v any) map[string]string {
+	m := asMap(v)
+	if len(m) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for k, x := range m {
+		out[k] = scalar(x)
+	}
+	return out
+}
+
+// sortedKeys returns the keys of a map in order, so that a scan reads the
+// same way every time.
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// namespaceOf returns the namespace of a manifest: its own, or the one the
+// nearest kustomization above it sets.
+func (a *accumulator) namespaceOf(rel, own string) string {
+	if own != "" {
+		if hasPlaceholder(own) {
+			return ""
+		}
+		return own
+	}
+	for dir := filepath.Dir(filepath.Join(a.root, rel)); ; dir = filepath.Dir(dir) {
+		if ns, ok := a.kustomizeNS[dir]; ok {
+			return ns
+		}
+		if dir == a.root || filepath.Dir(dir) == dir {
+			return ""
+		}
+	}
+}
+
 func manifestObject(a *accumulator, rel string, line int, obj k8sObj, source string) {
 	name := str(obj.Metadata, "name")
-	ns := str(obj.Metadata, "namespace")
+	if name == "" {
+		return
+	}
+	if hasPlaceholder(name) {
+		a.note("%s:%d: the %s %q has a placeholder for a name and was left out", rel, line, obj.Kind, name)
+		return
+	}
+	ns := a.namespaceOf(rel, str(obj.Metadata, "namespace"))
 	ev := Evidence{Source: source, File: rel, Line: line, Note: obj.Kind + " " + name}
 	switch obj.Kind {
+	case "ConfigMap":
+		a.addConfigMap(ns, name, stringMap(obj.Data))
 	case "Deployment", "StatefulSet", "DaemonSet", "CronJob", "Job", "Rollout":
-		tmpl := asMap(asMap(obj.Spec["template"])["spec"])
+		podTemplate := asMap(obj.Spec["template"])
 		if obj.Kind == "CronJob" {
-			tmpl = asMap(asMap(asMap(asMap(obj.Spec["jobTemplate"])["spec"])["template"])["spec"])
+			podTemplate = asMap(asMap(asMap(obj.Spec["jobTemplate"])["spec"])["template"])
 		}
+		tmpl := asMap(podTemplate["spec"])
 		typ := "workload"
 		if obj.Kind == "CronJob" || obj.Kind == "Job" {
 			typ = "scheduledjob"
 		}
 		c := Candidate{ID: model.SlugifyID(name), Type: typ, Label: labelFor(name), Namespace: ns, Kind: obj.Kind, Name: name, Env: map[string]string{}, Extra: map[string]string{}, Evidence: []Evidence{ev}}
-		if sel := asMap(asMap(obj.Spec["selector"])["matchLabels"]); len(sel) > 0 {
+		sel := asMap(asMap(obj.Spec["selector"])["matchLabels"])
+		if len(sel) > 0 {
 			c.Selector = selectorFromLabels(sel)
+		}
+		// The pod's labels say what a Service selects; the object's labels
+		// say which release and product it belongs to.
+		c.Labels = mergeMap(mergeMap(stringMap(asMap(podTemplate["metadata"])["labels"]), stringMap(sel)), stringMap(obj.Metadata["labels"]))
+		if rel := str(obj.Metadata, "annotations", "meta.helm.sh/release-name"); rel != "" {
+			c.Extra["release"] = rel
 		}
 		if sched := str(obj.Spec, "schedule"); sched != "" {
 			c.Extra["schedule"] = sched
 		}
-		var cmdAll []string
+		placement(&c, tmpl)
+		pw := pendingWorkload{id: c.ID, ns: ns, rel: rel, line: line}
 		for _, cv := range list(tmpl, "containers") {
 			cont := asMap(cv)
 			img := str(cont, "image")
@@ -184,61 +292,47 @@ func manifestObject(a *accumulator, rel string, line int, obj k8sObj, source str
 					c.Label = l
 				}
 			}
+			var pc pendingContainer
+			for _, fv := range list(cont, "envFrom") {
+				fm := asMap(fv)
+				pc.from = append(pc.from, envSource{configMap: str(fm, "configMapRef", "name"), secret: str(fm, "secretRef", "name"), prefix: str(fm, "prefix")})
+			}
 			for _, ev := range list(cont, "env") {
 				em := asMap(ev)
 				n := str(em, "name")
 				if n == "" {
 					continue
 				}
-				v := str(em, "value")
-				if v == "" {
-					if s := str(em, "valueFrom", "secretKeyRef", "name"); s != "" {
-						v = "secret:" + s + "/" + str(em, "valueFrom", "secretKeyRef", "key")
-					} else if s := str(em, "valueFrom", "configMapKeyRef", "name"); s != "" {
-						v = "configmap:" + s + "/" + str(em, "valueFrom", "configMapKeyRef", "key")
-					}
+				e := envEntry{name: n, value: str(em, "value")}
+				if s := str(em, "valueFrom", "secretKeyRef", "name"); s != "" {
+					e.secret = s + "/" + str(em, "valueFrom", "secretKeyRef", "key")
+				} else if s := str(em, "valueFrom", "configMapKeyRef", "name"); s != "" {
+					e.configMap, e.key = s, str(em, "valueFrom", "configMapKeyRef", "key")
 				}
-				c.Env[n] = v
+				pc.env = append(pc.env, e)
 			}
-			var parts []string
 			for _, x := range list(cont, "command") {
-				parts = append(parts, str(map[string]any{"v": x}, "v"))
+				pc.args = append(pc.args, scalar(x))
 			}
 			for _, x := range list(cont, "args") {
-				parts = append(parts, str(map[string]any{"v": x}, "v"))
+				pc.args = append(pc.args, scalar(x))
 			}
-			if len(parts) > 0 {
-				cmdAll = append(cmdAll, strings.Join(parts, " "))
-			}
+			pw.containers = append(pw.containers, pc)
 		}
-		if len(cmdAll) > 0 {
-			c.Extra["command"] = strings.Join(cmdAll, " ; ")
+		if a.add(c) != nil {
+			a.workloads = append(a.workloads, pw)
 		}
-		added := a.add(c)
-		if added == nil {
-			return
-		}
-		envLinks(a, added, rel, line)
-		commandLinks(a, added, cmdAll, rel, line)
 	case "Service":
-		sel := asMap(obj.Spec["selector"])
-		// A Service names whatever the selector points at; the workload with
-		// the same labels gets these addresses.
-		target := str(sel, "app")
-		if target == "" {
-			target = str(sel, "app.kubernetes.io/name")
-		}
-		if target == "" {
-			target = name
-		}
-		c := Candidate{ID: model.SlugifyID(target), Type: "custom", Label: labelFor(target), Namespace: ns, Evidence: []Evidence{{Source: source, File: rel, Line: line, Note: "Service " + name + " selects " + target}}}
-		c.Addresses = serviceAddresses(name, ns)
-		if cur := a.add(c); cur != nil && cur.Type == "custom" {
-			cur.Type = "workload"
-		}
+		a.services = append(a.services, pendingService{name: name, ns: ns, selector: stringMap(obj.Spec["selector"]),
+			ev: Evidence{Source: source, File: rel, Line: line, Note: "Service " + name}})
 	case "Ingress":
+		// An Ingress is the ingress routing to the workloads behind its
+		// Services: one flow per Service, however many paths lead to it.
 		var hosts []string
 		backends := map[string]bool{}
+		if svc := str(obj.Spec, "defaultBackend", "service", "name"); svc != "" {
+			backends[svc] = true
+		}
 		for _, rv := range list(obj.Spec, "rules") {
 			rm := asMap(rv)
 			if h := str(rm, "host"); h != "" {
@@ -251,16 +345,7 @@ func manifestObject(a *accumulator, rel string, line int, obj k8sObj, source str
 				}
 			}
 		}
-		c := Candidate{ID: "ingress", Type: "ingress", Label: "Ingress", Namespace: ns, Name: name, Extra: map[string]string{"hosts": strings.Join(hosts, ",")}, Evidence: []Evidence{ev}}
-		added := a.add(c)
-		for svc := range backends {
-			a.link(Link{From: added.ID, Host: svc + "." + ns, Kind: "http", Evidence: []Evidence{{Source: source, File: rel, Line: line, Note: "Ingress " + name + " routes to Service " + svc}}})
-		}
-		for _, h := range hosts {
-			dns := Candidate{ID: model.SlugifyID(h), Type: "dns", Label: h, Addresses: []string{h}, Evidence: []Evidence{{Source: source, File: rel, Line: line, Note: "Ingress host"}}}
-			a.add(dns)
-			a.link(Link{From: dns.ID, To: added.ID, Kind: "tcp", Evidence: []Evidence{{Source: source, File: rel, Line: line, Note: "host " + h + " served by Ingress " + name}}})
-		}
+		addIngress(a, ingressObject{name: name, ns: ns, hosts: hosts, services: sortedKeys(backends), ev: ev})
 	case "Cluster":
 		if !strings.HasPrefix(obj.APIVersion, "postgresql.cnpg.io/") {
 			return
@@ -286,6 +371,455 @@ func manifestObject(a *accumulator, rel string, line int, obj k8sObj, source str
 	}
 }
 
+// ingressObject is one Ingress, from a manifest or from the cluster.
+type ingressObject struct {
+	name, ns string
+	hosts    []string
+	services []string
+	ev       Evidence
+}
+
+// ingressID is the id of the component every Ingress object belongs to.
+const ingressID = "ingress"
+
+// addIngress records an Ingress object on the ingress component, with its
+// own namespace and name so that each gets its own probe, and one flow per
+// Service it routes to.
+func addIngress(a *accumulator, ing ingressObject) {
+	var hosts []string
+	for _, h := range ing.hosts {
+		if !usableHost(strings.TrimPrefix(h, "*.")) {
+			a.note("Ingress %s: the host %q is a placeholder or a local name and was left out", ing.name, h)
+			continue
+		}
+		hosts = append(hosts, strings.ToLower(h))
+	}
+	c := Candidate{ID: ingressID, Type: "ingress", Label: "Ingress", Objects: []string{objectRef("Ingress", ing.ns, ing.name)}, Extra: map[string]string{}, Evidence: []Evidence{ing.ev}}
+	added := a.add(c)
+	if added == nil {
+		return
+	}
+	added.Extra["hosts"] = strings.Join(uniq(append(strings.Split(added.Extra["hosts"], ","), hosts...)), ",")
+	id := added.ID
+	for _, svc := range ing.services {
+		host := svc
+		if ing.ns != "" {
+			host = svc + "." + ing.ns
+		}
+		a.link(Link{From: id, Host: host, Kind: "http", Internal: true, Evidence: []Evidence{{Source: ing.ev.Source, File: ing.ev.File, Line: ing.ev.Line, Note: "Ingress " + ing.name + " routes to Service " + svc}}})
+	}
+	for _, h := range hosts {
+		if strings.HasPrefix(h, "*.") {
+			continue // a wildcard is not a record to resolve
+		}
+		dns := Candidate{ID: model.SlugifyID(h), Type: "dns", Label: h, Addresses: []string{h}, Evidence: []Evidence{{Source: ing.ev.Source, File: ing.ev.File, Line: ing.ev.Line, Note: "Ingress host"}}}
+		a.add(dns)
+		a.link(Link{From: dns.ID, To: id, Kind: "tcp", Evidence: []Evidence{{Source: ing.ev.Source, File: ing.ev.File, Line: ing.ev.Line, Note: "host " + h + " served by Ingress " + ing.name}}})
+	}
+}
+
+// objectRef writes "Kind namespace/name".
+func objectRef(kind, ns, name string) string {
+	return kind + " " + ns + "/" + name
+}
+
+// parseObjectRef reads what objectRef wrote.
+func parseObjectRef(s string) (kind, ns, name string) {
+	kind, rest, _ := strings.Cut(s, " ")
+	ns, name, _ = strings.Cut(rest, "/")
+	return kind, ns, name
+}
+
+// settleIngress gives the ingress component a namespace only when every
+// Ingress object agrees on it; the objects keep their own.
+func (a *accumulator) settleIngress() {
+	c := a.f.candidate(a.f.canonical(ingressID))
+	if c == nil || c.Kind != "" {
+		return // none, or folded into the controller's workload
+	}
+	seen := map[string]bool{}
+	for _, o := range c.Objects {
+		if kind, ns, _ := parseObjectRef(o); kind == "Ingress" {
+			seen[ns] = true
+		}
+	}
+	c.Namespace = ""
+	if len(seen) == 1 {
+		c.Namespace = sortedKeys(seen)[0]
+	}
+}
+
+// placement records where the manifest says the pods may run: the node
+// selector, the required node affinity and the tolerations. Propose matches
+// them against the nodes it knows.
+func placement(c *Candidate, podSpec map[string]any) {
+	want := map[string]string{} // label -> value, or values joined by |
+	for k, v := range stringMap(podSpec["nodeSelector"]) {
+		want[k] = v
+	}
+	if n := str(podSpec, "nodeName"); n != "" {
+		want[hostnameLabel] = n
+	}
+	terms := list(podSpec, "affinity", "nodeAffinity", "requiredDuringSchedulingIgnoredDuringExecution", "nodeSelectorTerms")
+	if len(terms) == 1 { // several terms are alternatives; one term is a rule
+		for _, ev := range list(asMap(terms[0]), "matchExpressions") {
+			em := asMap(ev)
+			if str(em, "operator") != "In" {
+				continue
+			}
+			var vals []string
+			for _, x := range list(em, "values") {
+				vals = append(vals, scalar(x))
+			}
+			if key := str(em, "key"); key != "" && len(vals) > 0 {
+				want[key] = strings.Join(vals, "|")
+			}
+		}
+	}
+	var sel []string
+	for _, k := range sortedKeys(want) {
+		if !hasPlaceholder(want[k]) {
+			sel = append(sel, k+"="+want[k])
+		}
+	}
+	if len(sel) > 0 {
+		c.Extra["node_selector"] = strings.Join(sel, ",")
+	}
+	var tol []string
+	for _, tv := range list(podSpec, "tolerations") {
+		tm := asMap(tv)
+		key := str(tm, "key")
+		if key == "" {
+			key = "*" // tolerates every taint
+		}
+		if v := str(tm, "value"); v != "" {
+			key += "=" + v
+		}
+		tol = append(tol, key)
+	}
+	if len(tol) > 0 {
+		c.Extra["tolerations"] = strings.Join(uniq(tol), ",")
+	}
+}
+
+// hostnameLabel is the label every node carries with its own name.
+const hostnameLabel = "kubernetes.io/hostname"
+
+// addConfigMap keeps the data of a ConfigMap for the workloads that load
+// it. When two files define the same ConfigMap (a base and an overlay), the
+// keys of the first one read stay.
+func (a *accumulator) addConfigMap(ns, name string, data map[string]string) {
+	key := ns + "/" + name
+	if a.configMaps[key] == nil {
+		a.configMaps[key] = map[string]string{}
+	}
+	for k, v := range data {
+		if _, ok := a.configMaps[key][k]; !ok {
+			a.configMaps[key][k] = v
+		}
+	}
+}
+
+// configMap finds a ConfigMap by namespace and name. A ConfigMap or a
+// workload without a namespace matches by name when only one carries it.
+func (a *accumulator) configMap(ns, name string) (map[string]string, bool) {
+	if data, ok := a.configMaps[ns+"/"+name]; ok {
+		return data, true
+	}
+	var found []string
+	for _, key := range sortedKeys(a.configMaps) {
+		if strings.HasSuffix(key, "/"+name) {
+			found = append(found, key)
+		}
+	}
+	if len(found) == 1 {
+		return a.configMaps[found[0]], true
+	}
+	return nil, false
+}
+
+// scanKustomization reads a kustomization file for the namespace it puts
+// its resources in and the ConfigMaps it generates from literals and env
+// files.
+func scanKustomization(a *accumulator, path, rel string) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var k map[string]any
+	if err := yaml.Unmarshal(b, &k); err != nil || k == nil {
+		return
+	}
+	dir := filepath.Dir(path)
+	ns := str(k, "namespace")
+	if hasPlaceholder(ns) {
+		ns = ""
+	}
+	if ns != "" {
+		a.kustomizeNS[dir] = ns
+		// The namespace reaches the directories the kustomization pulls
+		// in (an overlay over a base), unless they set their own.
+		for _, key := range []string{"resources", "bases", "components"} {
+			for _, rv := range list(k, key) {
+				res := scalar(rv)
+				if res == "" || strings.Contains(res, "://") {
+					continue
+				}
+				target := filepath.Join(dir, res)
+				if fi, err := os.Stat(target); err != nil || !fi.IsDir() {
+					continue
+				}
+				a.claimNamespace(target, ns, filepath.Dir(rel))
+			}
+		}
+	}
+	for _, gv := range list(k, "configMapGenerator") {
+		gm := asMap(gv)
+		name := str(gm, "name")
+		if name == "" {
+			continue
+		}
+		data := map[string]string{}
+		for _, lv := range list(gm, "literals") {
+			if key, val, ok := strings.Cut(scalar(lv), "="); ok {
+				data[strings.TrimSpace(key)] = strings.Trim(strings.TrimSpace(val), `"'`)
+			}
+		}
+		for _, ev := range list(gm, "envs") {
+			for key, val := range readEnvFile(filepath.Join(dir, scalar(ev))) {
+				if _, ok := data[key]; !ok {
+					data[key] = val
+				}
+			}
+		}
+		cmNS := firstNonEmpty(str(gm, "namespace"), ns)
+		a.addConfigMap(cmNS, name, data)
+	}
+}
+
+// productionOverlays are the overlay names that win when several overlays
+// use one base.
+var productionOverlays = map[string]bool{"production": true, "prod": true, "live": true}
+
+// claimNamespace records that the overlay in by puts the resources of dir
+// in ns. When overlays disagree, production wins and the choice is noted.
+func (a *accumulator) claimNamespace(dir, ns, by string) {
+	if a.kustomizeOwn == nil {
+		a.kustomizeOwn = map[string]string{}
+	}
+	cur, claimed := a.kustomizeNS[dir]
+	prev, byOverlay := a.kustomizeOwn[dir]
+	switch {
+	case !claimed:
+		a.kustomizeNS[dir], a.kustomizeOwn[dir] = ns, by
+	case !byOverlay || cur == ns:
+		// the directory set its own namespace, or both agree
+	default:
+		rel, _ := filepath.Rel(a.root, dir)
+		if productionOverlays[filepath.Base(by)] && !productionOverlays[filepath.Base(prev)] {
+			a.kustomizeNS[dir], a.kustomizeOwn[dir] = ns, by
+			prev, by = by, prev
+		}
+		a.note("%s is used by the overlays %s and %s with different namespaces; the namespace of %s was taken", filepath.ToSlash(rel), filepath.ToSlash(prev), filepath.ToSlash(by), filepath.ToSlash(prev))
+	}
+}
+
+// readEnvFile reads KEY=VALUE lines.
+func readEnvFile(path string) map[string]string {
+	out := map[string]string{}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if k, v, ok := strings.Cut(line, "="); ok {
+			out[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), `"'`)
+		}
+	}
+	return out
+}
+
+// envValue is the only way a literal value enters a candidate's
+// environment: reduced to what redact.EnvValue lets through.
+func envValue(name, raw string) string {
+	return redact.EnvValue(name, raw)
+}
+
+// resolveWorkloads resolves the environment of every pod template read,
+// now that all the ConfigMaps are known, and derives the links from it.
+func (a *accumulator) resolveWorkloads() {
+	for _, pw := range a.workloads {
+		env := map[string]string{}
+		var from, cmds []string
+		for _, pc := range pw.containers {
+			// raw holds the literal values of this container for $(VAR)
+			// interpolation. It never leaves this loop.
+			raw := map[string]string{}
+			lookup := func(name string) (string, bool) { v, ok := raw[name]; return v, ok }
+			// envFrom first: env overrides it.
+			for _, src := range pc.from {
+				if src.secret != "" {
+					from = append(from, "secret:"+src.secret)
+				}
+				if src.configMap == "" {
+					continue
+				}
+				from = append(from, "configmap:"+src.configMap)
+				data, ok := a.configMap(pw.ns, src.configMap)
+				if !ok {
+					a.note("%s loads its environment from the ConfigMap %s, which is not in the repository: its connections can only be read from the cluster", pw.id, src.configMap)
+					continue
+				}
+				for _, k := range sortedKeys(data) {
+					raw[src.prefix+k] = data[k]
+				}
+				for _, k := range sortedKeys(data) {
+					name := src.prefix + k
+					env[name] = firstNonEmpty(envValue(name, redact.Expand(data[k], lookup)), "configmap:"+src.configMap+"/"+k)
+				}
+			}
+			for _, e := range pc.env {
+				switch {
+				case e.secret != "":
+					env[e.name] = "secret:" + e.secret
+					continue
+				case e.configMap != "":
+					env[e.name] = "configmap:" + e.configMap + "/" + e.key
+					data, ok := a.configMap(pw.ns, e.configMap)
+					if !ok || data[e.key] == "" {
+						continue
+					}
+					e.value = data[e.key]
+				}
+				value := redact.Expand(e.value, lookup)
+				raw[e.name] = value
+				if v := envValue(e.name, value); v != "" || e.configMap == "" {
+					env[e.name] = v // a ConfigMap value that names no host keeps its reference
+				}
+			}
+			if args := redact.Args(pc.args); len(args) > 0 {
+				cmds = append(cmds, strings.Join(args, " "))
+			}
+		}
+		c := a.f.candidate(a.f.canonical(pw.id))
+		if c == nil {
+			continue
+		}
+		c.Env = mergeMap(c.Env, env)
+		if c.Extra == nil {
+			c.Extra = map[string]string{}
+		}
+		if len(from) > 0 {
+			c.Extra["env_from"] = strings.Join(uniq(from), " ")
+		}
+		if len(cmds) > 0 {
+			c.Extra["command"] = strings.Join(cmds, " ; ")
+		}
+		a.deriveLinks(c.ID, cmds, "manifest", pw.rel, pw.line)
+	}
+	a.workloads = nil
+	a.attachServices()
+}
+
+// deriveLinks reads the environment and the commands of a candidate for
+// the flows they imply. The candidates and links they produce are added
+// afterwards: adding may move the candidates in memory, and the one being
+// read must stay put while it is changed.
+func (a *accumulator) deriveLinks(id string, cmds []string, source, rel string, line int) {
+	c := a.f.candidate(id)
+	if c == nil {
+		return
+	}
+	var d derived
+	envLinks(&d, c, source, rel, line)
+	commandLinks(&d, c, cmds, source, rel, line)
+	for _, nc := range d.candidates {
+		a.add(nc)
+	}
+	for _, l := range d.links {
+		a.link(l)
+	}
+}
+
+// derived collects what the environment of one workload implies.
+type derived struct {
+	candidates []Candidate
+	links      []Link
+}
+
+// attachServices gives the addresses of each Service to the workload its
+// selector picks, by labels: a Service called "backend" that selects
+// app=crm-backend names the Deployment whose pods carry that label,
+// whatever the Deployment is called. Failing that, the Service belongs to
+// whatever already answers to its name (the Services an operator creates
+// for a database). A Service that selects nothing known keeps a candidate
+// of its own, which is only drawn if a workload turns up for it.
+func (a *accumulator) attachServices() {
+	for _, s := range a.services {
+		addrs := serviceAddresses(s.name, s.ns)
+		note := s.ev
+		target := a.selected(s)
+		if target == "" {
+			target = a.owner(addrs[len(addrs)-1])
+		}
+		if target != "" {
+			note.Note = "Service " + s.name + " selects " + target
+			a.add(Candidate{ID: target, Addresses: addrs, Evidence: []Evidence{note}})
+			continue
+		}
+		target = firstNonEmpty(s.selector["app"], s.selector["app.kubernetes.io/name"], s.name)
+		note.Note = "Service " + s.name + " selects " + target
+		c := Candidate{ID: model.SlugifyID(target), Type: "custom", Label: labelFor(target), Namespace: s.ns, Addresses: addrs, Evidence: []Evidence{note}}
+		if cur := a.add(c); cur != nil && cur.Type == "custom" && cur.Kind != "" {
+			cur.Type = "workload"
+		}
+	}
+	a.services = nil
+}
+
+// owner returns the id of the candidate that already answers to an address.
+func (a *accumulator) owner(address string) string {
+	for _, c := range a.f.Candidates {
+		if c.Type == "custom" {
+			continue
+		}
+		for _, have := range c.Addresses {
+			if have == address {
+				return c.ID
+			}
+		}
+	}
+	return ""
+}
+
+// selected returns the id of the workload whose pods carry every label of
+// the Service's selector, in the Service's namespace.
+func (a *accumulator) selected(s pendingService) string {
+	if len(s.selector) == 0 {
+		return ""
+	}
+	for _, c := range a.f.Candidates {
+		if c.Kind == "" || len(c.Labels) == 0 || (c.Namespace != "" && s.ns != "" && c.Namespace != s.ns) {
+			continue
+		}
+		match := true
+		for k, v := range s.selector {
+			if c.Labels[k] != v {
+				match = false
+				break
+			}
+		}
+		if match {
+			return c.ID
+		}
+	}
+	return ""
+}
+
 func selectorFromLabels(m map[string]any) string {
 	// prefer the conventional keys, keep it short
 	for _, k := range []string{"app", "app.kubernetes.io/name", "component"} {
@@ -300,13 +834,17 @@ func selectorFromLabels(m map[string]any) string {
 	return strings.Join(parts, ",")
 }
 
-// envHints recognizes what an env var name implies even when its value is a secret.
-var envHints = []struct {
+// envHint is what the name of a variable implies.
+type envHint struct {
 	pattern string
 	kind    string
 	dstType string
 	note    string
-}{
+}
+
+// envHints recognizes what an env var name implies even when its value is a secret.
+var envHints = []envHint{
+	{"ELECTRIC_DATABASE_URL", "replication", "database", "electric source database"},
 	{"DATABASE_URL", "sql", "database", "database connection"},
 	{"POSTGRES", "sql", "database", "database connection"},
 	{"PG_DSN", "sql", "database", "database connection"},
@@ -320,9 +858,8 @@ var envHints = []struct {
 	{"HATCHET_CLIENT_HOST_PORT", "grpc", "workload", "hatchet engine"},
 	{"HATCHET_CLIENT_TOKEN", "grpc", "workload", "hatchet token"},
 	{"ELECTRIC_URL", "http", "syncengine", "electric shapes"},
-	{"ELECTRIC_DATABASE_URL", "replication", "database", "electric source database"},
 	{"SIGNOZ", "tcp", "observability", "traces"},
-	{"OTEL_EXPORTER_OTLP_ENDPOINT", "tcp", "observability", "traces"},
+	{"OTEL_EXPORTER_OTLP", "tcp", "observability", "traces"},
 	{"SENTRY_DSN", "external", "external", "error tracking"},
 	{"STRIPE", "external", "external", "payments"},
 	{"OPENAI", "external", "external", "llm"},
@@ -334,6 +871,16 @@ var envHints = []struct {
 	{"BUCKET_NAME", "tcp", "storage", "object storage"},
 	{"MINIO", "tcp", "storage", "object storage"},
 	{"AWS_ENDPOINT_URL", "tcp", "storage", "object storage"},
+}
+
+// hintFor returns the first hint the name matches.
+func hintFor(upper string) (envHint, bool) {
+	for _, h := range envHints {
+		if strings.Contains(upper, h.pattern) {
+			return h, true
+		}
+	}
+	return envHint{}, false
 }
 
 // bucketEndpointEnv lists the env vars that name an S3-compatible endpoint,
@@ -349,18 +896,27 @@ func literalEnv(val string) bool {
 	return val != "" && !strings.HasPrefix(val, "secret:") && !strings.HasPrefix(val, "configmap:")
 }
 
+// settingName reports whether a variable holds a plain setting (a bucket, a
+// region, a replication slot) rather than the address of something.
+func settingName(upper string) bool {
+	return strings.Contains(upper, "BUCKET") || strings.Contains(upper, "REGION") || strings.Contains(upper, "SLOT")
+}
+
 // bucketLinks turns a literal bucket name in the environment (S3_BUCKET,
 // AWS_STORAGE_BUCKET_NAME, MEDIA_BUCKET) into a storage candidate the
 // workload writes to, carrying the endpoint and region when the same
-// environment names them.
-func bucketLinks(a *accumulator, c *Candidate, rel string, line int) {
-	for name, val := range c.Env {
+// environment names them. It reports whether it found a bucket.
+func bucketLinks(d *derived, c *Candidate, source, rel string, line int) bool {
+	found := false
+	for _, name := range sortedKeys(c.Env) {
+		val := c.Env[name]
 		upper := strings.ToUpper(name)
-		if !strings.Contains(upper, "BUCKET") || !literalEnv(val) || strings.ContainsAny(val, "/:$") {
+		if !strings.Contains(upper, "BUCKET") || !literalEnv(val) || strings.ContainsAny(val, "/:$") || hasPlaceholder(val) {
 			continue
 		}
-		bc := Candidate{ID: model.SlugifyID(val + "-bucket"), Type: "storage", Label: val + " bucket", Name: val, Extra: map[string]string{"bucket": val},
-			Evidence: []Evidence{{Source: "manifest", File: rel, Line: line, Note: name + "=" + val + " in " + c.Kind + " " + c.Name}}}
+		found = true
+		bc := Candidate{ID: bucketID(val), Type: "storage", Label: val + " bucket", Name: val, Extra: map[string]string{"bucket": val},
+			Evidence: []Evidence{{Source: source, File: rel, Line: line, Note: name + "=" + val + " in " + c.Kind + " " + c.Name}}}
 		for _, k := range bucketEndpointEnv {
 			if v := c.Env[k]; literalEnv(v) {
 				bc.Extra["endpoint"] = v
@@ -373,52 +929,76 @@ func bucketLinks(a *accumulator, c *Candidate, rel string, line int) {
 				break
 			}
 		}
-		a.add(bc)
-		a.link(Link{From: c.ID, To: bc.ID, Kind: "tcp", Label: "objects", Evidence: []Evidence{{Source: "manifest", File: rel, Line: line, Note: c.Name + " uses bucket " + val}}})
+		d.candidates = append(d.candidates, bc)
+		d.links = append(d.links, Link{From: c.ID, To: bc.ID, Kind: "tcp", Label: "objects", Evidence: []Evidence{{Source: source, File: rel, Line: line, Note: c.Name + " uses bucket " + val}}})
 	}
+	return found
 }
 
-// envLinks derives links from a candidate's environment.
-func envLinks(a *accumulator, c *Candidate, rel string, line int) {
-	for name, val := range c.Env {
+// bucketID is the id of the storage component for a bucket, the same
+// whether the bucket was seen in Terraform, in the environment or in code.
+func bucketID(bucket string) string {
+	return model.SlugifyID(bucket + "-bucket")
+}
+
+// target is where a value of the environment points: a URL reduced to its
+// host, or a bare host with an optional port.
+func target(val string) (hostRef, bool) {
+	if strings.Contains(val, "://") {
+		return parseDSN(val)
+	}
+	host, port, _ := strings.Cut(val, ":")
+	if host == "" {
+		return hostRef{}, false
+	}
+	return hostRef{Host: strings.ToLower(host), Port: port, Raw: val}, true
+}
+
+// envLinks derives links from a candidate's environment. The values were
+// reduced when they were read: what is left of a literal is a host, a URL
+// without user, path or query, or a plain setting.
+func envLinks(d *derived, c *Candidate, source, rel string, line int) {
+	hasBucket := bucketLinks(d, c, source, rel, line)
+	endpoint := map[string]bool{}
+	for _, k := range bucketEndpointEnv {
+		endpoint[k] = true
+	}
+	for _, name := range sortedKeys(c.Env) {
+		val := c.Env[name]
 		upper := strings.ToUpper(name)
-		// literal DSNs first: they name the host
-		if hs := dsnRe.FindAllString(val, -1); len(hs) > 0 {
-			for _, d := range hs {
-				if h, ok := parseDSN(d); ok {
-					l := Link{From: c.ID, Host: h.Host, Kind: edgeKindFor(h.Scheme, ""), Evidence: []Evidence{{Source: "manifest", File: rel, Line: line, Note: name + " in " + c.Kind + " " + c.Name}}}
-					if l.Kind == "sql" && (upper == "ELECTRIC_DATABASE_URL" || c.Type == "syncengine") {
-						// a sync engine reads the database's replication stream
-						l.Kind, l.Reverse = "replication", true
-					}
-					a.link(l)
-				}
+		hint, hinted := hintFor(upper)
+		if !literalEnv(val) {
+			// secret-backed: the name still tells what it connects to
+			if hinted {
+				c.Extra["needs:"+hint.dstType] = strings.Join(uniq(append(strings.Fields(c.Extra["needs:"+hint.dstType]), name)), " ")
 			}
 			continue
 		}
-		// hosts given directly (PGHOST=bookstore-db-rw)
-		if strings.HasSuffix(upper, "_HOST") || upper == "PGHOST" {
-			if val != "" && !strings.HasPrefix(val, "secret:") && !strings.HasPrefix(val, "configmap:") {
-				kind := "tcp"
-				for _, h := range envHints {
-					if strings.Contains(upper, h.pattern) {
-						kind = h.kind
-						break
-					}
-				}
-				a.link(Link{From: c.ID, Host: val, Kind: kind, Evidence: []Evidence{{Source: "manifest", File: rel, Line: line, Note: name + "=" + val}}})
-			}
-			continue
+		if settingName(upper) || hasBucket && endpoint[upper] {
+			continue // the bucket carries its endpoint; it is one component
 		}
-		// secret-backed: the name still tells what it connects to
-		for _, h := range envHints {
-			if strings.Contains(upper, h.pattern) {
-				c.Extra["needs:"+h.dstType] = strings.TrimSpace(c.Extra["needs:"+h.dstType] + " " + name)
-				break
+		for _, part := range strings.Split(val, ",") {
+			h, ok := target(part)
+			if !ok {
+				continue
 			}
+			kind := edgeKindFor(h.Scheme, "")
+			switch {
+			case (h.Scheme == "" || h.Scheme == "tcp") && hinted:
+				kind = hint.kind // no protocol in the value: the name says it
+			case (h.Scheme == "http" || h.Scheme == "https") && hinted && hint.kind != "http" && hint.kind != "external":
+				kind = hint.kind // OTLP over http is still the trace flow
+			}
+			l := Link{From: c.ID, Host: h.Host, Port: h.Port, Kind: kind, Evidence: []Evidence{{Source: source, File: rel, Line: line, Note: name + " in " + strings.TrimSpace(c.Kind+" "+c.Name)}}}
+			if (l.Kind == "sql" || l.Kind == "replication") && (upper == "ELECTRIC_DATABASE_URL" || c.Type == "syncengine") {
+				// a sync engine reads the database's replication stream
+				l.Kind, l.Reverse = "replication", true
+			} else if l.Kind == "replication" {
+				l.Kind = "sql"
+			}
+			d.links = append(d.links, l)
 		}
 	}
-	bucketLinks(a, c, rel, line)
 	// Electric: the sync service's source database is a replication edge.
 	if c.Type == "syncengine" {
 		c.Extra["replication_slot"] = firstNonEmpty(c.Env["ELECTRIC_REPLICATION_SLOT"], "electric_slot_default")
@@ -426,7 +1006,21 @@ func envLinks(a *accumulator, c *Candidate, rel string, line int) {
 }
 
 // commandLinks reads celery/hatchet/electric hints from container commands.
-func commandLinks(a *accumulator, c *Candidate, cmds []string, rel string, line int) {
+func commandLinks(d *derived, c *Candidate, cmds []string, source, rel string, line int) {
+	broker := ""
+	for _, k := range []string{"CELERY_BROKER_URL", "CELERY_BROKER", "BROKER_URL"} {
+		if v := c.Env[k]; literalEnv(v) {
+			broker = v
+			break
+		}
+	}
+	queue := func(id, label, name, note string) {
+		qc := Candidate{ID: id, Type: "queue", Label: label, Namespace: c.Namespace, Name: name, Extra: map[string]string{"celery": "true", "queue": name}, Evidence: []Evidence{{Source: source, File: rel, Line: line, Note: note}}}
+		if broker != "" {
+			qc.Extra["broker"] = broker
+		}
+		d.candidates = append(d.candidates, qc)
+	}
 	for _, cmd := range cmds {
 		lc := strings.ToLower(cmd)
 		if strings.Contains(lc, "celery") && strings.Contains(lc, "worker") {
@@ -437,14 +1031,13 @@ func commandLinks(a *accumulator, c *Candidate, cmds []string, rel string, line 
 					if q == "" {
 						continue
 					}
-					qc := Candidate{ID: model.SlugifyID(q + "-queue"), Type: "queue", Label: labelFor(q) + " queue", Namespace: c.Namespace, Name: q, Extra: map[string]string{"celery": "true", "queue": q}, Evidence: []Evidence{{Source: "manifest", File: rel, Line: line, Note: "celery worker consumes -Q " + q}}}
-					a.add(qc)
-					a.link(Link{From: qc.ID, To: c.ID, Kind: "queue", Evidence: []Evidence{{Source: "manifest", File: rel, Line: line, Note: c.Name + " consumes " + q}}})
+					id := model.SlugifyID(q + "-queue")
+					queue(id, labelFor(q)+" queue", q, "celery worker consumes -Q "+q)
+					d.links = append(d.links, Link{From: id, To: c.ID, Kind: "queue", Evidence: []Evidence{{Source: source, File: rel, Line: line, Note: c.Name + " consumes " + q}}})
 				}
 			} else {
-				qc := Candidate{ID: "celery-queue", Type: "queue", Label: "Celery queue", Namespace: c.Namespace, Name: "celery", Extra: map[string]string{"celery": "true", "queue": "celery"}, Evidence: []Evidence{{Source: "manifest", File: rel, Line: line, Note: "celery worker with the default queue"}}}
-				a.add(qc)
-				a.link(Link{From: qc.ID, To: c.ID, Kind: "queue", Evidence: []Evidence{{Source: "manifest", File: rel, Line: line, Note: c.Name + " consumes the default queue"}}})
+				queue("celery-queue", "Celery queue", "celery", "celery worker with the default queue")
+				d.links = append(d.links, Link{From: "celery-queue", To: c.ID, Kind: "queue", Evidence: []Evidence{{Source: source, File: rel, Line: line, Note: c.Name + " consumes the default queue"}}})
 			}
 		}
 		if strings.Contains(lc, "celery") && strings.Contains(lc, "beat") {
@@ -456,7 +1049,8 @@ func commandLinks(a *accumulator, c *Candidate, cmds []string, rel string, line 
 	}
 	img := strings.ToLower(c.Image)
 	official := strings.Contains(img, "hatchet-dev/hatchet-") // engine, api, dashboard, lite
-	if !official && c.Type == "workload" && (strings.Contains(img, "hatchet") || c.Env["HATCHET_CLIENT_TOKEN"] != "") && strings.Contains(strings.ToLower(c.Name+" "+img), "worker") {
+	_, hasToken := c.Env["HATCHET_CLIENT_TOKEN"]
+	if !official && c.Type == "workload" && (strings.Contains(img, "hatchet") || hasToken) && strings.Contains(strings.ToLower(c.Name+" "+img), "worker") {
 		c.Extra["hatchet_worker"] = "true"
 	}
 	if c.Type == "workload" && (c.Extra["celery_worker"] == "true" || c.Extra["hatchet_worker"] == "true") {
@@ -502,22 +1096,21 @@ func scanHelmValues(a *accumulator, path, rel string) {
 	switch e := v["env"].(type) {
 	case map[string]any:
 		for k, val := range e {
-			c.Env[k] = str(map[string]any{"v": val}, "v")
+			c.Env[k] = envValue(k, scalar(val))
 		}
 	case []any:
 		for _, item := range e {
 			m := asMap(item)
 			if n := str(m, "name"); n != "" {
-				c.Env[n] = str(m, "value")
+				c.Env[n] = envValue(n, str(m, "value"))
 			}
 		}
 	}
 	if len(c.Env) == 0 && img == "" {
 		return
 	}
-	added := a.add(c)
-	if added != nil {
-		envLinks(a, added, rel, 1)
+	if added := a.add(c); added != nil {
+		a.deriveLinks(added.ID, nil, "helm", rel, 1)
 	}
 }
 

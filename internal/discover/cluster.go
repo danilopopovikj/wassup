@@ -10,32 +10,31 @@ import (
 
 // AddCluster merges what the live cluster says into the findings: nodes,
 // workloads with their env and commands, services (addresses), ingresses,
-// CNPG clusters and cron jobs. Repository evidence and cluster evidence
-// about the same object end up on one candidate.
+// CNPG clusters, cron jobs and the egress rules of the network policies.
+// What the cluster would not let be read is said in the notes. Repository evidence and cluster evidence
+// about the same object end up on one candidate. The inventory holds no
+// credential (k8s.Discover reduces every value it reads), and nothing here
+// adds one.
 func AddCluster(f *Findings, inv *k8s.Inventory) {
 	if inv == nil {
 		return
 	}
-	a := &accumulator{root: f.Root, f: f, byID: map[string]int{}}
-	for i, c := range f.Candidates {
-		a.byID[c.ID] = i
-	}
+	a := newAccumulator(f)
 	f.Cluster = &ClusterHint{Context: inv.Context, Namespaces: inv.Namespaces}
 	ev := func(note string) Evidence { return Evidence{Source: "cluster", Note: note} }
 	for _, n := range inv.Nodes {
-		a.add(Candidate{ID: model.SlugifyID(n.Name), Type: "node", Label: n.Name, Name: n.Name, Evidence: []Evidence{ev("node " + n.Name)}})
-	}
-	for _, s := range inv.Services {
-		target := selectorValue(s.Selector, "app")
-		if target == "" {
-			target = selectorValue(s.Selector, "app.kubernetes.io/name")
+		c := Candidate{ID: model.SlugifyID(n.Name), Type: "node", Label: n.Name, Name: n.Name, Labels: n.Labels, Extra: map[string]string{}, Evidence: []Evidence{ev("node " + n.Name)}}
+		if len(n.Taints) > 0 {
+			c.Extra["taints"] = strings.Join(n.Taints, ",")
 		}
-		if target == "" {
-			target = s.Name
-		}
-		c := Candidate{ID: model.SlugifyID(target), Type: "custom", Label: labelFor(target), Namespace: s.Namespace, Addresses: serviceAddresses(s.Name, s.Namespace), Evidence: []Evidence{ev("Service " + s.Namespace + "/" + s.Name)}}
 		a.add(c)
 	}
+	type live struct {
+		id   string
+		env  map[string]string
+		cmds []string
+	}
+	var workloads []live
 	for _, w := range inv.Workloads {
 		typ := "workload"
 		img := ""
@@ -46,43 +45,60 @@ func AddCluster(f *Findings, inv *k8s.Inventory) {
 			typ = t
 		}
 		c := Candidate{ID: model.SlugifyID(w.Name), Type: typ, Label: labelFor(w.Name), Namespace: w.Namespace, Kind: w.Kind, Name: w.Name, Selector: w.Selector, Image: img,
-			RunsOn: slugs(w.Nodes), Env: map[string]string{}, Extra: map[string]string{}, Evidence: []Evidence{ev(w.Kind + " " + w.Namespace + "/" + w.Name)}}
+			RunsOn: slugs(w.Nodes), Labels: w.Labels, Env: map[string]string{}, Extra: map[string]string{}, Evidence: []Evidence{ev(w.Kind + " " + w.Namespace + "/" + w.Name)}}
 		if l := labelForImage(img); l != "" && typ != "workload" {
 			c.Label = l
 		}
+		if w.Release != "" {
+			c.Extra["release"] = w.Release
+		}
+		var from []string
 		for _, e := range w.Env {
-			v := e.Value
-			if e.SecretRef != "" {
-				v = "secret:" + e.SecretRef
-			} else if e.ConfigRef != "" {
-				v = "configmap:" + e.ConfigRef
+			ref := ""
+			switch {
+			case e.SecretRef != "":
+				ref = "secret:" + e.SecretRef
+			case e.ConfigRef != "":
+				ref = "configmap:" + e.ConfigRef
 			}
-			c.Env[e.Name] = v
+			if e.Name == "*" { // an envFrom that could not be listed
+				from = append(from, strings.TrimSuffix(ref, "/*"))
+				continue
+			}
+			// The inventory already reduced the value; reducing is
+			// idempotent, and doing it again keeps this the only door.
+			c.Env[e.Name] = firstNonEmpty(envValue(e.Name, e.Value), ref)
+		}
+		if len(from) > 0 {
+			c.Extra["env_from"] = strings.Join(uniq(from), " ")
 		}
 		if len(w.Command) > 0 {
 			c.Extra["command"] = strings.Join(w.Command, " ; ")
 		}
-		added := a.add(c)
-		if added != nil {
-			envLinks(a, added, "", 0)
-			commandLinks(a, added, w.Command, "", 0)
+		if added := a.add(c); added != nil {
+			// What the cluster says about the environment is newer than
+			// what the repository says.
+			for k, v := range c.Env {
+				if literalEnv(v) {
+					added.Env[k] = v
+				}
+			}
+			workloads = append(workloads, live{added.ID, c.Env, w.Command})
 		}
+	}
+	for _, s := range inv.Services {
+		a.services = append(a.services, pendingService{name: s.Name, ns: s.Namespace, selector: selectorMap(s.Selector), ev: ev("Service " + s.Namespace + "/" + s.Name)})
+	}
+	a.attachServices()
+	for _, w := range workloads {
+		a.deriveLive(w.id, w.env, w.cmds)
 	}
 	for _, cj := range inv.CronJobs {
 		c := Candidate{ID: model.SlugifyID(cj.Name), Type: "scheduledjob", Label: labelFor(cj.Name), Namespace: cj.Namespace, Kind: "CronJob", Name: cj.Name, Extra: map[string]string{"schedule": cj.Schedule}, Evidence: []Evidence{ev("CronJob " + cj.Namespace + "/" + cj.Name)}}
 		a.add(c)
 	}
 	for _, ing := range inv.Ingresses {
-		c := Candidate{ID: "ingress", Type: "ingress", Label: "Ingress", Namespace: ing.Namespace, Name: ing.Name, Extra: map[string]string{"hosts": strings.Join(ing.Hosts, ",")}, Evidence: []Evidence{ev("Ingress " + ing.Namespace + "/" + ing.Name)}}
-		added := a.add(c)
-		for _, b := range ing.Backends {
-			a.link(Link{From: added.ID, Host: b + "." + ing.Namespace, Kind: "http", Evidence: []Evidence{ev("Ingress " + ing.Name + " routes to " + b)}})
-		}
-		for _, h := range ing.Hosts {
-			dns := Candidate{ID: model.SlugifyID(h), Type: "dns", Label: h, Addresses: []string{h}, Evidence: []Evidence{ev("Ingress host")}}
-			a.add(dns)
-			a.link(Link{From: dns.ID, To: added.ID, Kind: "tcp", Evidence: []Evidence{ev("host " + h + " served by Ingress " + ing.Name)}})
-		}
+		addIngress(a, ingressObject{name: ing.Name, ns: ing.Namespace, hosts: ing.Hosts, services: ing.Services, ev: ev("Ingress " + ing.Namespace + "/" + ing.Name)})
 	}
 	for _, cl := range inv.CNPGClusters {
 		roles := &model.Roles{Primary: model.SlugifyID(cl.Name) + "-primary"}
@@ -96,7 +112,24 @@ func AddCluster(f *Findings, inv *k8s.Inventory) {
 		}
 		a.add(c)
 	}
+	for _, np := range inv.NetworkPolicies {
+		a.policy(EgressPolicy{NetworkPolicyInfo: np, Source: "cluster"})
+	}
+	for _, w := range inv.Warnings {
+		a.note("the cluster did not answer for %s", w)
+	}
 	a.finish()
+}
+
+// selectorMap reads "a=b,c=d".
+func selectorMap(sel string) map[string]string {
+	out := map[string]string{}
+	for _, part := range strings.Split(sel, ",") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(part), "="); ok {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // selectorValue reads one key out of "a=b,c=d".

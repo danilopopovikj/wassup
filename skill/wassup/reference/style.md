@@ -25,7 +25,9 @@ Templates per state:
 | blocked | `blocked at firewall since <HH:MM>, rule <name>` / `blocked, health check failing since <HH:MM>` | blocked at firewall rule allow-lb-only |
 | failing | `failing, <plain reason>` | failing, 3 restarts in 5 min |
 
-Markers outside the six states: `unbound, no probe data` and `stale, <last label>`.
+Markers outside the six states: `unbound, no probe data`, `no data, <reason>`
+when the probes of an element failed (`no data, connection refused`) and
+`stale, <last label>`. A failed probe is never a reason for `failing`.
 
 ## Story strip
 

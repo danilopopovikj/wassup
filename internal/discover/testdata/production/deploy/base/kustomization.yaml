@@ -1,0 +1,8 @@
+resources:
+  - app.yaml
+  - data.yaml
+configMapGenerator:
+  - name: worker-config
+    literals:
+      - CELERY_BROKER_URL=redis://:R3dis-Pa55-e2c1@cache:6379/1
+      - WORKER_API_KEY=wk-live-5b1f77

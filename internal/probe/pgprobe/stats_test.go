@@ -2,6 +2,7 @@ package pgprobe
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -214,5 +215,161 @@ func TestRunReemitsBetweenPolls(t *testing.T) {
 	}
 	if got[1].At.IsZero() {
 		t.Error("re-emitted observation should carry a fresh At")
+	}
+}
+
+// restricted is a healthy primary as a role without pg_read_all_stats sees
+// it: the walsenders are listed, their state and lag are NULL, and the slots
+// say the rest. The first walsender is the sync engine's, which sets no
+// application name.
+var restricted = Stats{
+	Version:        "16.3",
+	MaxConnections: 100,
+	Connections:    42,
+	ActivityHidden: true,
+	Replication: []ReplicationRow{
+		{PID: 101, ApplicationName: "", Hidden: true, LagHidden: true},
+		{PID: 102, ApplicationName: "bookstore-db-2", Hidden: true, LagHidden: true},
+	},
+	Slots: []SlotRow{
+		{Name: "_cnpg_bookstore_db_2", Type: "physical", Active: true, ActivePID: 102, RetainedBytes: 56, LagBytes: 56, LagKnown: true},
+		{Name: "electric_slot_default", Type: "logical", Active: true, ActivePID: 101, RetainedBytes: 56, LagBytes: 24, LagKnown: true},
+	},
+}
+
+func TestObserveReplicaStateHiddenIsNotBroken(t *testing.T) {
+	for _, tc := range []struct {
+		replica string
+		lag     float64
+	}{
+		{"bookstore-db-2", 56},
+		{"electric_slot_default", 24},
+	} {
+		m, conds, detail := Observe(restricted, StatsOptions{Replica: tc.replica})
+		if len(conds) != 0 {
+			t.Errorf("%s: a state the role may not see is not a broken replica: %+v", tc.replica, conds)
+		}
+		if m["streaming"] != 1 {
+			t.Errorf("%s: the slot is active, streaming = %v", tc.replica, m["streaming"])
+		}
+		if lag, ok := m["lag_bytes"]; !ok || lag != tc.lag {
+			t.Errorf("%s: lag_bytes = %v %v, want %v from the slot", tc.replica, lag, ok, tc.lag)
+		}
+		if detail["lag_source"] != "pg_replication_slots" {
+			t.Errorf("%s: lag_source = %v", tc.replica, detail["lag_source"])
+		}
+		if note, _ := detail["note"].(string); !strings.Contains(note, "pg_read_all_stats") {
+			t.Errorf("%s: the detail should say why the numbers come from the slot, got %q", tc.replica, note)
+		}
+		if _, ok := detail["state"]; ok {
+			t.Errorf("%s: a hidden state is not reported: %v", tc.replica, detail["state"])
+		}
+	}
+}
+
+func TestObserveSlotActivityComesFromTheSlot(t *testing.T) {
+	s := restricted
+	s.Slots = []SlotRow{
+		{Name: "_cnpg_bookstore_db_2", Type: "physical", Active: false, RetainedBytes: 1 << 30, LagBytes: 1 << 30, LagKnown: true},
+	}
+	s.Replication = nil
+	m, conds, _ := Observe(s, StatsOptions{Replica: "bookstore-db-2"})
+	if m["streaming"] != 0 {
+		t.Errorf("an inactive slot is not streaming: %v", m)
+	}
+	rb, ok := model.HasCondition(conds, model.CondReplicationBroken)
+	if !ok || rb.Ref != "slot/_cnpg_bookstore_db_2" {
+		t.Errorf("ReplicationBroken = %+v %v", rb, ok)
+	}
+	// A walsender whose state is visible and wrong is broken as before, even
+	// on an active slot.
+	s = restricted
+	s.Replication = []ReplicationRow{{PID: 102, ApplicationName: "bookstore-db-2", State: "startup", LagBytes: 10}}
+	if _, conds, _ := Observe(s, StatsOptions{Replica: "bookstore-db-2"}); len(conds) == 0 {
+		t.Error("a visible state that is not streaming is broken")
+	}
+	// A connected walsender without a slot and with a hidden state is
+	// connected; nothing read says it is broken, and its lag is not known.
+	s = Stats{Replication: []ReplicationRow{{PID: 7, ApplicationName: "bookstore-db-2", Hidden: true, LagHidden: true}}}
+	m, conds, _ = Observe(s, StatsOptions{Replica: "bookstore-db-2"})
+	if len(conds) != 0 || m["streaming"] != 1 {
+		t.Errorf("connected walsender: %v %+v", m, conds)
+	}
+	if _, ok := m["lag_bytes"]; ok {
+		t.Error("lag_bytes must be omitted when neither view shows it")
+	}
+}
+
+func TestReplicaMatchesSlotApplicationOrInstance(t *testing.T) {
+	for _, replica := range []string{
+		"_cnpg_bookstore_db_2", // the slot name
+		"bookstore-db-2",       // the application_name and the CloudNativePG instance
+		"bookstore_db_2",       // the instance, normalized
+		"Bookstore-DB-2",
+	} {
+		slot, ok := findSlot(restricted.Slots, replica)
+		if !ok || slot.Name != "_cnpg_bookstore_db_2" {
+			t.Errorf("findSlot(%q) = %+v %v", replica, slot, ok)
+		}
+		rep, ok := findReplication(restricted.Replication, replica, SlotRow{}, false)
+		if !ok || rep.PID != 102 {
+			t.Errorf("findReplication(%q) = %+v %v", replica, rep, ok)
+		}
+	}
+	// The walsender of a slot is found through the slot's pid, whatever its
+	// application name is.
+	slot, _ := findSlot(restricted.Slots, "electric_slot_default")
+	if rep, ok := findReplication(restricted.Replication, "electric_slot_default", slot, true); !ok || rep.PID != 101 {
+		t.Errorf("walsender of the sync slot = %+v %v", rep, ok)
+	}
+	if _, ok := findSlot(restricted.Slots, "bookstore-db-3"); ok {
+		t.Error("another instance must not match")
+	}
+	if _, ok := findReplication(restricted.Replication, "ghost", SlotRow{}, false); ok {
+		t.Error("an empty application name must not match by accident")
+	}
+}
+
+func TestObserveComponentWithHiddenColumns(t *testing.T) {
+	m, conds, detail := Observe(restricted, StatsOptions{})
+	if len(conds) != 0 {
+		t.Errorf("conditions = %+v", conds)
+	}
+	if m["connections_used"] != 42 {
+		t.Errorf("connections_used = %v", m["connections_used"])
+	}
+	for _, k := range []string{"active_connections", "waiters"} {
+		if _, ok := m[k]; ok {
+			t.Errorf("%s was not readable and must be omitted, not 0", k)
+		}
+	}
+	if m["lag_bytes"] != 56 || detail["lag_source"] != "pg_replication_slots" {
+		t.Errorf("lag should come from the active slots: %v %v", m["lag_bytes"], detail["lag_source"])
+	}
+	if _, ok := m["wal_retained_bytes"]; ok {
+		t.Error("no slot is inactive, nothing is retained for one")
+	}
+	reps := detail["replicas"].([]map[string]any)
+	if reps[1]["state"] != "not visible to this role" {
+		t.Errorf("replicas = %+v", reps)
+	}
+	if _, ok := reps[1]["lag_bytes"]; ok {
+		t.Errorf("a hidden lag is not listed: %+v", reps[1])
+	}
+}
+
+func TestRowsKeepNullApartFromZero(t *testing.T) {
+	pid, lag, state := int64(9), 0.0, "streaming"
+	if r := replicationRow(&pid, "a", nil, nil); !r.Hidden || !r.LagHidden || r.PID != 9 {
+		t.Errorf("NULL state and lag: %+v", r)
+	}
+	if r := replicationRow(&pid, "a", &state, &lag); r.Hidden || r.LagHidden || r.State != "streaming" {
+		t.Errorf("visible state and a lag of 0: %+v", r)
+	}
+	if r := slotRow("s", "logical", true, nil, nil, nil); r.LagKnown || r.ActivePID != 0 {
+		t.Errorf("a slot without a position: %+v", r)
+	}
+	if r := slotRow("s", "logical", true, &pid, &lag, &lag); !r.LagKnown || r.ActivePID != 9 {
+		t.Errorf("a slot at the current position: %+v", r)
 	}
 }

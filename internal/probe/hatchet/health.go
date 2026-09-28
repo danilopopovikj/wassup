@@ -20,6 +20,7 @@ var healthAccess = probe.Access{
 	SpecFields:  withFields(),
 	Needs:       "HTTP access to the Hatchet API; the token named by token_env is sent when present but not required",
 	Implemented: true,
+	Tier:        probe.TierToken,
 	Facets:      []string{facet.NameWorkload},
 }
 

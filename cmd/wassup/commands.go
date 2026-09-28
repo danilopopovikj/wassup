@@ -6,20 +6,25 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/danilopopovikj/wassup/internal/app"
+	"github.com/danilopopovikj/wassup/internal/bind"
 	"github.com/danilopopovikj/wassup/internal/demo"
+	"github.com/danilopopovikj/wassup/internal/discover"
 	"github.com/danilopopovikj/wassup/internal/explain"
 	"github.com/danilopopovikj/wassup/internal/history"
 	"github.com/danilopopovikj/wassup/internal/layout"
 	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 	"github.com/danilopopovikj/wassup/internal/probe/fixture"
 	"github.com/danilopopovikj/wassup/internal/render"
 	"github.com/danilopopovikj/wassup/internal/scenario"
@@ -89,9 +94,12 @@ func initCmd() *cobra.Command {
 			if err := os.WriteFile(filepath.Join(dir, "prompts", "setup.md"), []byte(prompts.Setup), 0o644); err != nil {
 				return err
 			}
-			gi := filepath.Join(dir, ".gitignore")
-			if _, err := os.Stat(gi); os.IsNotExist(err) {
-				_ = os.WriteFile(gi, []byte("state/\n"), 0o644)
+			// The gitignore first: local.env is for credentials.
+			if err := discover.EnsureGitignore(dir); err != nil {
+				return err
+			}
+			if err := writeLocalEnvTemplate(dir); err != nil {
+				return err
 			}
 			topo := filepath.Join(dir, "topology.yaml")
 			if _, err := os.Stat(topo); os.IsNotExist(err) {
@@ -99,6 +107,7 @@ func initCmd() *cobra.Command {
 			}
 			fmt.Printf("created %s\n\nPaste this into Claude Code:\n\n%s", dir, prompts.Setup)
 			render.CopyText(prompts.Setup)
+			printPathHint()
 			return nil
 		},
 	}
@@ -183,6 +192,7 @@ func validateCmd() *cobra.Command {
 					}
 				}
 			}
+			warnings = append(warnings, notImplemented(cfg.Bindings)...)
 			unbound := 0
 			for _, c := range cfg.Topology.AllComponents() {
 				if len(cfg.Bindings.Components[c.ID]) == 0 && !cfg.Topology.HasRoles(c.ID) {
@@ -217,69 +227,331 @@ func validateCmd() *cobra.Command {
 	}
 }
 
+// notImplemented names the bindings whose probe this build documents and
+// does not ship, so that what they leave empty is not taken for a fault of
+// the system or of the setup.
+func notImplemented(b model.Bindings) []string {
+	var out []string
+	rates := false
+	each := func(what string, m map[string][]model.ProbeSpec) {
+		for id, specs := range m {
+			for _, s := range specs {
+				acc, ok := probe.AccessFor(s.Kind())
+				if !ok || acc.Implemented {
+					continue
+				}
+				out = append(out, fmt.Sprintf("%s: probe %s is not implemented in this build, so it reads no data for this %s", id, s.Kind(), what))
+				for _, f := range acc.Facets {
+					rates = rates || f == facet.NameTraffic
+				}
+			}
+		}
+	}
+	each("component", b.Components)
+	each("edge", b.Edges)
+	if rates {
+		out = append(out, "traffic rates come from a probe that is not implemented yet: edges read `no rate measured` until it ships, which is not a fault")
+	}
+	return out
+}
+
+// probeResult is what one probe of an element delivered in this run.
+type probeResult struct {
+	Probe string `json:"probe"`
+	// Status is ok (data was read), error (the probe ran and could not read
+	// its source), failed (it never started) or silent (it started and
+	// reported nothing within the timeout).
+	Status  string             `json:"status"`
+	Error   string             `json:"error,omitempty"`
+	Metrics map[string]float64 `json:"metrics,omitempty"`
+}
+
+// probeRow is one component or edge in the report of `wassup probe`.
+type probeRow struct {
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`
+	Bound  bool   `json:"bound"`
+	State  string `json:"state"`
+	Label  string `json:"label"`
+	Probes string `json:"probes"`
+	// Note says what the label cannot: that idle here means nothing measured
+	// a rate, not that there is no traffic.
+	Note    string        `json:"note,omitempty"`
+	Results []probeResult `json:"probe_results"`
+	// Later is set on an element whose bindings all belong to a tier that
+	// did not run: it is not bound and not a fault, it has not been asked.
+	Later string `json:"later,omitempty"`
+	// Conditions and Detail are what the probes said besides numbers; they
+	// are filled when one element was asked for (`wassup probe <id>`).
+	Conditions []model.Condition `json:"conditions,omitempty"`
+	Detail     map[string]any    `json:"detail,omitempty"`
+	// Advice is what a probe said about its own reading: what it could not
+	// see and what would let it (the details whose key ends in _note).
+	Advice []string `json:"advice,omitempty"`
+}
+
+// failed lists the probes of a row that delivered nothing, with the reason.
+func (r probeRow) failed() []probeResult {
+	var out []probeResult
+	for _, p := range r.Results {
+		if p.Status != "ok" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// noRate is the label of an element that reads idle because nothing
+// measured its traffic.
+const noRate = "no rate measured"
+
+// probeRows reports every component and edge as bound or unbound. An element
+// with probes of its own is bound only when one of them delivered data. The
+// snapshot alone does not say so: an edge whose probe failed has no data of
+// its own, and a failed binding would print as bound.
+func probeRows(cfg *model.Config, snap *model.Snapshot, joined map[string]*bind.Joined, inst []app.Instance) []probeRow {
+	row := func(id, kind string, es model.ElementState, specs []model.ProbeSpec) probeRow {
+		kinds := make([]string, 0, len(specs))
+		for _, s := range specs {
+			kinds = append(kinds, s.Kind())
+		}
+		j := joined[id]
+		r := probeRow{ID: id, Kind: kind, Bound: es.Marker != model.MarkerUnbound, State: string(es.State), Label: es.Label,
+			Probes: strings.Join(kinds, ","), Results: probeResults(id, kinds, j, inst)}
+		if len(specs) > 0 && (j == nil || !j.Bound) {
+			r.Bound = false
+			r.State = string(model.Idle)
+			r.Label = "no data, " + probeFailure(r.Results)
+		}
+		return r
+	}
+	var rows []probeRow
+	for _, comp := range cfg.Topology.AllComponents() {
+		r := row(comp.ID, comp.Type, snap.Components[comp.ID], cfg.Bindings.Components[comp.ID])
+		if r.Bound && snap.Components[comp.ID].Marker == "" && r.State == string(model.Idle) && !rateMeasured(cfg, snap, comp.ID) {
+			r.Label = noRate
+			r.Note = "no probe on " + comp.ID + " or its edges reports a rate, so idle is not known; bind a traffic source to tell idle from busy"
+		}
+		rows = append(rows, r)
+	}
+	for _, e := range cfg.Topology.Edges {
+		es := snap.Edges[e.ID()]
+		r := row(e.ID(), "edge", es, cfg.Bindings.Edges[e.ID()])
+		if r.Bound && es.Marker == "" && r.State == string(model.Idle) && !hasRate(es) {
+			r.Label = noRate
+			r.Note = "no probe reports a rate for this edge, so idle is not known; bind a traffic source to tell idle from busy"
+		}
+		rows = append(rows, r)
+	}
+	return rows
+}
+
+// hasRate reports whether a rate was read for an element, even a rate of 0.
+func hasRate(es model.ElementState) bool {
+	for _, k := range []string{"rate", "lag_bytes", "ingest_rate"} {
+		if _, ok := es.Metrics[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// rateMeasured reports whether a rate was read for a component or for one
+// of the edges that touch it, which is what its flowing or idle comes from.
+func rateMeasured(cfg *model.Config, snap *model.Snapshot, id string) bool {
+	if hasRate(snap.Components[id]) {
+		return true
+	}
+	for _, e := range cfg.Topology.Edges {
+		if (e.From == id || e.To == id) && hasRate(snap.Edges[e.ID()]) {
+			return true
+		}
+	}
+	return false
+}
+
+// probeResults says, per bound probe of an element, what it delivered in
+// this run: from its latest observation, or from its health when it never
+// reported.
+func probeResults(id string, kinds []string, j *bind.Joined, inst []app.Instance) []probeResult {
+	out := make([]probeResult, 0, len(kinds))
+	for _, kind := range kinds {
+		res := probeResult{Probe: kind, Status: "silent", Error: "no observation within the timeout"}
+		for _, in := range inst {
+			if in.Target != id || in.Kind != kind {
+				continue
+			}
+			if in.Error != "" {
+				res.Status, res.Error = "failed", in.Error
+			} else if in.Health != string(probe.HealthOK) && in.Message != "" {
+				res.Error = in.Message
+			}
+		}
+		if j != nil {
+			for _, src := range j.Sources {
+				if src.Probe != kind {
+					continue
+				}
+				if src.Err != "" {
+					res.Status, res.Error = "error", src.Err
+				} else {
+					res = probeResult{Probe: kind, Status: "ok", Metrics: src.Metrics}
+				}
+			}
+		}
+		out = append(out, res)
+	}
+	return out
+}
+
+// probeFailure says why no probe of an element delivered: the first probe
+// that did not, with its reason.
+func probeFailure(results []probeResult) string {
+	for _, r := range results {
+		if r.Status == "ok" || r.Error == "" {
+			continue
+		}
+		if strings.HasPrefix(r.Error, r.Probe) {
+			return r.Error
+		}
+		return r.Probe + ": " + r.Error
+	}
+	return "no probe data"
+}
+
+// probeCounts is the summary of `wassup probe`.
+type probeCounts struct {
+	Bound, Total, EdgesBound, EdgesTotal int
+	// Later counts the elements left for a later tier; they are in no total.
+	Later int
+}
+
+func countProbeRows(rows []probeRow) probeCounts {
+	var c probeCounts
+	for _, r := range rows {
+		if r.Later != "" {
+			c.Later++
+			continue
+		}
+		bound, total := &c.Bound, &c.Total
+		if r.Kind == "edge" {
+			bound, total = &c.EdgesBound, &c.EdgesTotal
+		}
+		*total++
+		if r.Bound {
+			*bound++
+		}
+	}
+	return c
+}
+
+// unbound reports whether anything is unbound, which fails the run.
+func (c probeCounts) unbound() bool {
+	return c.Bound < c.Total || c.EdgesBound < c.EdgesTotal
+}
+
 func probeCmd() *cobra.Command {
 	var once bool
 	var timeout time.Duration
+	var samples, tier int
 	c := &cobra.Command{
-		Use:   "probe",
-		Short: "run every binding once and report bound or unbound per component",
+		Use:   "probe [id]",
+		Short: "run every binding once and report bound or unbound per component; with an id, run the bindings of one element and print what they read",
+		Long: `probe runs the bindings once and reports, per component and edge, whether a
+probe delivered data. A line is printed for every probe as it finishes.
+
+With an id (a component, an edge as from->to, or a wassup:// ref) only the
+bindings of that element run, and everything they read is printed.
+
+--tier runs the bindings up to a tier and leaves the others for later:
+0 needs the kubeconfig and the network only (Kubernetes, DNS, certificates,
+pings), 1 adds what needs a token (Hatchet, Electric, load balancers, object
+storage), 2 adds what connects to a data store (Postgres, Redis).`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg, err := loadConfig()
 			if err != nil {
 				return err
 			}
-			rt, err := app.New(app.Options{Dir: cfg.Dir, Kubeconfig: flags.kubeconfig, Context: flags.kcontext, ReadOnly: true})
+			sel := probeSelection{Tier: tier}
+			if len(args) == 1 {
+				if sel.ID, err = elementID(cfg, args[0]); err != nil {
+					return err
+				}
+			}
+			// An interrupt ends the run the same way its timeout does, so the
+			// probes still release their connections in order.
+			sctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			var cluster any
+			if sel.readsCluster(cfg) {
+				// Which cluster, before anything is read from it. A cluster
+				// that cannot be named is reported by the probes themselves.
+				info, err := announceCluster(sctx, os.Stderr)
+				if err != nil && !flags.jsonOut {
+					fmt.Fprintln(os.Stderr, "cluster: "+err.Error())
+				}
+				cluster = info
+			}
+			opts := app.Options{Dir: cfg.Dir, Kubeconfig: flags.kubeconfig, Context: flags.kcontext, ReadOnly: true, Only: sel.runs}
+			if !flags.jsonOut {
+				opts.Progress = func(p app.Progress) { fmt.Fprintln(os.Stderr, progressLine(p)) }
+			}
+			rt, err := app.New(opts)
 			if err != nil {
 				return err
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), timeout+2*time.Second)
+			ctx, cancel := context.WithTimeout(sctx, timeout+2*time.Second)
 			defer cancel()
-			snap, err := rt.RunOnce(ctx, timeout)
+			snap, err := rt.Sample(ctx, timeout, samples)
 			if err != nil {
 				return err
 			}
-			type row struct {
-				ID     string `json:"id"`
-				Kind   string `json:"kind"`
-				Bound  bool   `json:"bound"`
-				State  string `json:"state"`
-				Label  string `json:"label"`
-				Probes string `json:"probes"`
-			}
-			var rows []row
-			bound, total := 0, 0
-			for _, comp := range cfg.Topology.AllComponents() {
-				es := snap.Components[comp.ID]
-				var kinds []string
-				for _, s := range cfg.Bindings.Components[comp.ID] {
-					kinds = append(kinds, s.Kind())
-				}
-				isBound := es.Marker != model.MarkerUnbound
-				if isBound {
-					bound++
-				}
-				total++
-				rows = append(rows, row{ID: comp.ID, Kind: comp.Type, Bound: isBound, State: string(es.State), Label: es.Label, Probes: strings.Join(kinds, ",")})
-			}
-			for _, e := range cfg.Topology.Edges {
-				es := snap.Edges[e.ID()]
-				var kinds []string
-				for _, s := range cfg.Bindings.Edges[e.ID()] {
-					kinds = append(kinds, s.Kind())
-				}
-				rows = append(rows, row{ID: e.ID(), Kind: "edge", Bound: es.Marker != model.MarkerUnbound, State: string(es.State), Label: es.Label, Probes: strings.Join(kinds, ",")})
-			}
+			joined := rt.Binder().All()
+			rows := sel.rows(cfg, snap, joined, rt.Instances())
+			counts := countProbeRows(rows)
 			if flags.jsonOut {
-				return printJSON(map[string]any{"bound": bound, "total": total, "elements": rows, "probes": rt.Instances(), "probe_health": rt.ProbeHealth()})
+				return printJSON(map[string]any{
+					"bound": counts.Bound, "total": counts.Total,
+					"edges_bound": counts.EdgesBound, "edges_total": counts.EdgesTotal,
+					"later": counts.Later, "tier": tier, "cluster": cluster,
+					"elements": rows, "probes": rt.Instances(), "probe_health": rt.ProbeHealth(),
+				})
 			}
+			fmt.Fprintln(os.Stderr)
 			for _, r := range rows {
 				mark := "bound  "
-				if !r.Bound {
+				switch {
+				case r.Later != "":
+					mark = "later  "
+				case !r.Bound:
 					mark = "UNBOUND"
 				}
 				fmt.Printf("%s  %-24s %-9s %-11s %s\n", mark, r.ID, r.Kind, r.State, r.Label)
+				if sel.ID != "" {
+					printValues(r)
+					continue
+				}
+				if !r.Bound {
+					continue
+				}
+				for _, a := range r.Advice {
+					fmt.Printf("         %-24s note: %s\n", "", a)
+				}
+				// Bound on what the other probes read; the ones that failed
+				// are named, so a partial reading is not taken for a whole one.
+				for _, f := range r.failed() {
+					fmt.Printf("         %-24s %s %s: %s\n", "", f.Probe, f.Status, f.Error)
+				}
 			}
-			fmt.Printf("\n%d of %d components bound\n", bound, total)
+			fmt.Printf("\n%d of %d components bound", counts.Bound, counts.Total)
+			if counts.EdgesTotal > 0 {
+				fmt.Printf(", %d of %d edges bound", counts.EdgesBound, counts.EdgesTotal)
+			}
+			if counts.Later > 0 {
+				fmt.Printf(", %d wait for a later tier", counts.Later)
+			}
+			fmt.Println()
 			for _, in := range rt.Instances() {
 				if in.Health != string(probe.HealthOK) {
 					msg := in.Message
@@ -289,7 +561,7 @@ func probeCmd() *cobra.Command {
 					fmt.Printf("  %s on %s: %s %s\n", in.Kind, in.Target, in.Health, msg)
 				}
 			}
-			if bound < total {
+			if counts.unbound() {
 				os.Exit(3)
 			}
 			return nil
@@ -297,6 +569,8 @@ func probeCmd() *cobra.Command {
 	}
 	c.Flags().BoolVar(&once, "once", true, "run once and exit (the only mode)")
 	c.Flags().DurationVar(&timeout, "timeout", 20*time.Second, "how long to wait for every probe")
+	c.Flags().IntVar(&samples, "samples", 2, "rounds to wait for per probe; a rate needs two readings, 1 is faster and shows no rates")
+	c.Flags().IntVar(&tier, "tier", probe.TierData, "run the bindings up to this tier: 0 kubeconfig and network only, 1 adds tokens, 2 adds data stores")
 	return c
 }
 
@@ -897,15 +1171,15 @@ func probesCmd() *cobra.Command {
 				return printJSON(all)
 			}
 			if markdown {
-				fmt.Println("| Probe | Facets | Source | Delivers | Spec fields | Needs | Status |")
-				fmt.Println("| --- | --- | --- | --- | --- | --- | --- |")
+				fmt.Println("| Probe | Tier | Facets | Source | Delivers | Spec fields | Needs | Status |")
+				fmt.Println("| --- | --- | --- | --- | --- | --- | --- | --- |")
 				for _, a := range all {
 					status := "shipped"
 					if !a.Implemented {
 						status = "spec only, not implemented yet"
 					}
 					esc := func(s string) string { return strings.ReplaceAll(s, "|", "\\|") }
-					fmt.Printf("| `%s` | %s | %s | %s | %s | %s | %s |\n", a.Kind, strings.Join(a.Facets, ", "), esc(a.Source), esc(a.Delivers), "`"+strings.Join(a.SpecFields, "`, `")+"`", esc(a.Needs), status)
+					fmt.Printf("| `%s` | %d | %s | %s | %s | %s | %s | %s |\n", a.Kind, a.Tier, strings.Join(a.Facets, ", "), esc(a.Source), esc(a.Delivers), "`"+strings.Join(a.SpecFields, "`, `")+"`", esc(a.Needs), status)
 				}
 				return nil
 			}
@@ -915,6 +1189,7 @@ func probesCmd() *cobra.Command {
 					impl = " (not implemented in this build)"
 				}
 				fmt.Printf("%-18s %s%s\n", a.Kind, a.Delivers, impl)
+				fmt.Printf("%-18s   tier: %d\n", "", a.Tier)
 				fmt.Printf("%-18s   source: %s\n", "", a.Source)
 				fmt.Printf("%-18s   spec: %s\n", "", strings.Join(a.SpecFields, ", "))
 				fmt.Printf("%-18s   needs: %s\n", "", a.Needs)
@@ -932,10 +1207,11 @@ func versionCmd() *cobra.Command {
 		Short: "print the version",
 		Run: func(cmd *cobra.Command, args []string) {
 			if flags.jsonOut {
-				_ = printJSON(map[string]string{"version": Version})
+				_ = printJSON(map[string]string{"version": version()})
 				return
 			}
-			fmt.Println("wassup", Version)
+			fmt.Println("wassup", version())
+			printPathHint()
 		},
 	}
 }

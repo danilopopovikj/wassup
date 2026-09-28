@@ -173,7 +173,7 @@ func configure(spec map[string]any, req requirements) (config, *client, error) {
 		base:   cfg.base,
 		token:  token,
 		tenant: cfg.tenant,
-		http:   &http.Client{Timeout: cfg.timeout},
+		http:   &http.Client{Timeout: cfg.timeout, Transport: probe.ReadOnly(nil)},
 	}
 	return cfg, c, nil
 }

@@ -76,7 +76,8 @@ func TestScanFindsTheStack(t *testing.T) {
 	if specs := p.Bindings.Components["api"]; len(specs) == 0 || specs[0].Kind() != "k8s.workload" || specs[0].String("selector") != "app=api" {
 		t.Errorf("api binding %v", specs)
 	}
-	if specs := p.Bindings.Components["electric"]; len(specs) == 0 || specs[0].Kind() != "electric.sync" || specs[0].String("table") != "issues" {
+	// Never with a table: a shape makes Electric run a snapshot query.
+	if specs := p.Bindings.Components["electric"]; len(specs) == 0 || specs[0].Kind() != "electric.sync" || specs[0].String("table") != "" {
 		t.Errorf("electric binding %v", specs)
 	}
 	if specs := p.Bindings.Components["bookstore-media-bucket"]; len(specs) == 0 || specs[0].Kind() != "s3.bucket" ||

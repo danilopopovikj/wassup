@@ -1,0 +1,10 @@
+namespace: bookstore-local
+resources:
+  - ../../base
+  - minio.yaml
+configMapGenerator:
+  - name: app-config
+    behavior: merge
+    literals:
+      - PUBLIC_URL=https://bookstore-dev.ngrok-free.app
+      - POSTGRES_SERVER=localhost

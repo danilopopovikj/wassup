@@ -2,6 +2,7 @@ package discover
 
 import (
 	"fmt"
+	"regexp"
 	"sort"
 	"strings"
 
@@ -16,6 +17,10 @@ type Proposal struct {
 	Evidence   map[string][]Evidence `json:"evidence"` // per component or edge id
 	Unresolved []Link                `json:"unresolved,omitempty"`
 	Notes      []string              `json:"notes,omitempty"`
+	// Confidence says, per component and edge id, how far it can be trusted
+	// and whether the cluster or only the repository stands behind it. It
+	// is not part of the topology: it describes the draft, not the system.
+	Confidence map[string]Confidence `json:"confidence,omitempty"`
 }
 
 // ProposeOptions tune the proposal.
@@ -26,7 +31,13 @@ type ProposeOptions struct {
 	Context    string
 }
 
-// Propose turns findings into a topology and bindings.
+// idRe is the pattern the topology schema sets for ids.
+var idRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
+// Propose turns findings into a topology and bindings. Every id it emits
+// matches the pattern of the topology schema, and every value in a binding
+// comes from something that was read: a namespace, a name, a host. What
+// could only be guessed is left out and said in the notes.
 func Propose(f *Findings, opts ProposeOptions) *Proposal {
 	p := &Proposal{Evidence: map[string][]Evidence{}}
 	name := opts.Name
@@ -61,10 +72,22 @@ func Propose(f *Findings, opts ProposeOptions) *Proposal {
 
 	// Components.
 	ids := map[string]bool{}
-	nodeIDs := []string{}
+	var nodes []Candidate
+	for _, c := range f.Candidates {
+		if c.Type == "node" {
+			nodes = append(nodes, c)
+		}
+	}
 	for _, c := range f.Candidates {
 		if c.Type == "" || c.Type == "custom" && c.Image == "" && len(c.Env) == 0 {
 			continue // a Service with no workload behind it in the repo
+		}
+		if !idRe.MatchString(c.ID) || ids[c.ID] {
+			p.Notes = append(p.Notes, fmt.Sprintf("left out %q: not a valid or unique id", c.ID))
+			continue
+		}
+		if c.Roles != nil {
+			c.Roles = slugRoles(c.Roles)
 		}
 		typ := c.Type
 		if typ == "custom" {
@@ -91,8 +114,8 @@ func Propose(f *Findings, opts ProposeOptions) *Proposal {
 		default:
 			comp.Group = clusterID
 		}
-		if typ == "node" {
-			nodeIDs = append(nodeIDs, c.ID)
+		if typ != "node" {
+			comp.RunsOn = runsOn(c, nodes)
 		}
 		var notes []string
 		for _, e := range c.Evidence {
@@ -105,23 +128,16 @@ func Propose(f *Findings, opts ProposeOptions) *Proposal {
 		t.Components = append(t.Components, comp)
 		ids[c.ID] = true
 		p.Evidence[c.ID] = c.Evidence
-		if specs := bindingsFor(c, opts); len(specs) > 0 {
+		specs, unbound := bindingsFor(f, c, opts)
+		if len(specs) > 0 {
 			b.Components[c.ID] = specs
 		}
+		p.Notes = append(p.Notes, unbound...)
 		if c.Roles != nil && c.Extra["cnpg"] == "true" {
 			ns := c.Namespace
 			b.Components[c.Roles.Primary] = []model.ProbeSpec{{"probe": "cnpg.instance", "namespace": ns, "cluster": c.Name, "role": "primary"}}
 			for i, r := range c.Roles.Replicas {
 				b.Components[r] = []model.ProbeSpec{{"probe": "cnpg.instance", "namespace": ns, "cluster": c.Name, "instance": fmt.Sprintf("%s-%d", c.Name, i+2)}}
-			}
-		}
-	}
-	// Workloads run on every node when nothing says otherwise.
-	if len(nodeIDs) > 0 {
-		sort.Strings(nodeIDs)
-		for i := range t.Components {
-			if t.Components[i].Type == "workload" || t.Components[i].Type == "ingress" || t.Components[i].Type == "syncengine" {
-				t.Components[i].RunsOn = append([]string(nil), nodeIDs...)
 			}
 		}
 	}
@@ -158,6 +174,11 @@ func Propose(f *Findings, opts ProposeOptions) *Proposal {
 		}
 		id := model.EdgeID(fromID, toID)
 		if seenEdge[id] {
+			// The same flow seen again, by the cluster after the
+			// repository: it is one edge, with the evidence of both.
+			for _, ev := range l.Evidence {
+				p.Evidence[id] = addEvidence(p.Evidence[id], ev)
+			}
 			continue
 		}
 		seenEdge[id] = true
@@ -211,8 +232,111 @@ func Propose(f *Findings, opts ProposeOptions) *Proposal {
 	sort.SliceStable(t.Components, func(i, j int) bool { return t.Components[i].ID < t.Components[j].ID })
 	sort.SliceStable(t.Edges, func(i, j int) bool { return t.Edges[i].ID() < t.Edges[j].ID() })
 	p.Topology, p.Bindings = t, b
-	p.Notes = append(p.Notes, f.Notes...)
+	p.Notes = uniqInOrder(append(p.Notes, f.Notes...))
+	p.rate(f)
 	return p
+}
+
+// uniqInOrder drops repeated lines and keeps the order.
+func uniqInOrder(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if s != "" && !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// slugRoles makes the ids of a database's instances valid.
+func slugRoles(r *model.Roles) *model.Roles {
+	out := &model.Roles{Primary: model.SlugifyID(r.Primary)}
+	for _, id := range r.Replicas {
+		out.Replicas = append(out.Replicas, model.SlugifyID(id))
+	}
+	return out
+}
+
+// runsOn says on which nodes a component runs: where its pods were seen in
+// the live cluster, or else the nodes its manifest selects (node selector,
+// required node affinity) among those whose taints it tolerates. When
+// neither says anything the answer is none: a list of every node would be a
+// guess that looks like a fact.
+func runsOn(c Candidate, nodes []Candidate) []string {
+	known := map[string]bool{}
+	for _, n := range nodes {
+		known[n.ID] = true
+	}
+	var out []string
+	if len(c.RunsOn) > 0 {
+		for _, id := range c.RunsOn {
+			if known[id] {
+				out = append(out, id)
+			}
+		}
+		return uniq(out)
+	}
+	sel := c.Extra["node_selector"]
+	if sel == "" {
+		return nil
+	}
+	for _, n := range nodes {
+		if nodeMatches(n, sel) && tolerates(c.Extra["tolerations"], n.Extra["taints"]) {
+			out = append(out, n.ID)
+		}
+	}
+	return uniq(out)
+}
+
+// nodeMatches reports whether a node carries every label of a selector
+// written "key=value,key=a|b". A node answers to its own name under the
+// hostname label even when its labels are not known.
+func nodeMatches(n Candidate, selector string) bool {
+	for _, part := range strings.Split(selector, ",") {
+		key, want, ok := strings.Cut(part, "=")
+		if !ok {
+			return false
+		}
+		have := n.Labels[key]
+		if have == "" && key == hostnameLabel {
+			have = n.Name
+		}
+		match := false
+		for _, w := range strings.Split(want, "|") {
+			if have == w || key == hostnameLabel && model.SlugifyID(w) == n.ID {
+				match = true
+			}
+		}
+		if !match {
+			return false
+		}
+	}
+	return true
+}
+
+// tolerates reports whether pods with these tolerations can be scheduled
+// on a node with these taints ("key=value:effect").
+func tolerates(tolerations, taints string) bool {
+	if taints == "" {
+		return true
+	}
+	ok := map[string]bool{}
+	for _, t := range strings.Split(tolerations, ",") {
+		ok[t] = true
+	}
+	for _, taint := range strings.Split(taints, ",") {
+		kv, effect, _ := strings.Cut(taint, ":")
+		if effect == "PreferNoSchedule" {
+			continue
+		}
+		key, _, _ := strings.Cut(kv, "=")
+		if !ok["*"] && !ok[kv] && !ok[key] {
+			return false
+		}
+	}
+	return true
 }
 
 func sortedGroups(m map[string]model.Group) []model.Group {
@@ -283,13 +407,103 @@ func dsnEnvFor(db model.Component) string {
 	return strings.ToUpper(strings.ReplaceAll(db.ID, "-", "_")) + "_DSN"
 }
 
-// bindingsFor proposes probes for a candidate from what was seen.
-func bindingsFor(c Candidate, opts ProposeOptions) []model.ProbeSpec {
+// addressWhere returns the address of the first candidate match accepts:
+// the name of its Service, or its own name in its namespace when it is a
+// workload.
+func (f *Findings) addressWhere(match func(Candidate) bool) string {
+	for _, c := range f.Candidates {
+		if !match(c) {
+			continue
+		}
+		if a := ownAddress(c); a != "" {
+			return a
+		}
+	}
+	return ""
+}
+
+// hatchetURL is where the Hatchet API answers: the Service of the API (or
+// of the all-in-one image), or else the conventional hatchet-api next to
+// the engine, in the engine's namespace. It is "" when no Hatchet was seen.
+func hatchetURL(f *Findings) string {
+	is := func(words ...string) func(Candidate) bool {
+		return func(c Candidate) bool {
+			lower := strings.ToLower(c.Image + " " + c.Name)
+			for _, w := range words {
+				if strings.Contains(lower, w) {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	if a := f.addressWhere(is("hatchet-api", "hatchet-lite")); a != "" {
+		return "http://" + a + ":8080"
+	}
+	for _, c := range f.Candidates {
+		if is("hatchet-engine", "hatchet-api", "hatchet-lite")(c) && c.Namespace != "" {
+			return "http://hatchet-api." + c.Namespace + ":8080"
+		}
+	}
+	return ""
+}
+
+// flowerURL is where Flower answers: its Service when it was seen, or else
+// the conventional flower in the namespace of the workers.
+func flowerURL(f *Findings, ns string) string {
+	a := f.addressWhere(func(c Candidate) bool {
+		return c.Extra["flower"] == "true" || strings.Contains(strings.ToLower(c.Image), "flower")
+	})
+	switch {
+	case a != "":
+		return "http://" + a + ":5555"
+	case ns != "":
+		return "http://flower." + ns + ":5555"
+	}
+	return ""
+}
+
+// reachedAt returns the host (and the port, when it was given) through
+// which another component reaches the one with this id, as read from that
+// component's environment. The host of a replication flow is the source's,
+// so those do not count.
+func reachedAt(f *Findings, id string) (host, port string) {
+	for _, l := range f.Links {
+		if l.To == id && l.Host != "" && l.Kind != "replication" {
+			return l.Host, l.Port
+		}
+	}
+	return "", ""
+}
+
+// ownAddress picks the address to probe a component at: the Service named
+// like the component itself when there is one (a product folded from
+// several workloads answers to several), or else the first.
+func ownAddress(c Candidate) string {
+	if c.Name != "" && c.Namespace != "" {
+		want := strings.ToLower(c.Name + "." + c.Namespace)
+		for _, a := range c.Addresses {
+			if a == want {
+				return a
+			}
+		}
+	}
+	return firstAddress(c.Addresses)
+}
+
+// bindingsFor proposes probes for a candidate from what was seen. A probe
+// whose target could only be guessed is not proposed; the second result
+// says so, for the notes.
+func bindingsFor(f *Findings, c Candidate, opts ProposeOptions) ([]model.ProbeSpec, []string) {
 	ns := c.Namespace
 	if ns == "" {
 		ns = opts.Namespace
 	}
 	var out []model.ProbeSpec
+	var notes []string
+	unbound := func(probe, why string) {
+		notes = append(notes, fmt.Sprintf("%s: %s not proposed, %s; bind it by hand", c.ID, probe, why))
+	}
 	k8s := func(kind string, extra map[string]any) model.ProbeSpec {
 		s := model.ProbeSpec{"probe": kind, "namespace": ns}
 		for k, v := range extra {
@@ -297,7 +511,7 @@ func bindingsFor(c Candidate, opts ProposeOptions) []model.ProbeSpec {
 		}
 		return s
 	}
-	svc := firstAddress(c.Addresses)
+	svc := ownAddress(c)
 	switch c.Type {
 	case "workload", "backgroundworker":
 		if c.Selector != "" {
@@ -310,15 +524,29 @@ func bindingsFor(c Candidate, opts ProposeOptions) []model.ProbeSpec {
 		lower := strings.ToLower(c.Image + " " + c.Name)
 		switch {
 		case strings.Contains(lower, "hatchet-engine") || strings.Contains(lower, "hatchet-api") || strings.Contains(lower, "hatchet-lite"):
-			out = append(out, model.ProbeSpec{"probe": "hatchet.health", "url": "http://" + orDefault(svc, "hatchet-api."+ns) + ":8080", "token_env": "HATCHET_CLIENT_TOKEN"})
+			if u := hatchetURL(f); u != "" {
+				out = append(out, model.ProbeSpec{"probe": "hatchet.health", "url": u, "token_env": "HATCHET_CLIENT_TOKEN"})
+			}
 		case c.Extra["hatchet_worker"] == "true":
-			out = append(out, model.ProbeSpec{"probe": "hatchet.workers", "url": "http://hatchet-api." + ns + ":8080", "token_env": "HATCHET_CLIENT_TOKEN"})
+			if u := hatchetURL(f); u != "" {
+				out = append(out, model.ProbeSpec{"probe": "hatchet.workers", "url": u, "token_env": "HATCHET_CLIENT_TOKEN"})
+			} else {
+				unbound("hatchet.workers", "no Hatchet API was found to ask")
+			}
 		case c.Extra["celery_worker"] == "true":
-			out = append(out, model.ProbeSpec{"probe": "celery.worker", "flower_url": "http://flower." + ns + ":5555"})
+			if u := flowerURL(f, c.Namespace); u != "" {
+				out = append(out, model.ProbeSpec{"probe": "celery.worker", "flower_url": u})
+			} else {
+				unbound("celery.worker", "no Flower was found to ask")
+			}
 		}
 	case "scheduledjob":
 		if wf := c.Extra["hatchet_workflow"]; wf != "" {
-			out = append(out, model.ProbeSpec{"probe": "hatchet.workflow", "url": "http://hatchet-api." + orDefault(ns, "default") + ":8080", "token_env": "HATCHET_CLIENT_TOKEN", "workflow": wf})
+			if u := hatchetURL(f); u != "" {
+				out = append(out, model.ProbeSpec{"probe": "hatchet.workflow", "url": u, "token_env": "HATCHET_CLIENT_TOKEN", "workflow": wf})
+			} else {
+				unbound("hatchet.workflow", "no Hatchet API was found to ask")
+			}
 		} else if c.Name != "" {
 			out = append(out, k8s("k8s.cronjob", map[string]any{"name": c.Name}))
 		}
@@ -330,26 +558,59 @@ func bindingsFor(c Candidate, opts ProposeOptions) []model.ProbeSpec {
 		}
 		out = append(out, model.ProbeSpec{"probe": "pg.stats", "dsn_env": dsnEnvFor(model.Component{ID: c.ID})})
 	case "cache":
-		spec := model.ProbeSpec{"probe": "redis.info", "addr": orDefault(svc, c.ID) + ":6379"}
-		if c.Env["REDIS_PASSWORD"] != "" || strings.Contains(strings.ToLower(c.Image), "redis") {
+		if svc == "" {
+			unbound("redis.info", "its address is not known")
+			break
+		}
+		spec := model.ProbeSpec{"probe": "redis.info", "addr": svc + ":6379"}
+		if _, ok := c.Env["REDIS_PASSWORD"]; ok || strings.Contains(strings.ToLower(c.Image), "redis") {
 			spec["password_env"] = "REDIS_PASSWORD"
 		}
 		out = append(out, spec)
 	case "queue":
 		switch {
 		case c.Extra["celery"] == "true":
-			out = append(out, model.ProbeSpec{"probe": "celery.queue", "broker": "redis://redis." + orDefault(ns, "default") + ":6379/0", "queue": c.Extra["queue"], "flower_url": "http://flower." + orDefault(ns, "default") + ":5555"})
+			broker := c.Extra["broker"]
+			if broker == "" {
+				if a := f.addressWhere(func(o Candidate) bool { return o.Type == "cache" }); a != "" {
+					broker = "redis://" + a + ":6379/0"
+				}
+			}
+			if broker == "" {
+				unbound("celery.queue", "the broker is not known")
+				break
+			}
+			spec := model.ProbeSpec{"probe": "celery.queue", "broker": broker, "queue": c.Extra["queue"]}
+			if u := flowerURL(f, c.Namespace); u != "" {
+				spec["flower_url"] = u
+			}
+			out = append(out, spec)
 		case strings.Contains(strings.ToLower(c.Image), "rabbitmq"):
-			out = append(out, model.ProbeSpec{"probe": "amqp.queue", "management_url": "http://" + orDefault(svc, c.ID) + ":15672", "queue": "celery", "password_env": "RABBITMQ_PASSWORD"})
+			if svc == "" {
+				unbound("amqp.queue", "its address is not known")
+				break
+			}
+			out = append(out, model.ProbeSpec{"probe": "amqp.queue", "management_url": "http://" + svc + ":15672", "queue": "celery", "password_env": "RABBITMQ_PASSWORD"})
 		default:
-			out = append(out, model.ProbeSpec{"probe": "hatchet.queue", "url": "http://hatchet-api." + orDefault(ns, "default") + ":8080", "token_env": "HATCHET_CLIENT_TOKEN"})
+			if u := hatchetURL(f); u != "" {
+				out = append(out, model.ProbeSpec{"probe": "hatchet.queue", "url": u, "token_env": "HATCHET_CLIENT_TOKEN"})
+			}
 		}
 	case "syncengine":
-		spec := model.ProbeSpec{"probe": "electric.sync", "url": "http://" + orDefault(svc, "electric."+orDefault(ns, "default")) + ":3000", "secret_env": "ELECTRIC_SECRET"}
-		if tables := strings.Fields(c.Extra["tables"]); len(tables) > 0 {
-			spec["table"] = tables[0]
+		// Never with "table": with one, the probe asks for a shape, and
+		// Electric answers a new shape with a snapshot query on the
+		// database. Whoever wants the handshake checked adds it by hand.
+		host, port := svc, "3000"
+		if host == "" {
+			if h, p := reachedAt(f, c.ID); h != "" {
+				host, port = h, orDefault(p, port)
+			}
 		}
-		out = append(out, spec)
+		if host == "" {
+			unbound("electric.sync", "its address is not known")
+			break
+		}
+		out = append(out, model.ProbeSpec{"probe": "electric.sync", "url": "http://" + host + ":" + port, "secret_env": "ELECTRIC_SECRET"})
 	case "loadbalancer":
 		if strings.HasPrefix(c.Extra["terraform"], "hcloud_") {
 			out = append(out, model.ProbeSpec{"probe": "hcloud.lb", "name": c.Name, "token_env": "HCLOUD_TOKEN"})
@@ -361,8 +622,14 @@ func bindingsFor(c Candidate, opts ProposeOptions) []model.ProbeSpec {
 			out = append(out, model.ProbeSpec{"probe": "terraform.state", "dir": ".", "resource": tf})
 		}
 	case "ingress":
-		if c.Name != "" {
-			out = append(out, k8s("k8s.ingress", map[string]any{"name": c.Name}))
+		// One probe per Ingress object, each with its own namespace and
+		// name: the component stands for all of them.
+		for _, o := range c.Objects {
+			kind, objNS, name := parseObjectRef(o)
+			if kind != "Ingress" || name == "" {
+				continue
+			}
+			out = append(out, model.ProbeSpec{"probe": "k8s.ingress", "namespace": orDefault(objNS, opts.Namespace), "name": name})
 		}
 	case "dns":
 		if len(c.Addresses) > 0 {
@@ -384,9 +651,14 @@ func bindingsFor(c Candidate, opts ProposeOptions) []model.ProbeSpec {
 		}
 	case "observability":
 		lower := strings.ToLower(c.Image + " " + c.Name)
-		if strings.Contains(lower, "signoz") {
-			out = append(out, model.ProbeSpec{"probe": "signoz.health", "url": "http://" + orDefault(svc, "signoz."+ns) + ":8080"})
-		} else if svc != "" {
+		switch {
+		case svc == "":
+			if strings.Contains(lower, "signoz") {
+				unbound("signoz.health", "its address is not known")
+			}
+		case strings.Contains(lower, "signoz"):
+			out = append(out, model.ProbeSpec{"probe": "signoz.health", "url": "http://" + svc + ":8080"})
+		default:
 			out = append(out, model.ProbeSpec{"probe": "http.ping", "url": "http://" + svc + "/-/healthy"})
 		}
 	case "external":
@@ -394,7 +666,7 @@ func bindingsFor(c Candidate, opts ProposeOptions) []model.ProbeSpec {
 			out = append(out, model.ProbeSpec{"probe": "http.ping", "url": "https://" + c.Addresses[0]})
 		}
 	}
-	return out
+	return out, notes
 }
 
 func firstAddress(addrs []string) string {

@@ -39,6 +39,28 @@ type Options struct {
 	Logf func(format string, args ...any)
 	// Now overrides the clock (tests).
 	Now func() time.Time
+	// Only, when set, picks the bindings that run: the others are not
+	// started, as if they were not bound (`wassup probe --tier`, `wassup
+	// probe <id>`).
+	Only func(target string, spec model.ProbeSpec) bool
+	// Progress, when set, is called by Sample once per binding, as soon as
+	// its first round is in, so a run that takes a while says what it waits
+	// for.
+	Progress func(Progress)
+}
+
+// Progress is one binding finishing its first round in a run of Sample.
+type Progress struct {
+	Target string `json:"target"`
+	Kind   string `json:"kind"`
+	// Status is ok (data was read), error (the probe ran and could not read
+	// its source), failed (it never started) or silent (nothing came within
+	// the timeout).
+	Status  string        `json:"status"`
+	Error   string        `json:"error,omitempty"`
+	Elapsed time.Duration `json:"elapsed"`
+	// Done counts the bindings that finished, this one included.
+	Done, Total int
 }
 
 // Update is what the runtime pushes to the TUI after every tick or reload.
@@ -79,7 +101,13 @@ type Runtime struct {
 
 	cancelProbes context.CancelFunc
 	probeCtx     context.Context
+	// releasing holds the probes a reload replaced that have not released
+	// their connection yet; Stop waits for them too.
+	releasing []<-chan struct{}
 }
+
+// stopGrace is how long Stop waits for the probes to release what they hold.
+const stopGrace = 3 * time.Second
 
 // New loads the directory and prepares a runtime. A validation error is
 // returned as *model.ValidationError with the partially loaded config kept.
@@ -253,6 +281,7 @@ func (r *Runtime) startProbes(ctx context.Context) {
 	}
 	pctx, cancel := context.WithCancel(ctx)
 	r.probeCtx, r.cancelProbes = pctx, cancel
+	r.releasing = r.releasingLocked()
 	r.inst = nil
 	tick := r.cfg.Topology.Settings.TickDuration()
 	if r.opts.Replay != nil {
@@ -263,6 +292,9 @@ func (r *Runtime) startProbes(ctx context.Context) {
 		return
 	}
 	start := func(target string, spec model.ProbeSpec) {
+		if r.opts.Only != nil && !r.opts.Only(target, spec) {
+			return
+		}
 		kind := spec.Kind()
 		in := instance{kind: kind, target: target}
 		p, err := probe.New(kind)
@@ -274,7 +306,9 @@ func (r *Runtime) startProbes(ctx context.Context) {
 		s := spec.Plain()
 		s["_target"] = target
 		s["_tick"] = tick
-		if strings.HasPrefix(kind, "k8s.") || strings.HasPrefix(kind, "cnpg.") {
+		// A probe that reaches its source through the cluster (via:
+		// k8s.service/...) uses the same kubeconfig as the k8s probes.
+		if strings.HasPrefix(kind, "k8s.") || strings.HasPrefix(kind, "cnpg.") || strings.HasPrefix(probe.Str(s, "via", ""), "k8s.") {
 			if _, ok := s["kubeconfig"]; !ok && r.opts.Kubeconfig != "" {
 				s["kubeconfig"] = r.opts.Kubeconfig
 			}
@@ -310,6 +344,52 @@ func (r *Runtime) startProbes(ctx context.Context) {
 	for _, id := range ids {
 		for _, spec := range r.cfg.Bindings.Edges[id] {
 			start(id, spec)
+		}
+	}
+}
+
+// releasingLocked lists the probes that still hold something they have to
+// release in order (probe.Closer): the running ones and the ones a reload
+// replaced.
+func (r *Runtime) releasingLocked() []<-chan struct{} {
+	var out []<-chan struct{}
+	for _, done := range r.releasing {
+		select {
+		case <-done:
+		default:
+			out = append(out, done)
+		}
+	}
+	for _, in := range r.inst {
+		c, ok := in.p.(probe.Closer)
+		if !ok || in.err != nil {
+			continue
+		}
+		if done := c.Done(); done != nil {
+			out = append(out, done)
+		}
+	}
+	return out
+}
+
+// Stop ends the probes and waits, up to stopGrace, until those that hold a
+// connection have released it. Call it before the process exits: a
+// connection the exit cuts reaches the server as a reset, and a port-forward
+// or a tunnel on the way goes down with it.
+func (r *Runtime) Stop() {
+	r.mu.Lock()
+	if r.cancelProbes != nil {
+		r.cancelProbes()
+	}
+	waiting := r.releasingLocked()
+	r.mu.Unlock()
+	limit := time.NewTimer(stopGrace)
+	defer limit.Stop()
+	for _, done := range waiting {
+		select {
+		case <-done:
+		case <-limit.C:
+			return
 		}
 	}
 }
@@ -566,35 +646,129 @@ func sameBindings(a, b model.Bindings) bool {
 }
 
 // RunOnce starts the probes, waits until every bound element has reported or
-// the timeout passes, evaluates once and returns the snapshot. It never
+// the timeout passes, evaluates once and returns the snapshot. The probes
+// have stopped and released their connections when it returns. It never
 // writes state.
 func (r *Runtime) RunOnce(ctx context.Context, timeout time.Duration) (*model.Snapshot, error) {
+	return r.Sample(ctx, timeout, 1)
+}
+
+// Sample is RunOnce that waits for `samples` rounds of every probe. A rate
+// that a probe computes from the difference between two readings does not
+// exist after one round, and the element would read idle; two samples cost
+// one tick and show it. A probe that failed to start is not waited for, and
+// one that reported an error has reported: the run does not sit out the
+// timeout for it.
+func (r *Runtime) Sample(ctx context.Context, timeout time.Duration, samples int) (*model.Snapshot, error) {
 	r.opts.ReadOnly = true
+	if samples < 1 {
+		samples = 1
+	}
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	began := time.Now()
 	r.startProbes(cctx)
-	want := map[string]bool{}
-	for id := range r.cfg.Bindings.Components {
-		want[id] = true
+	defer r.Stop()
+	r.mu.RLock()
+	tick := r.cfg.Topology.Settings.TickDuration()
+	want := map[string]map[string]bool{} // target -> probe kinds that started
+	total, done := len(r.inst), 0
+	report := func(target, kind, status, msg string) {
+		done++
+		if r.opts.Progress != nil {
+			r.opts.Progress(Progress{Target: target, Kind: kind, Status: status, Error: msg, Elapsed: time.Since(began), Done: done, Total: total})
+		}
 	}
-	for id := range r.cfg.Bindings.Edges {
-		want[id] = true
+	for _, in := range r.inst {
+		if in.err != nil || in.p == nil {
+			msg := "not started"
+			if in.err != nil {
+				msg = in.err.Error()
+			}
+			report(in.target, in.kind, "failed", msg)
+			continue
+		}
+		if want[in.target] == nil {
+			want[in.target] = map[string]bool{}
+		}
+		want[in.target][in.kind] = true
 	}
-	got := map[string]bool{}
+	r.mu.RUnlock()
+	seen := map[string]map[string]int{}
+	// one counts a round of one binding. A round that failed is the last
+	// one waited for: the next would say the same a tick later.
+	one := func(o probe.Observation, kind string) {
+		if seen[o.Target][kind] == 0 {
+			if o.Err != "" {
+				report(o.Target, kind, "error", o.Err)
+			} else {
+				report(o.Target, kind, "ok", "")
+			}
+		}
+		seen[o.Target][kind]++
+		if o.Err != "" && seen[o.Target][kind] < samples {
+			seen[o.Target][kind] = samples
+		}
+	}
+	count := func(o probe.Observation) {
+		kinds := want[o.Target]
+		if kinds == nil {
+			return
+		}
+		if seen[o.Target] == nil {
+			seen[o.Target] = map[string]int{}
+		}
+		if kinds[o.Probe] {
+			one(o, o.Probe)
+			return
+		}
+		// A probe that reports under another name counts for the element.
+		for k := range kinds {
+			one(o, k)
+		}
+	}
+	reported := func(n int) bool {
+		for target, kinds := range want {
+			for k := range kinds {
+				if seen[target][k] < n {
+					return false
+				}
+			}
+		}
+		return true
+	}
 	deadline := time.After(timeout)
 	settle := time.NewTimer(time.Hour)
 	settle.Stop()
+	second := time.NewTimer(time.Hour)
+	second.Stop()
+	waiting := false  // for the later samples
+	settling := false // every sample is in
+	if len(want) == 0 {
+		settling = true
+		settle.Reset(0)
+	}
 loop:
 	for {
 		select {
 		case o := <-r.obs:
 			r.binder.Apply(o)
-			if o.Err == "" {
-				got[o.Target] = true
-			}
-			if len(got) >= len(want) {
+			count(o)
+			switch {
+			case settling:
+			case reported(samples):
+				// A moment for what else is on its way, armed once: probes
+				// that tick faster than it must not keep it from firing.
+				settling = true
 				settle.Reset(300 * time.Millisecond)
+			case !waiting && reported(1):
+				// Everything reported once. The next rounds come a tick
+				// later; a probe that polls more slowly re-emits by then.
+				waiting = true
+				second.Reset(time.Duration(samples-1)*tick + time.Second)
 			}
+		case <-second.C:
+			break loop
 		case <-settle.C:
 			break loop
 		case <-deadline:
@@ -603,9 +777,30 @@ loop:
 			return nil, ctx.Err()
 		}
 	}
-	// Give probes that failed to start a moment to report health.
+	targets := make([]string, 0, len(want))
+	for target := range want {
+		targets = append(targets, target)
+	}
+	sort.Strings(targets)
+	for _, target := range targets {
+		for _, k := range sortedKinds(want[target]) {
+			if seen[target][k] == 0 {
+				report(target, k, "silent", "no observation within the timeout")
+			}
+		}
+	}
 	r.evaluate(false)
 	return r.Snapshot(), nil
+}
+
+// sortedKinds lists the kinds of a set in a stable order.
+func sortedKinds(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // SaveLayout writes layout.json for the current config.
