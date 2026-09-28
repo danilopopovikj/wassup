@@ -32,6 +32,13 @@ make lint          # gofmt and go vet
 make demo          # builds and replays the connection pool scenario
 ```
 
+The parsers that read pasted or remote text have fuzz tests. `make test`
+runs their recorded inputs; to search for new ones, name a test:
+
+```sh
+go test ./internal/model -run '^$' -fuzz FuzzParseRef -fuzztime 30s
+```
+
 Two optional tools:
 
 - `python3` regenerates the scenario fixtures (`make fixtures`).

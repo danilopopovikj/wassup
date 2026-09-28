@@ -41,3 +41,12 @@ With the [GitHub CLI](https://cli.github.com):
 ```sh
 gh attestation verify wassup_<version>_<os>_<arch>.tar.gz --repo danilopopovikj/wassup
 ```
+
+The same provenance is attached to the release as
+`wassup_<tag>.intoto.jsonl`. Download it next to the archive to verify
+against the file instead of the copy GitHub stores:
+
+```sh
+gh attestation verify wassup_<version>_<os>_<arch>.tar.gz \
+  --repo danilopopovikj/wassup --bundle wassup_<tag>.intoto.jsonl
+```
