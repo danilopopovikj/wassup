@@ -31,5 +31,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        id: attest
         with:
           subject-checksums: dist/checksums.txt
+      # The provenance sits next to the archives too, so a release can be
+      # verified from its own files, without asking GitHub for the attestation.
+      - name: Attach the provenance to the release
+        run: |
+          cp "$BUNDLE" "$PROVENANCE"
+          gh release upload "$GITHUB_REF_NAME" "$PROVENANCE" --repo "$GITHUB_REPOSITORY"
+        env:
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
+          PROVENANCE: wassup_${{ github.ref_name }}.intoto.jsonl
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
