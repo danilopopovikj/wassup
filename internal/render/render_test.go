@@ -53,8 +53,9 @@ func TestDrawScenario(t *testing.T) {
 		t.Errorf("lens should dim part of the picture: lit %d dim %d", lit, dim)
 	}
 	svg := c.SVG()
-	if !strings.HasPrefix(svg, "<svg") || !strings.Contains(svg, "38 queued") {
-		t.Error("svg export should carry the labels")
+	// Words are separate elements pinned to the grid, so check them apart.
+	if !strings.HasPrefix(svg, "<svg") || !strings.Contains(svg, ">queued<") || !strings.Contains(svg, ">38<") || !strings.Contains(svg, `textLength="48"`) {
+		t.Error("svg export should carry the labels on the cell grid")
 	}
 }
 
