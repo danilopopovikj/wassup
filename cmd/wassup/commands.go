@@ -16,6 +16,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/danilopopovikj/wassup/internal/app"
+	"github.com/danilopopovikj/wassup/internal/bind"
 	"github.com/danilopopovikj/wassup/internal/demo"
 	"github.com/danilopopovikj/wassup/internal/explain"
 	"github.com/danilopopovikj/wassup/internal/history"
@@ -219,6 +220,95 @@ func validateCmd() *cobra.Command {
 	}
 }
 
+// probeRow is one component or edge in the report of `wassup probe`.
+type probeRow struct {
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`
+	Bound  bool   `json:"bound"`
+	State  string `json:"state"`
+	Label  string `json:"label"`
+	Probes string `json:"probes"`
+}
+
+// probeRows reports every component and edge as bound or unbound. An element
+// with probes of its own is bound only when one of them delivered data. The
+// snapshot alone does not say so: an edge whose probe failed still reads
+// idle, or takes the flow of its ends, and a failed binding would print as
+// bound.
+func probeRows(cfg *model.Config, snap *model.Snapshot, joined map[string]*bind.Joined, inst []app.Instance) []probeRow {
+	row := func(id, kind string, es model.ElementState, specs []model.ProbeSpec) probeRow {
+		kinds := make([]string, 0, len(specs))
+		for _, s := range specs {
+			kinds = append(kinds, s.Kind())
+		}
+		r := probeRow{ID: id, Kind: kind, Bound: es.Marker != model.MarkerUnbound, State: string(es.State), Label: es.Label, Probes: strings.Join(kinds, ",")}
+		if j := joined[id]; r.Bound && len(specs) > 0 && (j == nil || !j.Bound) {
+			r.Bound = false
+			r.State = string(model.Idle)
+			r.Label = "unbound, " + probeFailure(id, j, inst)
+		}
+		return r
+	}
+	var rows []probeRow
+	for _, comp := range cfg.Topology.AllComponents() {
+		rows = append(rows, row(comp.ID, comp.Type, snap.Components[comp.ID], cfg.Bindings.Components[comp.ID]))
+	}
+	for _, e := range cfg.Topology.Edges {
+		rows = append(rows, row(e.ID(), "edge", snap.Edges[e.ID()], cfg.Bindings.Edges[e.ID()]))
+	}
+	return rows
+}
+
+// probeFailure says why no probe of an element delivered: the error of the
+// first one that reported, or why it never started.
+func probeFailure(id string, j *bind.Joined, inst []app.Instance) string {
+	if j != nil && len(j.Errors) > 0 {
+		return j.Errors[0]
+	}
+	for _, in := range inst {
+		if in.Target != id || in.Health == string(probe.HealthOK) {
+			continue
+		}
+		msg := in.Error
+		if msg == "" {
+			msg = in.Message
+		}
+		if msg == "" {
+			continue
+		}
+		if strings.HasPrefix(msg, in.Kind) {
+			return msg
+		}
+		return in.Kind + ": " + msg
+	}
+	return "no probe data"
+}
+
+// probeCounts is the summary of `wassup probe`.
+type probeCounts struct {
+	Bound, Total, EdgesBound, EdgesTotal int
+}
+
+func countProbeRows(rows []probeRow) probeCounts {
+	var c probeCounts
+	for _, r := range rows {
+		bound, total := &c.Bound, &c.Total
+		if r.Kind == "edge" {
+			bound, total = &c.EdgesBound, &c.EdgesTotal
+		}
+		*total++
+		if r.Bound {
+			*bound++
+		}
+	}
+	return c
+}
+
+// unbound reports whether anything is unbound, which fails the run.
+func (c probeCounts) unbound() bool {
+	return c.Bound < c.Total || c.EdgesBound < c.EdgesTotal
+}
+
 func probeCmd() *cobra.Command {
 	var once bool
 	var timeout time.Duration
@@ -244,39 +334,14 @@ func probeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			type row struct {
-				ID     string `json:"id"`
-				Kind   string `json:"kind"`
-				Bound  bool   `json:"bound"`
-				State  string `json:"state"`
-				Label  string `json:"label"`
-				Probes string `json:"probes"`
-			}
-			var rows []row
-			bound, total := 0, 0
-			for _, comp := range cfg.Topology.AllComponents() {
-				es := snap.Components[comp.ID]
-				var kinds []string
-				for _, s := range cfg.Bindings.Components[comp.ID] {
-					kinds = append(kinds, s.Kind())
-				}
-				isBound := es.Marker != model.MarkerUnbound
-				if isBound {
-					bound++
-				}
-				total++
-				rows = append(rows, row{ID: comp.ID, Kind: comp.Type, Bound: isBound, State: string(es.State), Label: es.Label, Probes: strings.Join(kinds, ",")})
-			}
-			for _, e := range cfg.Topology.Edges {
-				es := snap.Edges[e.ID()]
-				var kinds []string
-				for _, s := range cfg.Bindings.Edges[e.ID()] {
-					kinds = append(kinds, s.Kind())
-				}
-				rows = append(rows, row{ID: e.ID(), Kind: "edge", Bound: es.Marker != model.MarkerUnbound, State: string(es.State), Label: es.Label, Probes: strings.Join(kinds, ",")})
-			}
+			rows := probeRows(cfg, snap, rt.Binder().All(), rt.Instances())
+			counts := countProbeRows(rows)
 			if flags.jsonOut {
-				return printJSON(map[string]any{"bound": bound, "total": total, "elements": rows, "probes": rt.Instances(), "probe_health": rt.ProbeHealth()})
+				return printJSON(map[string]any{
+					"bound": counts.Bound, "total": counts.Total,
+					"edges_bound": counts.EdgesBound, "edges_total": counts.EdgesTotal,
+					"elements": rows, "probes": rt.Instances(), "probe_health": rt.ProbeHealth(),
+				})
 			}
 			for _, r := range rows {
 				mark := "bound  "
@@ -285,7 +350,11 @@ func probeCmd() *cobra.Command {
 				}
 				fmt.Printf("%s  %-24s %-9s %-11s %s\n", mark, r.ID, r.Kind, r.State, r.Label)
 			}
-			fmt.Printf("\n%d of %d components bound\n", bound, total)
+			fmt.Printf("\n%d of %d components bound", counts.Bound, counts.Total)
+			if counts.EdgesTotal > 0 {
+				fmt.Printf(", %d of %d edges bound", counts.EdgesBound, counts.EdgesTotal)
+			}
+			fmt.Println()
 			for _, in := range rt.Instances() {
 				if in.Health != string(probe.HealthOK) {
 					msg := in.Message
@@ -295,7 +364,7 @@ func probeCmd() *cobra.Command {
 					fmt.Printf("  %s on %s: %s %s\n", in.Kind, in.Target, in.Health, msg)
 				}
 			}
-			if bound < total {
+			if counts.unbound() {
 				os.Exit(3)
 			}
 			return nil
