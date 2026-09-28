@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -177,15 +178,21 @@ func TestSyncTableNotFound(t *testing.T) {
 
 	p, clock := newSync()
 	o := p.poll(context.Background(), cfg(srv.URL, "public.nope"))
-	if o.Err != "" || o.Metrics["ready"] != 1 {
+	// A shape that cannot be served is a sync engine that is not ready: the
+	// facet writes ready=0 and NotReady on the component, with the table in
+	// the detail, and no shape latency for a request that served nothing.
+	if o.Err != "" || o.Metrics["ready"] != 0 {
 		t.Fatalf("err=%q metrics=%v", o.Err, o.Metrics)
 	}
 	c, ok := model.HasCondition(o.Conditions, model.CondNotReady)
-	if !ok || c.Ref != "public.nope" || !c.Since.Equal(clock) {
+	if !ok || c.Ref != "electric" || !c.Since.Equal(clock) {
 		t.Fatalf("conditions = %+v", o.Conditions)
 	}
-	if c.Detail != `HTTP 404 Not Found: Table "public.nope" does not exist` {
+	if c.Detail != `shape public.nope: HTTP 404 Not Found: Table "public.nope" does not exist` {
 		t.Fatalf("detail = %q", c.Detail)
+	}
+	if _, ok := o.Metrics["shape_ms"]; ok {
+		t.Fatalf("no shape served, no shape latency: %v", o.Metrics)
 	}
 	if _, ok := o.Metrics["up_to_date"]; ok {
 		t.Fatalf("up_to_date must not be reported without a shape: %v", o.Metrics)
@@ -273,8 +280,10 @@ func TestSyncConnectionRefused(t *testing.T) {
 	if o.Err == "" || o.Metrics != nil {
 		t.Fatalf("err=%q metrics=%v", o.Err, o.Metrics)
 	}
+	// ConnectionRefused sits on the component, like every facet condition;
+	// the URL is in the detail.
 	c, ok := model.HasCondition(o.Conditions, model.CondConnectionRefused)
-	if !ok || !c.Since.Equal(clock) || c.Ref != dead {
+	if !ok || !c.Since.Equal(clock) || c.Ref != "electric" || !strings.Contains(c.Detail, dead) {
 		t.Fatalf("conditions = %+v", o.Conditions)
 	}
 	if p.Health().State != probe.HealthDegraded {

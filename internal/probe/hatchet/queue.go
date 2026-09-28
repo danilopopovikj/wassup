@@ -26,6 +26,7 @@ var queueAccess = probe.Access{
 	SpecFields:  withFields("queue", "workflow"),
 	Needs:       "a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token",
 	Implemented: true,
+	Facets:      []string{facet.NameQueue},
 }
 
 func init() {

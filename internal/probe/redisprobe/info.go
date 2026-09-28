@@ -12,6 +12,7 @@ import (
 
 	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 // Info is the parsed output of INFO: every "key:value" line plus the
@@ -102,14 +103,14 @@ type Sample struct {
 // cacheFullMemPct is the fill level at which a cache counts as full.
 const cacheFullMemPct = 99.5
 
-// Observe maps an INFO reading onto the cache metrics vocabulary. prev is
-// the previous tick's sample (nil on the first tick): with it hit_rate is the
-// hit rate since that tick and evictions the evicted keys per minute; without
-// it hit_rate is the lifetime rate and evictions is omitted. The returned
+// Observe maps an INFO reading onto the cache facet. prev is the previous
+// tick's sample (nil on the first tick): with it hit_rate is the hit rate
+// since that tick and evictions the evicted keys per minute; without it
+// hit_rate is the lifetime rate and evictions is omitted. The returned
 // CacheFull condition has no Since; the probe stamps it.
 func Observe(info Info, prev *Sample, now time.Time) (map[string]float64, []model.Condition, map[string]any, Sample) {
-	m := map[string]float64{}
 	detail := map[string]any{}
+	var f facet.CacheFacet
 
 	used, _ := info.Num("used_memory")
 	maxmem, _ := info.Num("maxmemory")
@@ -122,7 +123,7 @@ func Observe(info Info, prev *Sample, now time.Time) (map[string]float64, []mode
 		memPct, memKnown = used/total*100, true
 	}
 	if memKnown {
-		m["mem_pct"] = memPct
+		f.MemPct = facet.N(memPct)
 	}
 
 	hits, _ := info.Num("keyspace_hits")
@@ -138,7 +139,7 @@ func Observe(info Info, prev *Sample, now time.Time) (map[string]float64, []mode
 		}
 		if de := evicted - prev.Evicted; de >= 0 {
 			if mins := now.Sub(prev.At).Minutes(); mins > 0 {
-				m["evictions"] = de / mins
+				f.Evictions = facet.N(de / mins)
 			}
 		}
 	}
@@ -146,21 +147,27 @@ func Observe(info Info, prev *Sample, now time.Time) (map[string]float64, []mode
 		hitRate, hitKnown = hits/(hits+misses)*100, true
 	}
 	if hitKnown {
-		m["hit_rate"] = hitRate
+		f.HitRate = facet.N(hitRate)
 	}
 	if c, ok := info.Num("connected_clients"); ok {
-		m["clients"] = c
+		f.Clients = facet.N(c)
 	}
 
 	policy := info.Str("maxmemory_policy")
-	var conds []model.Condition
-	if memKnown && memPct >= cacheFullMemPct && (policy == "noeviction" || (hitKnown && hitRate < 50)) {
-		d := fmt.Sprintf("memory %.1f%% of %s", memPct, humanBytes(maxOr(maxmem, total)))
-		if policy != "" {
-			d += ", policy " + policy
-		}
-		conds = append(conds, model.Condition{Kind: model.CondCacheFull, Ref: "policy/" + policy, Detail: d})
+	f.Policy = policy
+	f.Full = memKnown && memPct >= cacheFullMemPct && (policy == "noeviction" || (hitKnown && hitRate < 50))
+	if f.Full {
+		detail["full"] = fmt.Sprintf("memory %.1f%% of %s", memPct, humanBytes(maxOr(maxmem, total)))
 	}
+
+	// The facet writes the canonical form shared by every cache backend.
+	var o probe.Observation
+	facet.EmitCache(&o, f, now)
+	m := o.Metrics
+	if m == nil {
+		m = map[string]float64{}
+	}
+	conds := o.Conditions
 
 	if h := info.Str("maxmemory_human"); h != "" {
 		detail["maxmemory"] = h
@@ -213,6 +220,7 @@ var infoAccess = probe.Access{
 	SpecFields:  []string{"addr", "url", "password_env", "db", "tls"},
 	Needs:       "network access to the Redis port; a password in the environment variable named by password_env when AUTH is on",
 	Implemented: true,
+	Facets:      []string{facet.NameCache},
 }
 
 func init() {

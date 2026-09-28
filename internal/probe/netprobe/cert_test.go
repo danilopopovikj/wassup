@@ -77,7 +77,8 @@ func TestCertExpiring(t *testing.T) {
 	if !ok {
 		t.Fatalf("no CertExpiring: %v", o.Conditions)
 	}
-	if cond.Ref != "example.com" || !strings.Contains(cond.Detail, "3 day(s)") {
+	// The certificate facet names the bound component, not the server name.
+	if cond.Ref != "certificate/ingress" || !strings.Contains(cond.Detail, "3 days") {
 		t.Fatalf("condition = %+v", cond)
 	}
 	if _, ok := model.HasCondition(o.Conditions, model.CondCertExpired); ok {

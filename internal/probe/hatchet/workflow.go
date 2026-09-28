@@ -31,6 +31,7 @@ var workflowAccess = probe.Access{
 	SpecFields:  withFields("workflow", "window"),
 	Needs:       "a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token",
 	Implemented: true,
+	Facets:      []string{facet.NameScheduledJob},
 }
 
 func init() {
@@ -248,14 +249,14 @@ func (p *WorkflowProbe) applyRuns(o *probe.Observation, st *workflowState, runs 
 	if lastFailure != nil {
 		o.Detail["last_failure"] = firstOf(lastFailure.FinishedAt, lastFailure.CreatedAt)
 	}
-	job := facet.JobFacet{Active: facet.N(o.Metrics["active"]), Succeeded: facet.N(o.Metrics["succeeded"]), Failed: facet.N(o.Metrics["failed"]), Queued: facet.N(o.Metrics["queued"])}
+	job := facet.ScheduledJobFacet{Active: facet.N(o.Metrics["active"]), Succeeded: facet.N(o.Metrics["succeeded"]), Failed: facet.N(o.Metrics["failed"]), Queued: facet.N(o.Metrics["queued"])}
 	if latestFinished != nil && latestFinished.Status == statusFailed {
 		job.LastFailure = &facet.Failure{Ref: "run/" + latestFinished.runID(), At: firstOf(latestFinished.FinishedAt, latestFinished.CreatedAt), Reason: truncate(latestFinished.ErrorMessage, errorMessageLen)}
 	}
 	if running != nil {
 		job.Running = &facet.Task{ID: "run/" + running.runID(), Name: running.DisplayName, Started: firstOf(running.StartedAt, running.CreatedAt)}
 	}
-	facet.EmitJob(o, job, now)
+	facet.EmitScheduledJob(o, job, now)
 	if v, ok := o.Metrics["running_s"]; ok && v < 0 {
 		o.Metrics["running_s"] = 0
 	}

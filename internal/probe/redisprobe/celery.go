@@ -263,6 +263,7 @@ var celeryAccess = probe.Access{
 	SpecFields:  []string{"broker", "queue", "password_env", "flower_url", "oldest", "long_task"},
 	Needs:       "network access to the broker (password via password_env) and, optionally, to Flower",
 	Implemented: true,
+	Facets:      []string{facet.NameQueue},
 }
 
 func init() {

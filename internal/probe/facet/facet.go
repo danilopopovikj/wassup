@@ -828,28 +828,3 @@ func EmitTraffic(o *probe.Observation, t TrafficFacet, now time.Time) {
 		cond(o, model.CondConnectionRefused, o.Target, since, t.RefusedDetail)
 	}
 }
-
-// Transitional aliases for callers written against the first names of
-// these facets; remove once every probe uses the final names.
-type (
-	WorkerFacet = BackgroundWorkerFacet
-	JobFacet    = ScheduledJobFacet
-	SyncFacet   = SyncEngineFacet
-)
-
-const (
-	NameWorker = NameBackgroundWorker
-	NameJob    = NameScheduledJob
-	NameSync   = NameSyncEngine
-)
-
-// EmitWorker is EmitBackgroundWorker under its first name.
-func EmitWorker(o *probe.Observation, w BackgroundWorkerFacet, now time.Time) {
-	EmitBackgroundWorker(o, w, now)
-}
-
-// EmitJob is EmitScheduledJob under its first name.
-func EmitJob(o *probe.Observation, j ScheduledJobFacet, now time.Time) { EmitScheduledJob(o, j, now) }
-
-// EmitSync is EmitSyncEngine under its first name.
-func EmitSync(o *probe.Observation, s SyncEngineFacet, now time.Time) { EmitSyncEngine(o, s, now) }

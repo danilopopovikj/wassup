@@ -18,8 +18,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 // KindSync is the probe kind.
@@ -38,8 +38,6 @@ const (
 	statusStarting  = "starting"
 	detailWaiting   = "waiting for Postgres"
 	detailStarting  = "starting"
-	keyNotReady     = "notready"
-	keyRefused      = "refused"
 	electricHandle  = "electric-handle"
 	electricOffset  = "electric-offset"
 	electricSchema  = "electric-schema"
@@ -55,6 +53,7 @@ func init() {
 		SpecFields:  []string{"url", "secret_env", "table", "interval", "timeout"},
 		Needs:       "HTTP access to Electric; the ELECTRIC_SECRET in the environment variable named by secret_env when the service requires one",
 		Implemented: true,
+		Facets:      []string{facet.NameSyncEngine},
 	}, func() probe.Probe { return &Sync{} })
 }
 
@@ -289,7 +288,9 @@ func (p *Sync) mark(key string, now time.Time) time.Time {
 // clear forgets a condition's first-seen time.
 func (p *Sync) clear(key string) { delete(p.since, key) }
 
-// poll does one round: health, then (with a table) shape and live poll.
+// poll does one round: health, then (with a table) shape and live poll. The
+// sync facet writes the canonical form once both are known; the probe's
+// first-seen tracker keeps NotReady and ConnectionRefused Since stable.
 func (p *Sync) poll(ctx context.Context, c config) probe.Observation {
 	now := p.clock()
 	o := probe.Observation{
@@ -302,28 +303,26 @@ func (p *Sync) poll(ctx context.Context, c config) probe.Observation {
 	if c.table != "" {
 		o.Detail["table"] = c.table
 	}
+	s := facet.SyncEngineFacet{Since: p.mark}
 
 	hr := p.get(ctx, p.client, c.url+"/v1/health")
 	if hr.err != nil {
-		o.Metrics = nil
 		if hr.timeout {
 			o.Err = fmt.Sprintf("GET /v1/health timed out after %s", c.timeout.Round(time.Millisecond))
-			p.clear(keyRefused)
+			p.clear(facet.KeyTimeout)
 		} else {
 			o.Err = "GET /v1/health: " + hr.err.Error()
-			o.Conditions = append(o.Conditions, model.Condition{
-				Kind:   model.CondConnectionRefused,
-				Ref:    c.url,
-				Since:  p.mark(keyRefused, now),
-				Detail: hr.err.Error(),
-			})
+			s.Unreachable, s.UnreachDetail = true, hr.err.Error()
+			facet.EmitSyncEngine(&o, s, now)
 		}
+		// The read failed: no numbers, only the condition and the error.
+		o.Metrics = nil
 		o.Detail["last_error"] = o.Err
 		p.h.Set(probe.HealthDegraded, o.Err)
 		return o
 	}
-	p.clear(keyRefused)
-	o.Metrics["latency_ms"] = ms(hr.latency)
+	p.clear(facet.KeyTimeout)
+	s.Latency = facet.N(ms(hr.latency))
 	o.Detail["health_status"] = hr.status
 
 	if hr.status == http.StatusUnauthorized || hr.status == http.StatusForbidden {
@@ -339,10 +338,8 @@ func (p *Sync) poll(ctx context.Context, c config) probe.Observation {
 	health, msg := probe.HealthOK, ""
 	switch {
 	case hr.status == http.StatusOK && status == statusActive:
-		o.Metrics["ready"] = 1
-		p.clear(keyNotReady)
+		s.Ready = true
 	case hr.status == http.StatusOK || hr.status == http.StatusAccepted:
-		o.Metrics["ready"] = 0
 		detail := status
 		switch status {
 		case statusWaiting:
@@ -352,23 +349,21 @@ func (p *Sync) poll(ctx context.Context, c config) probe.Observation {
 		case "":
 			detail = fmt.Sprintf("HTTP %d", hr.status)
 		}
-		o.Conditions = append(o.Conditions, model.Condition{
-			Kind: model.CondNotReady, Ref: c.url, Since: p.mark(keyNotReady, now), Detail: detail,
-		})
+		s.NotReadyDetail = detail
 		health, msg = probe.HealthDegraded, "electric is "+detail
 	default:
-		o.Metrics["ready"] = 0
-		detail := fmt.Sprintf("HTTP %d %s", hr.status, http.StatusText(hr.status))
-		o.Conditions = append(o.Conditions, model.Condition{
-			Kind: model.CondNotReady, Ref: c.url, Since: p.mark(keyNotReady, now), Detail: detail,
-		})
-		health, msg = probe.HealthDegraded, "health endpoint returned "+detail
+		s.NotReadyDetail = fmt.Sprintf("HTTP %d %s", hr.status, http.StatusText(hr.status))
+		health, msg = probe.HealthDegraded, "health endpoint returned "+s.NotReadyDetail
 	}
 
 	if c.table != "" {
-		if h, m := p.shape(ctx, c, &o, now); h != probe.HealthOK && (health == probe.HealthOK || h == probe.HealthFailed) {
+		if h, m := p.shape(ctx, c, &o, &s); h != probe.HealthOK && (health == probe.HealthOK || h == probe.HealthFailed) {
 			health, msg = h, m
 		}
+	}
+	facet.EmitSyncEngine(&o, s, now)
+	if s.Ready {
+		p.clear(facet.KeyNotReady)
 	}
 	p.h.Set(health, msg)
 	return o
@@ -395,8 +390,11 @@ func shapeURL(c config, params url.Values) string {
 }
 
 // shape performs the initial shape request and one short live poll, filling
-// metrics, conditions and detail on o. It returns the health it implies.
-func (p *Sync) shape(ctx context.Context, c config, o *probe.Observation, now time.Time) (probe.HealthState, string) {
+// the facet's shape side (latency, up to date, busy, and NotReady when the
+// shape is unavailable while the service itself reports fine) and o's
+// detail. columns is this probe's own metric. It returns the health it
+// implies.
+func (p *Sync) shape(ctx context.Context, c config, o *probe.Observation, s *facet.SyncEngineFacet) (probe.HealthState, string) {
 	sr := p.get(ctx, p.client, shapeURL(c, url.Values{"offset": {"-1"}}))
 	if sr.err != nil {
 		msg := "GET /v1/shape: " + sr.err.Error()
@@ -406,7 +404,6 @@ func (p *Sync) shape(ctx context.Context, c config, o *probe.Observation, now ti
 		o.Detail["shape_error"] = msg
 		return probe.HealthDegraded, msg
 	}
-	o.Metrics["shape_ms"] = ms(sr.latency)
 	o.Detail["shape_status"] = sr.status
 	if h := sr.header.Get(electricHandle); h != "" {
 		o.Detail["handle"] = h
@@ -421,13 +418,14 @@ func (p *Sync) shape(ctx context.Context, c config, o *probe.Observation, now ti
 
 	switch {
 	case sr.status == http.StatusOK:
-		// fall through to the live poll below
+		// Only a served shape has a shape latency; the live poll follows.
+		s.ShapeLatency = facet.N(ms(sr.latency))
 	case sr.status == http.StatusUnauthorized || sr.status == http.StatusForbidden:
 		msg := fmt.Sprintf("GET /v1/shape: HTTP %d, secret rejected", sr.status)
 		o.Detail["shape_error"] = msg
 		return probe.HealthFailed, msg
 	case sr.status == http.StatusTooManyRequests:
-		o.Metrics["busy"] = 1
+		s.Busy = true
 		o.Detail["shape_error"] = "HTTP 429: Electric is busy, shape request throttled"
 		return probe.HealthDegraded, "electric is busy (429)"
 	case sr.status == http.StatusConflict:
@@ -441,9 +439,11 @@ func (p *Sync) shape(ctx context.Context, c config, o *probe.Observation, now ti
 			detail += ": " + m
 		}
 		o.Detail["shape_error"] = detail
-		o.Conditions = append(o.Conditions, model.Condition{
-			Kind: model.CondNotReady, Ref: c.table, Since: p.mark(keyNotReady, now), Detail: detail,
-		})
+		// A shape that cannot be served is a sync service that is not ready,
+		// unless the health endpoint already said why.
+		if s.Ready {
+			s.Ready, s.NotReadyDetail = false, "shape "+c.table+": "+detail
+		}
 		return probe.HealthDegraded, "shape " + c.table + ": " + detail
 	default:
 		detail := fmt.Sprintf("HTTP %d %s", sr.status, http.StatusText(sr.status))
@@ -464,24 +464,24 @@ func (p *Sync) shape(ctx context.Context, c config, o *probe.Observation, now ti
 	case lr.timeout:
 		// A live poll holds until something changes; nothing did within our
 		// window, which is the up-to-date case.
-		o.Metrics["up_to_date"] = 1
+		s.UpToDate = facet.N(1)
 		o.Detail["live"] = fmt.Sprintf("no change within %s", liveTimeout)
 	case lr.err != nil:
 		o.Detail["live"] = "error: " + lr.err.Error()
 	case lr.status == http.StatusNoContent || lr.header.Get(electricUpToDte) != "":
-		o.Metrics["up_to_date"] = 1
+		s.UpToDate = facet.N(1)
 		o.Detail["live"] = fmt.Sprintf("HTTP %d up to date", lr.status)
 		if off := lr.header.Get(electricOffset); off != "" {
 			o.Detail["offset"] = off
 		}
 	case lr.status == http.StatusOK:
-		o.Metrics["up_to_date"] = 0
+		s.UpToDate = facet.N(0)
 		o.Detail["live"] = "HTTP 200 new data"
 		if off := lr.header.Get(electricOffset); off != "" {
 			o.Detail["offset"] = off
 		}
 	case lr.status == http.StatusTooManyRequests:
-		o.Metrics["busy"] = 1
+		s.Busy = true
 		o.Detail["live"] = "HTTP 429: Electric is busy"
 	default:
 		o.Detail["live"] = fmt.Sprintf("HTTP %d %s", lr.status, http.StatusText(lr.status))

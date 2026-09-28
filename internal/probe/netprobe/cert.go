@@ -5,12 +5,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
-	"math"
 	"net"
 	"time"
 
-	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 // KindCert is the probe kind of the TLS certificate check.
@@ -29,6 +28,7 @@ func init() {
 		SpecFields:  []string{"addr", "servername", "interval"},
 		Needs:       "TCP access to host:port; no credentials",
 		Implemented: true,
+		Facets:      []string{facet.NameCertificate},
 	}, func() probe.Probe { return &Cert{} })
 }
 
@@ -125,19 +125,15 @@ func (c *Cert) check(ctx context.Context, target, addr, servername string) probe
 		return o
 	}
 	leaf := state.PeerCertificates[0]
-	o.Metrics, o.Conditions = c.describe(o.Detail, leaf, state.PeerCertificates[1:], servername)
+	c.describe(&o, leaf, state.PeerCertificates[1:], servername)
 	c.h.Set(probe.HealthOK, fmt.Sprintf("%s expires %s", servername, leaf.NotAfter.Format(time.RFC3339)))
 	return o
 }
 
-// describe fills detail and returns the metrics and conditions for a leaf.
-func (c *Cert) describe(detail map[string]any, leaf *x509.Certificate, intermediates []*x509.Certificate, servername string) (map[string]float64, []model.Condition) {
+// describe fills o's detail, metrics and conditions for a leaf.
+func (c *Cert) describe(o *probe.Observation, leaf *x509.Certificate, intermediates []*x509.Certificate, servername string) {
 	now := c.clock()
-	days := leaf.NotAfter.Sub(now).Hours() / 24
-	metricDays := math.Floor(days)
-	if metricDays < 0 {
-		metricDays = 0
-	}
+	detail := o.Detail
 	detail["subject"] = leaf.Subject.String()
 	detail["issuer"] = leaf.Issuer.String()
 	detail["not_after"] = leaf.NotAfter.UTC().Format(time.RFC3339)
@@ -162,23 +158,7 @@ func (c *Cert) describe(detail map[string]any, leaf *x509.Certificate, intermedi
 		detail["verify_error"] = verr.Error()
 	}
 
-	metrics := map[string]float64{"cert_days": metricDays}
-	var conds []model.Condition
-	switch {
-	case days <= 0:
-		conds = append(conds, model.Condition{
-			Kind:   model.CondCertExpired,
-			Ref:    servername,
-			Since:  leaf.NotAfter,
-			Detail: fmt.Sprintf("expired %s", leaf.NotAfter.UTC().Format(time.RFC3339)),
-		})
-	case days <= certWarnDays:
-		conds = append(conds, model.Condition{
-			Kind:   model.CondCertExpiring,
-			Ref:    servername,
-			Since:  leaf.NotAfter.AddDate(0, 0, -certWarnDays),
-			Detail: fmt.Sprintf("expires in %d day(s) on %s", int(metricDays), leaf.NotAfter.UTC().Format(time.RFC3339)),
-		})
-	}
-	return metrics, conds
+	// The facet derives cert_days, CertExpired and CertExpiring the same
+	// way for every certificate source.
+	facet.EmitCertificate(o, facet.CertificateFacet{Known: true, NotAfter: leaf.NotAfter, WarnDays: certWarnDays}, now)
 }

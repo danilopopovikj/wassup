@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 // KindPing is the probe kind of the HTTP ping.
@@ -38,6 +38,7 @@ func init() {
 		SpecFields:  []string{"url", "method", "timeout", "interval", "expect_status"},
 		Needs:       "outbound HTTPS to the endpoint; no credentials",
 		Implemented: true,
+		Facets:      []string{facet.NameExternal, facet.NameWorkload, facet.NameObservability},
 	}, func() probe.Probe { return &Ping{} })
 }
 
@@ -238,12 +239,6 @@ func (p *Ping) observe(target, rawURL string, a attempt) probe.Observation {
 		Target: target,
 		Probe:  KindPing,
 		At:     a.at,
-		Metrics: map[string]float64{
-			"latency_ms":   float64(a.latency) / float64(time.Millisecond),
-			"error_rate":   100 * float64(errs) / n,
-			"timeout_rate": 100 * float64(timeouts) / n,
-			"status":       float64(a.status),
-		},
 		Detail: map[string]any{
 			"url":    rawURL,
 			"status": a.status,
@@ -253,13 +248,16 @@ func (p *Ping) observe(target, rawURL string, a attempt) probe.Observation {
 	if a.err != "" {
 		o.Detail["last_error"] = a.err
 	}
-	if len(p.streak) >= pingStreak {
-		o.Conditions = append(o.Conditions, model.Condition{
-			Kind:   model.CondTimeout,
-			Ref:    rawURL,
-			Since:  p.streak[0].at,
-			Detail: a.err,
-		})
+	e := facet.ExternalFacet{
+		LatencyMS:   facet.N(float64(a.latency) / float64(time.Millisecond)),
+		ErrorRate:   facet.N(100 * float64(errs) / n),
+		TimeoutRate: facet.N(100 * float64(timeouts) / n),
+		Status:      facet.NI(a.status),
 	}
+	if len(p.streak) >= pingStreak {
+		e.TimingOut, e.TimingOutSince, e.Detail = true, p.streak[0].at, a.err
+	}
+	// The facet writes the canonical form: the rates and Timeout.
+	facet.EmitExternal(&o, e, a.at)
 	return o
 }

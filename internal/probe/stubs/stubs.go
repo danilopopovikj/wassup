@@ -4,7 +4,10 @@
 // component draws as unbound rather than healthy.
 package stubs
 
-import "github.com/danilopopovikj/wassup/internal/probe"
+import (
+	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
+)
 
 func init() {
 	probe.Stub(probe.Access{
@@ -14,6 +17,7 @@ func init() {
 			"from the service map spans of the last minute; detail: the top failing operations",
 		SpecFields: []string{"from", "to", "url", "token_env", "window"},
 		Needs:      "a SigNoz API key in the environment variable named by token_env with read access to the query service",
+		Facets:     []string{facet.NameTraffic},
 	}, "from", "to", "url")
 
 	probe.Stub(probe.Access{
@@ -23,6 +27,7 @@ func init() {
 			"NoData when the collector stops receiving, so every signoz.edge reads as no data instead of healthy",
 		SpecFields: []string{"url", "token_env"},
 		Needs:      "HTTP access to the SigNoz query service; a SigNoz API key in token_env when auth is on",
+		Facets:     []string{facet.NameObservability},
 	}, "url")
 
 	probe.Stub(probe.Access{
@@ -32,6 +37,7 @@ func init() {
 			"a failing HeadBucket marks the storage failing; detail: object count, last write, region",
 		SpecFields: []string{"bucket", "endpoint", "region", "access_key_env", "secret_key_env"},
 		Needs:      "read-only credentials (s3:ListBucket, s3:GetBucketLocation) in the environment variables named by access_key_env and secret_key_env",
+		Facets:     []string{facet.NameStorage},
 	}, "bucket", "endpoint", "region")
 
 	probe.Stub(probe.Access{
@@ -41,5 +47,6 @@ func init() {
 			"finer than metrics-server and without it; detail: per-filesystem capacity, inode pressure",
 		SpecFields: []string{"node", "kubeconfig", "context"},
 		Needs:      "RBAC get on nodes/proxy for the kubeconfig's identity",
+		Facets:     []string{facet.NameNode},
 	}, "node")
 }

@@ -6,8 +6,8 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 // KindHealth is the probe kind of the engine health probe.
@@ -20,6 +20,7 @@ var healthAccess = probe.Access{
 	SpecFields:  withFields(),
 	Needs:       "HTTP access to the Hatchet API; the token named by token_env is sent when present but not required",
 	Implemented: true,
+	Facets:      []string{facet.NameWorkload},
 }
 
 func init() {
@@ -91,25 +92,25 @@ func (p *HealthProbe) poll(ctx context.Context, st *healthState) probe.Observati
 		Detail: map[string]any{"url": st.cfg.base, "ready_status": status},
 	}
 	live := map[string]bool{}
-	if status == http.StatusOK {
+	w := facet.WorkloadFacet{Ready: status == http.StatusOK}
+	if w.Ready {
 		o.Metrics["ready"] = 1
 	} else {
 		o.Metrics["ready"] = 0
-		live["ready"] = true
+		live[facet.KeyNotReady] = true
 		detail := http.StatusText(status)
 		if text := errorText(body); text != "" {
 			detail = fmt.Sprintf("%d %s: %s", status, detail, text)
 		} else {
 			detail = fmt.Sprintf("%d %s", status, detail)
 		}
-		o.Conditions = append(o.Conditions, model.Condition{
-			Kind:   model.CondNotReady,
-			Ref:    "/api/ready",
-			Since:  st.seen.mark("ready", now),
-			Detail: detail,
-		})
+		w.NotReadyDetail = detail
+		w.NotReadySince = st.seen.mark(facet.KeyNotReady, now)
 	}
 	st.seen.keep(live)
+	// The facet writes the canonical NotReady the engine expects of every
+	// workload; latency_ms, ready and live stay this probe's own metrics.
+	facet.EmitWorkload(&o, w, now)
 
 	var problems []string
 	if status, _, _, err := st.c.do(ctx, "/api/live", nil); err != nil {

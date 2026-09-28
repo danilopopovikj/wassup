@@ -34,6 +34,7 @@ var workerAccess = probe.Access{
 	SpecFields:  []string{"flower_url", "name", "long_task", "interval", "timeout"},
 	Needs:       "HTTP access to Flower; no credentials",
 	Implemented: true,
+	Facets:      []string{facet.NameBackgroundWorker},
 }
 
 func init() {
@@ -300,7 +301,7 @@ func (p *WorkerProbe) round(ctx context.Context, flower *flowerClient, c workerC
 	sort.Strings(queueNames)
 	o.Detail["queues"] = queueNames
 
-	pool := facet.WorkerFacet{
+	pool := facet.BackgroundWorkerFacet{
 		Online: facet.NI(online), Total: facet.NI(len(names)), Active: facet.NI(active), LongTask: c.longTask,
 		NotReadyDetail: "no Celery workers online",
 		Since:          func(key string, at time.Time) time.Time { return seen.mark(key, at) },
@@ -333,7 +334,7 @@ func (p *WorkerProbe) round(ctx context.Context, flower *flowerClient, c workerC
 		o.Detail["tasks_error"] = err.Error()
 	}
 
-	facet.EmitWorker(&o, pool, now)
+	facet.EmitBackgroundWorker(&o, pool, now)
 	live := map[string]bool{}
 	for _, cond := range o.Conditions {
 		switch cond.Kind {

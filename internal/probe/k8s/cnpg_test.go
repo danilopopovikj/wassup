@@ -53,8 +53,9 @@ func TestCNPGClusterReplicationBrokenAndSwitchover(t *testing.T) {
 	if o.Metrics["replicas_ready"] != 2 || o.Metrics["replicas_desired"] != 3 {
 		t.Errorf("metrics = %v", o.Metrics)
 	}
+	// ReplicationFacet names the stream by its slot: the instance.
 	rb, ok := model.HasCondition(o.Conditions, model.CondReplicationBroken)
-	if !ok || rb.Ref != "pod/db-3" {
+	if !ok || rb.Ref != "slot/db-3" || rb.Detail != "instance failed" {
 		t.Errorf("ReplicationBroken = %+v (ok %v)", rb, ok)
 	}
 	if _, ok := model.HasCondition(o.Conditions, model.CondBackup); !ok {
@@ -93,7 +94,8 @@ func TestCNPGInstance(t *testing.T) {
 	p2 := &cnpgInstanceProbe{base: base{kind: kindCNPGInstance, clients: c}}
 	out2, _ := startProbe(t, p2, testSpec("db-r1", "namespace", "prod", "cluster", "db", "instance", "db-2"))
 	o = firstOK(t, out2)
-	if nr, ok := model.HasCondition(o.Conditions, model.CondNotReady); !ok || nr.Ref != "pod/db-2" {
+	// WorkloadFacet raises NotReady on the component itself.
+	if nr, ok := model.HasCondition(o.Conditions, model.CondNotReady); !ok || nr.Ref != "db-r1" {
 		t.Errorf("NotReady = %+v (ok %v)", nr, ok)
 	}
 

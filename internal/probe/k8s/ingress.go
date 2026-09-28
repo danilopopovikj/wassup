@@ -5,7 +5,6 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"fmt"
-	"math"
 	"sort"
 	"strings"
 	"time"
@@ -20,6 +19,7 @@ import (
 
 	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 const kindIngress = "k8s.ingress"
@@ -38,6 +38,7 @@ func init() {
 		SpecFields:  []string{"namespace (required)", "name (required)", "kubeconfig", "context"},
 		Needs:       "get/list/watch on ingresses; get on the TLS secrets in the namespace; list on certificates.cert-manager.io (optional)",
 		Implemented: true,
+		Facets:      []string{facet.NameIngress, facet.NameCertificate},
 	}, func() probe.Probe { return &ingressProbe{base: base{kind: kindIngress}} })
 }
 
@@ -143,8 +144,9 @@ func (g *ingressProbe) observe(ctx context.Context, c *Clients, ingresses networ
 		}
 	}
 
-	// Certificates.
-	minDays := math.Inf(1)
+	// Certificates. The facet carries one certificate: the one that expires
+	// first among the TLS secrets the ingress names.
+	certificate := facet.CertificateFacet{WarnDays: certExpiringDays}
 	var infos []certInfo
 	tlsDetail := map[string]any{}
 	for _, t := range ing.Spec.TLS {
@@ -161,21 +163,15 @@ func (g *ingressProbe) observe(ctx context.Context, c *Clients, ingresses networ
 			continue
 		}
 		days := ci.notAfter.Sub(now).Hours() / 24
-		minDays = math.Min(minDays, days)
+		if !certificate.Known || ci.notAfter.Before(certificate.NotAfter) {
+			certificate.Known, certificate.NotAfter = true, ci.notAfter
+		}
 		d["not_after"] = ci.notAfter
 		d["not_before"] = ci.notBefore
 		d["subject"] = ci.subject
 		d["issuer"] = ci.issuer
 		d["days"] = round1(days)
 		tlsDetail[t.SecretName] = d
-		ref := "secret/" + t.SecretName
-		which := firstNonEmpty(strings.Join(t.Hosts, ","), ci.subject)
-		switch {
-		case days <= 0:
-			o.Conditions = append(o.Conditions, model.Condition{Kind: model.CondCertExpired, Ref: ref, Since: ci.notAfter, Detail: fmt.Sprintf("%s expired %s", which, ci.notAfter.Format(time.RFC3339))})
-		case days <= certExpiringDays:
-			o.Conditions = append(o.Conditions, model.Condition{Kind: model.CondCertExpiring, Ref: ref, Since: ci.notAfter.Add(-certExpiringDays * 24 * time.Hour), Detail: fmt.Sprintf("%s expires %s", which, ci.notAfter.Format(time.RFC3339))})
-		}
 		// Renewal marker: notAfter moved while watching, or the certificate
 		// was issued within the lookback on the first sighting.
 		prev, seen := g.notAfter[t.SecretName]
@@ -186,9 +182,6 @@ func (g *ingressProbe) observe(ctx context.Context, c *Clients, ingresses networ
 			g.addEvent(&o, model.Event{At: ci.notBefore, Kind: "cert", Target: target, Summary: "cert renewal of " + target, Ref: t.SecretName})
 		}
 		g.notAfter[t.SecretName] = ci.notAfter
-	}
-	if !math.IsInf(minDays, 1) {
-		o.Metrics["cert_days"] = round1(minDays)
 	}
 
 	// cert-manager, when present.
@@ -223,7 +216,9 @@ func (g *ingressProbe) observe(ctx context.Context, c *Clients, ingresses networ
 					if lt, ok := cm["lastTransitionTime"].(string); ok {
 						since, _ = time.Parse(time.RFC3339, lt)
 					}
-					o.Conditions = append(o.Conditions, model.Condition{Kind: model.CondCertRenewalFailed, Ref: "certificate/" + cert.GetName(), Since: since, Detail: firstNonEmpty(msg, reason)})
+					if certificate.RenewalFailed == nil {
+						certificate.RenewalFailed = &facet.Failure{Ref: "certificate/" + cert.GetName(), At: since, Reason: firstNonEmpty(msg, reason)}
+					}
 				}
 				if ra, ok, _ := unstructured.NestedString(cert.Object, "status", "renewalTime"); ok {
 					if d, ok := tlsDetail[secret].(map[string]any); ok {
@@ -243,7 +238,8 @@ func (g *ingressProbe) observe(ctx context.Context, c *Clients, ingresses networ
 		}
 	}
 
-	o.Detail["hosts"] = sortedKeys(hostSet)
+	hosts := sortedKeys(hostSet)
+	o.Detail["hosts"] = hosts
 	o.Detail["backends"] = backends
 	if len(issuers) > 0 {
 		o.Detail["issuer"] = strings.Join(uniqueStrings(issuers), ", ")
@@ -261,6 +257,8 @@ func (g *ingressProbe) observe(ctx context.Context, c *Clients, ingresses networ
 	if len(addrs) > 0 {
 		o.Detail["addresses"] = addrs
 	}
+	// The facet writes cert_days and the certificate conditions.
+	facet.EmitIngress(&o, facet.IngressFacet{Hosts: hosts, Certificate: certificate}, now)
 	return o, nil
 }
 

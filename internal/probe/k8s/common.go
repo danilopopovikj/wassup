@@ -369,6 +369,19 @@ func firstNonZero(ts ...time.Time) time.Time {
 	return time.Time{}
 }
 
+// earliest returns the earlier of two times, ignoring zero values.
+func earliest(a, b time.Time) time.Time {
+	switch {
+	case a.IsZero():
+		return b
+	case b.IsZero():
+		return a
+	case b.Before(a):
+		return b
+	}
+	return a
+}
+
 // metaTime unwraps a *metav1.Time.
 func metaTime(t *metav1.Time) time.Time {
 	if t == nil {

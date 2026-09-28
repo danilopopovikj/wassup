@@ -15,6 +15,7 @@ import (
 
 	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 const kindNode = "k8s.node"
@@ -27,6 +28,7 @@ func init() {
 		SpecFields:  []string{"name (required)", "kubeconfig", "context"},
 		Needs:       "get/list/watch on nodes, pods and events; get on nodes.metrics.k8s.io; get on nodes/proxy for disk usage (optional)",
 		Implemented: true,
+		Facets:      []string{facet.NameNode},
 	}, func() probe.Probe { return &nodeProbe{base: base{kind: kindNode}} })
 }
 
@@ -104,7 +106,9 @@ func (n *nodeProbe) observe(ctx context.Context, c *Clients, nodes corelisters.N
 		return probe.Observation{}, err
 	}
 	o := probe.Observation{Target: target, At: now, Metrics: map[string]float64{}, Detail: map[string]any{}}
-	ref := "node/" + node.Name
+	// The facet writes the canonical metrics and conditions; the probe only
+	// fills in what the node reports.
+	nf := facet.NodeFacet{Ready: true, RebootWindow: rebootWindow}
 
 	// Conditions.
 	condStates := map[string]any{}
@@ -113,20 +117,26 @@ func (n *nodeProbe) observe(ctx context.Context, c *Clients, nodes corelisters.N
 		switch cnd.Type {
 		case corev1.NodeReady:
 			if cnd.Status != corev1.ConditionTrue {
-				o.Conditions = append(o.Conditions, model.Condition{Kind: model.CondNotReady, Ref: ref, Since: cnd.LastTransitionTime.Time, Detail: firstNonEmpty(cnd.Message, cnd.Reason)})
+				nf.Ready = false
+				nf.NotReadySince = cnd.LastTransitionTime.Time
+				nf.NotReadyDetail = firstNonEmpty(cnd.Message, cnd.Reason)
 			}
 		case corev1.NodeMemoryPressure:
 			if cnd.Status == corev1.ConditionTrue {
-				o.Conditions = append(o.Conditions, model.Condition{Kind: model.CondMemoryPressure, Ref: ref, Since: cnd.LastTransitionTime.Time, Detail: firstNonEmpty(cnd.Message, cnd.Reason)})
+				nf.MemoryPressure = true
+				nf.PressureSince = earliest(nf.PressureSince, cnd.LastTransitionTime.Time)
 			}
 		case corev1.NodeDiskPressure:
 			if cnd.Status == corev1.ConditionTrue {
-				o.Conditions = append(o.Conditions, model.Condition{Kind: model.CondDiskPressure, Ref: ref, Since: cnd.LastTransitionTime.Time, Detail: firstNonEmpty(cnd.Message, cnd.Reason)})
+				nf.DiskPressure = true
+				nf.PressureSince = earliest(nf.PressureSince, cnd.LastTransitionTime.Time)
 			}
 		}
 	}
 	if len(node.Status.Conditions) == 0 {
-		o.Conditions = append(o.Conditions, model.Condition{Kind: model.CondNotReady, Ref: ref, Since: node.CreationTimestamp.Time, Detail: "node has not reported any condition"})
+		nf.Ready = false
+		nf.NotReadySince = node.CreationTimestamp.Time
+		nf.NotReadyDetail = "node has not reported any condition"
 	}
 
 	// Pods on the node, and kills among them.
@@ -159,9 +169,9 @@ func (n *nodeProbe) observe(ctx context.Context, c *Clients, nodes corelisters.N
 			}
 		}
 	}
-	o.Metrics["pods"] = float64(running)
+	nf.Pods = facet.NI(running)
 	if len(kills) > 0 {
-		o.Metrics["killed"] = float64(len(kills))
+		nf.Killed = facet.NI(len(kills))
 		o.Detail["kills"] = kills
 	}
 
@@ -169,10 +179,10 @@ func (n *nodeProbe) observe(ctx context.Context, c *Clients, nodes corelisters.N
 	if c.Metrics != nil {
 		if nm, err := c.Metrics.MetricsV1beta1().NodeMetricses().Get(ctx, node.Name, metav1.GetOptions{}); err == nil {
 			if alloc := node.Status.Allocatable.Cpu(); alloc != nil && alloc.MilliValue() > 0 {
-				o.Metrics["cpu_pct"] = pct(float64(nm.Usage.Cpu().MilliValue()), float64(alloc.MilliValue()))
+				nf.CPUPct = facet.N(pct(float64(nm.Usage.Cpu().MilliValue()), float64(alloc.MilliValue())))
 			}
 			if alloc := node.Status.Allocatable.Memory(); alloc != nil && alloc.Value() > 0 {
-				o.Metrics["mem_pct"] = pct(float64(nm.Usage.Memory().Value()), float64(alloc.Value()))
+				nf.MemPct = facet.N(pct(float64(nm.Usage.Memory().Value()), float64(alloc.Value())))
 			}
 		} else {
 			o.Detail["metrics_error"] = err.Error()
@@ -199,7 +209,7 @@ func (n *nodeProbe) observe(ctx context.Context, c *Clients, nodes corelisters.N
 	}
 	if s, err := nodeStats(ctx, c, node.Name); err == nil {
 		if p, ok := s.Node.Fs.pctOf(); ok {
-			o.Metrics["disk_pct"] = p
+			nf.DiskPct = facet.N(p)
 		}
 		if within(s.Node.StartTime, rebootWindow, now) && s.Node.StartTime.After(n.rebootAt) {
 			n.rebootAt = s.Node.StartTime
@@ -208,13 +218,14 @@ func (n *nodeProbe) observe(ctx context.Context, c *Clients, nodes corelisters.N
 		o.Detail["stats_error"] = err.Error()
 	}
 	if within(n.rebootAt, rebootWindow, now) {
-		o.Conditions = append(o.Conditions, model.Condition{Kind: model.CondRebooted, Ref: ref, Since: n.rebootAt, Detail: "boot id " + bootID})
+		nf.BootedAt = n.rebootAt
 		key := n.rebootAt.Truncate(time.Minute).Format(time.RFC3339)
 		if !n.emitted[key] {
 			n.emitted[key] = true
 			o.Events = append(o.Events, model.Event{At: n.rebootAt, Kind: "node", Target: target, Summary: "reboot of " + target, Ref: bootID})
 		}
 	}
+	facet.EmitNode(&o, nf, now)
 
 	o.Detail["kubelet_version"] = node.Status.NodeInfo.KubeletVersion
 	o.Detail["os_image"] = node.Status.NodeInfo.OSImage

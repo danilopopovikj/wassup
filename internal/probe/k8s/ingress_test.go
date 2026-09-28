@@ -81,8 +81,9 @@ func TestIngressCertDays(t *testing.T) {
 	if d := o.Metrics["cert_days"]; d < 9.9 || d > 10.1 {
 		t.Errorf("cert_days = %v", d)
 	}
+	// CertificateFacet names the certificate after the component.
 	exp, ok := model.HasCondition(o.Conditions, model.CondCertExpiring)
-	if !ok || exp.Ref != "secret/bookstore-tls" {
+	if !ok || exp.Ref != "certificate/ingress" || exp.Detail != "10 days left" {
 		t.Errorf("CertExpiring = %+v (ok %v)", exp, ok)
 	}
 	if _, ok := model.HasCondition(o.Conditions, model.CondCertExpired); ok {

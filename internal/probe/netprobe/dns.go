@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 // KindDNS is the probe kind of the DNS record check.
@@ -23,6 +24,7 @@ func init() {
 		SpecFields:  []string{"host", "expect", "interval"},
 		Needs:       "DNS resolution from the machine running wassup; no credentials",
 		Implemented: true,
+		Facets:      []string{facet.NameDNS},
 	}, func() probe.Probe { return &DNS{} })
 }
 
@@ -93,8 +95,8 @@ func (d *DNS) check(ctx context.Context, target, host, expect string) probe.Obse
 	if err != nil {
 		var dnsErr *net.DNSError
 		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
-			o.Metrics = map[string]float64{"resolves": 0, "addresses": 0}
-			o.Detail["reason"] = "NXDOMAIN: " + dnsErr.Error()
+			// The facet writes the canonical form: resolves 0, no addresses.
+			facet.EmitDNS(&o, facet.DNSFacet{Addresses: []string{}, Expected: expect, Reason: "NXDOMAIN: " + dnsErr.Error()}, o.At)
 			o.Detail["matched"] = false
 			d.h.Set(probe.HealthOK, host+" does not exist")
 			return o
@@ -104,7 +106,6 @@ func (d *DNS) check(ctx context.Context, target, host, expect string) probe.Obse
 		return o
 	}
 	sort.Strings(addrs)
-	o.Detail["addresses"] = addrs
 
 	// A CNAME lookup that fails is fine: many records have none, and the
 	// resolver returns the name itself when it is an A/AAAA record.
@@ -122,16 +123,15 @@ func (d *DNS) check(ctx context.Context, target, host, expect string) probe.Obse
 	matched := true
 	if expect != "" {
 		matched = d.matches(lctx, expect, cname, addrs)
-		o.Detail["matched"] = matched
 	}
-	resolves := 0.0
-	if len(addrs) > 0 && matched {
-		resolves = 1
-	}
-	o.Metrics = map[string]float64{
-		"resolves":  resolves,
-		"addresses": float64(len(addrs)),
-	}
+	// The facet writes the canonical form: resolves, addresses and, with an
+	// expected target, whether the record matched it.
+	facet.EmitDNS(&o, facet.DNSFacet{
+		Resolves:  len(addrs) > 0 && matched,
+		Addresses: addrs,
+		Expected:  expect,
+		Matched:   matched,
+	}, o.At)
 	d.h.Set(probe.HealthOK, fmt.Sprintf("%s resolves to %d address(es)", host, len(addrs)))
 	return o
 }

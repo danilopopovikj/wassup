@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 // PortInRange reports whether port falls in a rule port spec: "4317",
@@ -111,6 +111,7 @@ var firewallAccess = probe.Access{
 	SpecFields:  []string{"name", "id", "token_env", "port", "protocol", "interval", "endpoint"},
 	Needs:       "a read-only Cloud API token in the environment variable named by token_env (default HCLOUD_TOKEN)",
 	Implemented: true,
+	Facets:      []string{facet.NameFirewall, facet.NameTraffic},
 }
 
 func init() {
@@ -198,7 +199,7 @@ func (p *FirewallProbe) poll(ctx context.Context, c *client, ref *resourceRef, p
 		return fail(err)
 	}
 	fw := resp.Firewall
-	o.Metrics = map[string]float64{"rules": float64(len(fw.Rules))}
+	f := facet.FirewallFacet{Rules: facet.NI(len(fw.Rules))}
 	rules := make([]map[string]any, 0, len(fw.Rules))
 	for _, r := range fw.Rules {
 		entry := map[string]any{"direction": r.Direction, "protocol": r.Protocol}
@@ -220,22 +221,23 @@ func (p *FirewallProbe) poll(ctx context.Context, c *client, ref *resourceRef, p
 		ok, closest := Allowed(fw.Rules, port, protocol)
 		key := fmt.Sprintf("%s/%d", protocol, port)
 		o.Detail["port"] = key
+		f.Allowed = &ok
 		if ok {
-			o.Metrics["allowed"] = 1
 			o.Detail["allowed_by"] = closest
 			seen.keep(nil)
 		} else {
-			o.Metrics["allowed"] = 0
-			detail := closest
-			if detail == "" {
-				detail = fw.Name
+			// The denying rule set is the closest inbound rule of the same
+			// protocol, or the firewall itself when it has none.
+			f.DeniedDetail = closest
+			if f.DeniedDetail == "" {
+				f.DeniedDetail = fw.Name
 			}
-			o.Conditions = []model.Condition{{
-				Kind: model.CondFirewallDenied, Ref: "rule/" + fw.Name,
-				Since: seen.mark(key, o.At), Detail: detail,
-			}}
+			f.DeniedSince = seen.mark(key, o.At)
 		}
 	}
+	// The facet writes the canonical form: rules, allowed 1/0 and
+	// FirewallDenied naming the rule.
+	facet.EmitFirewall(&o, f, o.At)
 	p.h.Set(probe.HealthOK, "")
 	return o
 }

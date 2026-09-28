@@ -17,6 +17,7 @@ import (
 
 	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 const (
@@ -43,6 +44,7 @@ func init() {
 		SpecFields:  []string{"namespace (required)", "cluster (required)", "kubeconfig", "context"},
 		Needs:       "get/list on clusters.postgresql.cnpg.io and backups.postgresql.cnpg.io; list/watch on pods in the namespace",
 		Implemented: true,
+		Facets:      []string{facet.NameDatabase, facet.NameReplication},
 	}, func() probe.Probe { return &cnpgClusterProbe{base: base{kind: kindCNPGCluster}} })
 	probe.Register(probe.Access{
 		Kind:        kindCNPGInstance,
@@ -51,6 +53,7 @@ func init() {
 		SpecFields:  []string{"namespace (required)", "cluster (required)", "role (primary|replica) or instance (pod name)", "kubeconfig", "context"},
 		Needs:       "list/watch on pods in the namespace; get/list on pods.metrics.k8s.io",
 		Implemented: true,
+		Facets:      []string{facet.NameDatabase, facet.NameWorkload},
 	}, func() probe.Probe { return &cnpgInstanceProbe{base: base{kind: kindCNPGInstance}} })
 }
 
@@ -134,10 +137,12 @@ func (p *cnpgClusterProbe) observe(ctx context.Context, c *Clients, pods corelis
 	primary, _, _ := unstructured.NestedString(obj.Object, "status", "currentPrimary")
 	targetPrimary, _, _ := unstructured.NestedString(obj.Object, "status", "targetPrimary")
 	primaryTS, _, _ := unstructured.NestedString(obj.Object, "status", "currentPrimaryTimestamp")
-	o.Metrics["replicas_desired"] = float64(desired)
-	o.Metrics["replicas_ready"] = float64(ready)
+	// The cluster's replica counts take the workload shape.
+	facet.EmitWorkload(&o, facet.WorkloadFacet{ReplicasReady: facet.N(float64(ready)), ReplicasDesired: facet.N(float64(desired)), Ready: true}, now)
 
-	// Instance health from status.instancesStatus and the pods.
+	// Instance health from status.instancesStatus and the pods: every
+	// unhealthy instance is a broken replication stream, named by the
+	// instance as its slot. The operator does not say since when.
 	statusMap, _, _ := unstructured.NestedMap(obj.Object, "status", "instancesStatus")
 	instStatus := map[string]any{}
 	for k, v := range statusMap {
@@ -147,7 +152,7 @@ func (p *cnpgClusterProbe) observe(ctx context.Context, c *Clients, pods corelis
 			continue
 		}
 		for _, n := range names {
-			o.Conditions = append(o.Conditions, model.Condition{Kind: model.CondReplicationBroken, Ref: "pod/" + n, Since: now, Detail: "instance " + k})
+			facet.EmitReplication(&o, facet.ReplicationFacet{Slot: n, Detail: "instance " + k}, now)
 		}
 	}
 	var instPods []*corev1.Pod
@@ -167,7 +172,7 @@ func (p *cnpgClusterProbe) observe(ctx context.Context, c *Clients, pods corelis
 				since = firstNonZero(cnd.LastTransitionTime.Time, since)
 			}
 		}
-		o.Conditions = append(o.Conditions, model.Condition{Kind: model.CondReplicationBroken, Ref: "pod/" + pd.Name, Since: since, Detail: "replica pod not ready"})
+		facet.EmitReplication(&o, facet.ReplicationFacet{Slot: pd.Name, BrokenSince: since, Detail: "replica pod not ready"}, now)
 	}
 	if targetPrimary != "" && primary != "" && targetPrimary != primary {
 		o.Conditions = append(o.Conditions, model.Condition{Kind: model.CondSwitchover, Ref: "pod/" + targetPrimary, Since: now, Detail: fmt.Sprintf("%s -> %s", primary, targetPrimary)})
@@ -189,7 +194,8 @@ func (p *cnpgClusterProbe) observe(ctx context.Context, c *Clients, pods corelis
 		p.lastPrimary = primary
 	}
 
-	// Backups in flight.
+	// Backups in flight: the first one found is the database's Backup task.
+	db := facet.DatabaseFacet{Ready: true}
 	if backups, err := c.Dynamic.Resource(cnpgBackupGVR).Namespace(ns).List(ctx, metav1.ListOptions{}); err == nil {
 		for i := range backups.Items {
 			b := &backups.Items[i]
@@ -206,10 +212,13 @@ func (p *cnpgClusterProbe) observe(ctx context.Context, c *Clients, pods corelis
 						since = t
 					}
 				}
-				o.Conditions = append(o.Conditions, model.Condition{Kind: model.CondBackup, Ref: "backup/" + b.GetName(), Since: since, Detail: b.GetName()})
+				if db.Backup == nil {
+					db.Backup = &facet.Task{ID: "backup/" + b.GetName(), Name: b.GetName(), Started: since}
+				}
 			}
 		}
 	}
+	facet.EmitDatabase(&o, db, now)
 	if s, ok, _ := unstructured.NestedString(obj.Object, "status", "firstRecoverabilityPoint"); ok && s != "" {
 		o.Detail["first_recoverability_point"] = s
 	}
@@ -361,6 +370,9 @@ func observeCNPGInstance(ctx context.Context, c *Clients, pods corelisters.PodLi
 		return probe.Observation{}, err
 	}
 	o := probe.Observation{Target: target, At: now, Metrics: map[string]float64{}, Detail: map[string]any{}}
+	// One instance pod is a workload of one; the facet writes cpu_pct,
+	// mem_pct and NotReady.
+	wl := facet.WorkloadFacet{Ready: true}
 	if !podReady(pd) {
 		since := podStart(pd)
 		detail := string(pd.Status.Phase)
@@ -370,19 +382,20 @@ func observeCNPGInstance(ctx context.Context, c *Clients, pods corelisters.PodLi
 				detail = firstNonEmpty(cnd.Message, cnd.Reason, detail)
 			}
 		}
-		o.Conditions = append(o.Conditions, model.Condition{Kind: model.CondNotReady, Ref: "pod/" + pd.Name, Since: since, Detail: detail})
+		wl.Ready, wl.NotReadySince, wl.NotReadyDetail = false, since, firstNonEmpty(detail, "pod not ready")
 	}
 	if metrics, err := podMetricsByName(ctx, c, ns); err == nil {
 		cpu, mem, haveCPU, haveMem := podUsage([]*corev1.Pod{pd}, metrics)
 		if haveCPU {
-			o.Metrics["cpu_pct"] = cpu
+			wl.CPUPct = facet.N(cpu)
 		}
 		if haveMem {
-			o.Metrics["mem_pct"] = mem
+			wl.MemPct = facet.N(mem)
 		}
 	} else {
 		o.Detail["metrics_error"] = err.Error()
 	}
+	facet.EmitWorkload(&o, wl, now)
 	var restarts int32
 	for _, cs := range pd.Status.ContainerStatuses {
 		restarts += cs.RestartCount

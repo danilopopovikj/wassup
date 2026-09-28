@@ -145,8 +145,12 @@ func TestPingTimeouts(t *testing.T) {
 	if !ok {
 		t.Fatalf("no Timeout condition after %d timeouts: %+v", pingStreak, o)
 	}
-	if c.Ref != srv.URL {
+	// The external facet names the bound component; the URL stays in detail.
+	if c.Ref != "github" {
 		t.Fatalf("ref = %q", c.Ref)
+	}
+	if o.Detail["url"] != srv.URL {
+		t.Fatalf("url detail = %v", o.Detail["url"])
 	}
 	if !c.Since.Equal(first) {
 		t.Fatalf("since = %v, want first failure %v", c.Since, first)

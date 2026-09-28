@@ -44,6 +44,7 @@ func init() {
 		SpecFields:  []string{"management_url", "queue", "vhost", "user", "password_env", "interval", "timeout"},
 		Needs:       "a management user with the monitoring tag; the password in the environment variable named by password_env (default RABBITMQ_PASSWORD)",
 		Implemented: true,
+		Facets:      []string{facet.NameQueue},
 	}, func() probe.Probe { return &Queue{} })
 }
 

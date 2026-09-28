@@ -11,6 +11,7 @@ import (
 
 	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 // TargetHealth is the flattened health of one server target.
@@ -109,12 +110,13 @@ func LastValue(resp LoadBalancerMetricsResponse, series string) (float64, bool) 
 var lbAccess = probe.Access{
 	Kind:   "hcloud.lb",
 	Source: "the Hetzner Cloud API: load balancer targets' health and the load balancer metrics endpoint",
-	Delivers: "connections, rate (requests per second), targets_healthy, targets_total; " +
+	Delivers: "connections, rate (requests per second), targets_healthy, targets_total, TargetUnhealthy when no target is healthy; " +
 		"per entry of targets an observation for the edge <lb>-><component> with healthy (1/0) and HealthCheckFailing; " +
 		"detail: services, targets, algorithm, location",
 	SpecFields:  []string{"name", "id", "token_env", "targets", "interval", "endpoint"},
 	Needs:       "a read-only Cloud API token in the environment variable named by token_env (default HCLOUD_TOKEN)",
 	Implemented: true,
+	Facets:      []string{facet.NameLoadBalancer},
 }
 
 func init() {
@@ -262,10 +264,10 @@ func (p *LBProbe) poll(ctx context.Context, c *client, ref *resourceRef, targets
 	}
 
 	sum := Summarize(lb)
-	o := probe.Observation{Target: tgt, Probe: p.Kind(), At: now, Metrics: map[string]float64{
-		"targets_healthy": float64(sum.Healthy),
-		"targets_total":   float64(sum.Total),
-	}}
+	o := probe.Observation{Target: tgt, Probe: p.Kind(), At: now}
+	// The counts come from every target of the balancer, named or not; the
+	// named ones below only drive the per-target edges.
+	lbf := facet.LoadBalancerFacet{TargetsHealthy: facet.NI(sum.Healthy), TargetsTotal: facet.NI(sum.Total)}
 	health, msg := probe.HealthOK, ""
 	var metrics LoadBalancerMetricsResponse
 	q := url.Values{
@@ -278,10 +280,10 @@ func (p *LBProbe) poll(ctx context.Context, c *client, ref *resourceRef, targets
 		health, msg = probe.HealthDegraded, "metrics: "+err.Error()
 	} else {
 		if v, ok := LastValue(metrics, "open_connections"); ok {
-			o.Metrics["connections"] = v
+			lbf.Connections = facet.N(v)
 		}
 		if v, ok := LastValue(metrics, "requests_per_second"); ok {
-			o.Metrics["rate"] = v
+			lbf.Rate = facet.N(v)
 		}
 	}
 	if len(unresolved) > 0 {
@@ -310,39 +312,50 @@ func (p *LBProbe) poll(ctx context.Context, c *client, ref *resourceRef, targets
 		"services": services, "targets": tlist,
 	}
 
-	obs := []probe.Observation{o}
+	// Named targets: one facet.Target per component the spec maps, with the
+	// first-seen time of an unhealthy check kept stable between polls.
 	live := map[string]bool{}
 	comps := make([]string, 0, len(targets))
 	for comp := range targets {
 		comps = append(comps, comp)
 	}
 	sort.Strings(comps)
+	var unresolvedObs []probe.Observation
+	named := make([]facet.Target, 0, len(comps))
+	edgeDetail := map[string]map[string]any{}
 	for _, comp := range comps {
 		r := targets[comp]
-		eo := probe.Observation{Target: model.EdgeID(tgt, comp), Probe: p.Kind(), At: now}
 		if r.ID == 0 {
-			eo.Err = "server " + r.Name + " not found"
-			obs = append(obs, eo)
+			unresolvedObs = append(unresolvedObs, probe.Observation{
+				Target: model.EdgeID(tgt, comp), Probe: p.Kind(), At: now, Err: "server " + r.Name + " not found",
+			})
 			continue
 		}
 		th, ok := byServer[r.ID]
 		if !ok {
 			th = TargetHealth{ServerID: r.ID, Status: "not a target of " + lb.Name}
 		}
-		eo.Detail = map[string]any{"server_id": r.ID, "status": th.Status}
-		if th.Healthy {
-			eo.Metrics = map[string]float64{"healthy": 1}
-		} else {
-			eo.Metrics = map[string]float64{"healthy": 0}
+		edgeDetail[model.EdgeID(tgt, comp)] = map[string]any{"server_id": r.ID, "status": th.Status}
+		t := facet.Target{ID: comp, Healthy: th.Healthy, Detail: th.Status}
+		if !th.Healthy {
 			live[comp] = true
-			eo.Conditions = []model.Condition{{
-				Kind: model.CondHealthCheckFailing, Ref: "target/" + comp,
-				Since: seen.mark(comp, now), Detail: th.Status,
-			}}
+			t.Since = seen.mark(comp, now)
 		}
+		named = append(named, t)
+	}
+	lbf.Targets = named
+	seen.keep(live)
+
+	// The facets write the canonical form: the balancer's metrics and
+	// TargetUnhealthy, then one edge observation per named target with
+	// healthy 1/0 and HealthCheckFailing.
+	facet.EmitLoadBalancer(&o, lbf, now)
+	obs := []probe.Observation{o}
+	for _, eo := range facet.LoadBalancerEdges(tgt, p.Kind(), named, now) {
+		eo.Detail = edgeDetail[eo.Target]
 		obs = append(obs, eo)
 	}
-	seen.keep(live)
+	obs = append(obs, unresolvedObs...)
 	p.h.Set(health, msg)
 	return obs
 }

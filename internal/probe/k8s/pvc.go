@@ -12,6 +12,7 @@ import (
 	corelisters "k8s.io/client-go/listers/core/v1"
 
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 const kindPVC = "k8s.pvc"
@@ -24,6 +25,7 @@ func init() {
 		SpecFields:  []string{"namespace (required)", "name (required)", "kubeconfig", "context"},
 		Needs:       "get/list/watch on persistentvolumeclaims and pods in the namespace; get on nodes/proxy for usage (optional)",
 		Implemented: true,
+		Facets:      []string{facet.NameStorage},
 	}, func() probe.Probe { return &pvcProbe{base: base{kind: kindPVC}} })
 }
 
@@ -94,10 +96,12 @@ func observePVC(ctx context.Context, c *Clients, pvcs corelisters.PersistentVolu
 		return probe.Observation{}, err
 	}
 	o := probe.Observation{Target: target, At: now, Metrics: map[string]float64{}, Detail: map[string]any{}}
+	// The kubelet reports no IOPS, so the facet's IOPS stays unset.
+	var vol facet.StorageFacet
 	if q, ok := claim.Status.Capacity[corev1.ResourceStorage]; ok && q.Value() > 0 {
-		o.Metrics["total_bytes"] = float64(q.Value())
+		vol.TotalBytes = facet.N(float64(q.Value()))
 	} else if q, ok := claim.Spec.Resources.Requests[corev1.ResourceStorage]; ok && q.Value() > 0 {
-		o.Metrics["total_bytes"] = float64(q.Value())
+		vol.TotalBytes = facet.N(float64(q.Value()))
 	}
 
 	// Pods mounting the claim, and the node the first running one is on.
@@ -127,13 +131,10 @@ func observePVC(ctx context.Context, c *Clients, pvcs corelisters.PersistentVolu
 						continue
 					}
 					if v.UsedBytes != nil {
-						o.Metrics["used_bytes"] = float64(*v.UsedBytes)
+						vol.UsedBytes = facet.N(float64(*v.UsedBytes))
 					}
 					if v.CapacityBytes != nil && *v.CapacityBytes > 0 {
-						o.Metrics["total_bytes"] = float64(*v.CapacityBytes)
-					}
-					if p, ok := v.pctOf(); ok {
-						o.Metrics["disk_pct"] = p
+						vol.TotalBytes = facet.N(float64(*v.CapacityBytes))
 					}
 					if v.AvailableBytes != nil {
 						o.Detail["available_bytes"] = *v.AvailableBytes
@@ -145,6 +146,8 @@ func observePVC(ctx context.Context, c *Clients, pvcs corelisters.PersistentVolu
 		}
 		o.Detail["node"] = node
 	}
+	// The facet derives disk_pct when both sizes are known.
+	facet.EmitStorage(&o, vol, now)
 
 	o.Detail["phase"] = string(claim.Status.Phase)
 	if claim.Spec.StorageClassName != nil {

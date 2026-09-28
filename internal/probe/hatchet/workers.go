@@ -39,6 +39,7 @@ var workersAccess = probe.Access{
 	SpecFields:  withFields("name", "long_task"),
 	Needs:       "a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token",
 	Implemented: true,
+	Facets:      []string{facet.NameBackgroundWorker},
 }
 
 func init() {
@@ -157,7 +158,7 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 		list = append(list, entry)
 	}
 	o.Detail["workers"] = list
-	pool := facet.WorkerFacet{
+	pool := facet.BackgroundWorkerFacet{
 		Online: facet.NI(online), Total: facet.NI(len(workers)), LongTask: st.longTask,
 		NotReadyDetail: "no active Hatchet workers",
 		Since:          func(key string, at time.Time) time.Time { return st.seen.mark(key, at) },
@@ -221,7 +222,7 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 
 	// The facet writes the canonical form: metrics, TaskRunning,
 	// PoolExhausted, NotReady, the same for every worker backend.
-	facet.EmitWorker(&o, pool, now)
+	facet.EmitBackgroundWorker(&o, pool, now)
 	live := map[string]bool{}
 	for _, c := range o.Conditions {
 		switch c.Kind {

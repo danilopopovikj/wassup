@@ -29,6 +29,7 @@ func init() {
 		SpecFields:  []string{"namespace (required)", "name (required)", "kubeconfig", "context"},
 		Needs:       "get/list/watch on cronjobs and jobs in the namespace",
 		Implemented: true,
+		Facets:      []string{facet.NameScheduledJob},
 	}, func() probe.Probe { return &cronJobProbe{base: base{kind: kindCronJob}} })
 }
 
@@ -172,7 +173,7 @@ func observeCronJob(cronjobs batchlisters.CronJobLister, jobs batchlisters.JobLi
 			}
 		}
 	}
-	job := facet.JobFacet{Active: facet.NI(active), Succeeded: facet.NI(succeeded), Failed: facet.NI(failed)}
+	job := facet.ScheduledJobFacet{Active: facet.NI(active), Succeeded: facet.NI(succeeded), Failed: facet.NI(failed)}
 	if !oldestActive.IsZero() {
 		job.Running = &facet.Task{ID: "cronjob/" + cj.Name, Name: fmt.Sprintf("%d active", active), Started: oldestActive}
 	}
@@ -186,7 +187,7 @@ func observeCronJob(cronjobs batchlisters.CronJobLister, jobs batchlisters.JobLi
 		}
 		job.LastFailure = &facet.Failure{Ref: "job/" + lastFailure.Name, At: lastFailureAt, Reason: detail}
 	}
-	facet.EmitJob(&o, job, now)
+	facet.EmitScheduledJob(&o, job, now)
 	if v, ok := o.Metrics["running_s"]; ok {
 		o.Metrics["running_s"] = float64(int(v))
 	}

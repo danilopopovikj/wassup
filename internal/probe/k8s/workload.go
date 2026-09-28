@@ -17,6 +17,7 @@ import (
 
 	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 const kindWorkload = "k8s.workload"
@@ -36,6 +37,7 @@ func init() {
 		},
 		Needs:       "get/list/watch on pods, replicasets, deployments, statefulsets, daemonsets and events in the namespace; get/list on pods.metrics.k8s.io",
 		Implemented: true,
+		Facets:      []string{facet.NameWorkload},
 	}, func() probe.Probe { return &workloadProbe{base: base{kind: kindWorkload}} })
 }
 
@@ -344,9 +346,11 @@ func (w *workloadProbe) observe(ctx context.Context, c *Clients, ls workloadList
 	sort.Slice(pods, func(i, j int) bool { return pods[i].Name < pods[j].Name })
 
 	o := probe.Observation{Target: target, At: now, Metrics: map[string]float64{}, Detail: map[string]any{}}
+	// The facet writes the canonical metrics and conditions. Ready stays
+	// true: the pods' own state is what the instance lists carry.
+	wl := facet.WorkloadFacet{Ready: true, RestartWindow: restartWindow}
 	var readyPods []string
 	restartCounts := map[string]any{}
-	var conds []model.Condition
 	evicted := 0
 	ready := 0
 	for _, p := range pods {
@@ -358,12 +362,12 @@ func (w *workloadProbe) observe(ctx context.Context, c *Clients, ls workloadList
 		for _, cs := range allContainerStatuses(p) {
 			total += cs.RestartCount
 			w.trackRestarts(p, cs, now)
-			conds = append(conds, containerConditions(p, cs, now)...)
+			containerInstances(&wl, p, cs, now)
 		}
 		restartCounts[p.Name] = total
 		if p.Status.Reason == "Evicted" || p.Status.Phase == corev1.PodFailed && strings.Contains(p.Status.Message, "evict") {
 			evicted++
-			conds = append(conds, model.Condition{Kind: model.CondEvicted, Ref: "pod/" + p.Name, Since: evictedAt(p), Detail: p.Status.Message})
+			wl.EvictedInstances = append(wl.EvictedInstances, facet.Instance{Ref: "pod/" + p.Name, Since: evictedAt(p), Detail: p.Status.Message})
 		}
 	}
 	w.pruneRestarts(pods, now)
@@ -372,10 +376,8 @@ func (w *workloadProbe) observe(ctx context.Context, c *Clients, ls workloadList
 	if !t.haveStatus {
 		desired, readyN = float64(len(pods)), float64(ready)
 	}
-	o.Metrics["replicas_ready"] = readyN
-	o.Metrics["replicas_desired"] = desired
-	o.Metrics["restarts"] = float64(len(w.restarts))
-	o.Metrics["restart_window_s"] = restartWindow.Seconds()
+	wl.ReplicasReady, wl.ReplicasDesired = facet.N(readyN), facet.N(desired)
+	wl.Restarts = facet.NI(len(w.restarts))
 	killed := 0
 	for _, r := range w.restarts {
 		if r.oom {
@@ -383,23 +385,24 @@ func (w *workloadProbe) observe(ctx context.Context, c *Clients, ls workloadList
 		}
 	}
 	if killed > 0 {
-		o.Metrics["killed"] = float64(killed)
+		wl.Killed = facet.NI(killed)
 	}
 	if evicted > 0 {
-		o.Metrics["evicted"] = float64(evicted)
+		wl.Evicted = facet.NI(evicted)
 	}
 
 	if metrics, err := podMetricsByName(ctx, c, ns); err == nil {
 		cpu, mem, haveCPU, haveMem := podUsage(pods, metrics)
 		if haveCPU {
-			o.Metrics["cpu_pct"] = cpu
+			wl.CPUPct = facet.N(cpu)
 		}
 		if haveMem {
-			o.Metrics["mem_pct"] = mem
+			wl.MemPct = facet.N(mem)
 		}
 	} else {
 		o.Detail["metrics_error"] = err.Error()
 	}
+	facet.EmitWorkload(&o, wl, now)
 
 	// Change markers.
 	label := firstNonEmpty(t.name, target)
@@ -415,12 +418,12 @@ func (w *workloadProbe) observe(ctx context.Context, c *Clients, ls workloadList
 	}
 	if w.haveDesired && w.lastDesired != desired {
 		w.addEvent(&o, model.Event{At: now, Kind: "scale", Target: target, Summary: fmt.Sprintf("scale of %s to %d", target, int(desired))})
-		conds = append(conds, model.Condition{Kind: model.CondScaled, Ref: t.kind + "/" + label, Since: now, Detail: fmt.Sprintf("%d -> %d", int(w.lastDesired), int(desired))})
+		o.Conditions = append(o.Conditions, model.Condition{Kind: model.CondScaled, Ref: t.kind + "/" + label, Since: now, Detail: fmt.Sprintf("%d -> %d", int(w.lastDesired), int(desired))})
 	}
 	w.lastDesired, w.haveDesired = desired, true
 	w.firstTick = false
 
-	o.Conditions = dedupeConditions(conds)
+	o.Conditions = dedupeConditions(o.Conditions)
 	o.Detail["kind"] = t.kind
 	o.Detail["name"] = t.name
 	o.Detail["namespace"] = ns
@@ -496,9 +499,9 @@ func (w *workloadProbe) pruneRestarts(pods []*corev1.Pod, now time.Time) {
 	}
 }
 
-// containerConditions translates one container status into conditions.
-func containerConditions(p *corev1.Pod, cs corev1.ContainerStatus, now time.Time) []model.Condition {
-	var out []model.Condition
+// containerInstances adds one container status to the facet's instance
+// lists: crash looping, unable to pull its image, killed for memory.
+func containerInstances(wl *facet.WorkloadFacet, p *corev1.Pod, cs corev1.ContainerStatus, now time.Time) {
 	ref := "pod/" + p.Name
 	term := cs.LastTerminationState.Terminated
 	if w := cs.State.Waiting; w != nil {
@@ -508,9 +511,9 @@ func containerConditions(p *corev1.Pod, cs corev1.ContainerStatus, now time.Time
 		}
 		switch w.Reason {
 		case "CrashLoopBackOff":
-			out = append(out, model.Condition{Kind: model.CondCrashLoopBackOff, Ref: ref, Since: since, Detail: w.Message})
+			wl.Crashing = append(wl.Crashing, facet.Instance{Ref: ref, Since: since, Detail: w.Message})
 		case "ImagePullBackOff", "ErrImagePull", "InvalidImageName":
-			out = append(out, model.Condition{Kind: model.CondImagePullBackOff, Ref: ref, Since: since, Detail: w.Message})
+			wl.ImagePull = append(wl.ImagePull, facet.Instance{Ref: ref, Since: since, Detail: w.Message})
 		}
 	}
 	if t := cs.State.Terminated; t != nil && t.Reason == "OOMKilled" {
@@ -521,9 +524,8 @@ func containerConditions(p *corev1.Pod, cs corev1.ContainerStatus, now time.Time
 		if strings.TrimSpace(detail) == "limit" {
 			detail = "no memory limit"
 		}
-		out = append(out, model.Condition{Kind: model.CondOOMKilled, Ref: ref, Since: term.FinishedAt.Time, Detail: detail})
+		wl.OutOfMemory = append(wl.OutOfMemory, facet.Instance{Ref: ref, Since: term.FinishedAt.Time, Detail: detail})
 	}
-	return out
 }
 
 // evictedAt is the best-known time of an eviction.

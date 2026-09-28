@@ -7,6 +7,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/danilopopovikj/wassup/internal/probe"
+	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 // listAccess documents redis.list.
@@ -17,6 +18,7 @@ var listAccess = probe.Access{
 	SpecFields:  []string{"addr", "url", "key", "password_env", "db", "tls"},
 	Needs:       "network access to the Redis port; a password in the environment variable named by password_env when AUTH is on",
 	Implemented: true,
+	Facets:      []string{facet.NameQueue},
 }
 
 func init() {
@@ -70,7 +72,8 @@ func (p *ListProbe) Start(ctx context.Context, spec map[string]any, out chan<- p
 				o.Err = "LLEN " + key + ": " + err.Error()
 				p.h.Set(probe.HealthDegraded, o.Err)
 			} else {
-				o.Metrics = map[string]float64{"depth": float64(depth)}
+				// The facet writes the canonical queue form: depth.
+				facet.EmitQueue(&o, facet.QueueFacet{Depth: facet.NI(int(depth))}, o.At)
 				o.Detail = map[string]any{"key": key}
 				p.h.Set(probe.HealthOK, "")
 			}
