@@ -120,6 +120,32 @@ func TestRefs(t *testing.T) {
 	}
 }
 
+func TestRoleNodes(t *testing.T) {
+	topo := Topology{Components: []Component{
+		{ID: "n1", Type: "node"}, {ID: "n2", Type: "node"},
+		{ID: "pool", Type: "workload", RunsOn: []string{"n1", "n2"}},
+		{ID: "db", Type: "database", Label: "Main database", RunsOn: []string{"n1", "n2"}, Roles: &Roles{Primary: "p", Replicas: []string{"r"}}},
+	}}
+	if got := topo.RoleNodes(); got["p"] != "n1" || got["r"] != "n2" || len(got) != 2 {
+		t.Errorf("one node per instance, primary first: %v", got)
+	}
+	ids := func(nodeID string) string {
+		var out []string
+		for _, c := range topo.Hosted(nodeID) {
+			out = append(out, c.ID)
+		}
+		return strings.Join(out, ",")
+	}
+	if ids("n1") != "pool,p" || ids("n2") != "pool,r" {
+		t.Errorf("a node holds its instance of the database, not the database: n1 %s, n2 %s", ids("n1"), ids("n2"))
+	}
+	// three candidate nodes for two instances do not say who is where
+	topo.Components[3].RunsOn = []string{"n1", "n2", "n3"}
+	if got := topo.RoleNodes(); len(got) != 0 || ids("n1") != "pool,db" {
+		t.Errorf("any other count keeps the database as it was: %v, n1 %s", got, ids("n1"))
+	}
+}
+
 func TestRemap(t *testing.T) {
 	dir := writeDir(t, map[string]string{
 		"topology.yaml": goodTopology,
@@ -176,5 +202,34 @@ func TestWriteAtomic(t *testing.T) {
 	entries, _ := os.ReadDir(filepath.Dir(p))
 	if len(entries) != 1 {
 		t.Errorf("temp file left behind: %v", entries)
+	}
+}
+
+// What keeps a diagram from drawing clean is said, and nothing else is.
+func TestPictureHints(t *testing.T) {
+	top := &Topology{Components: []Component{
+		{ID: "n1", Type: "node"},
+		{ID: "api", Type: "workload", RunsOn: []string{"n1"}},
+		{ID: "mail", Type: "external"},
+		{ID: "uploads", Type: "storage", Lane: "side"},
+		{ID: "jobs", Type: "queue"},
+	}}
+	if hints := top.PictureHints(); len(hints) != 0 {
+		t.Errorf("nothing is wrong with it: %v", hints)
+	}
+	top.Components = append(top.Components,
+		Component{ID: "nightly", Type: "scheduledjob", Lane: "side"},
+		Component{ID: "worker", Type: "backgroundworker"},
+		Component{ID: "pay", Type: "external", Label: "The payment provider, cards and transfers"},
+	)
+	hints := strings.Join(top.PictureHints(), "\n")
+	for _, want := range []string{"nightly stands in the side column", "worker runs on no machine", "pay has a label of 41 characters"} {
+		if !strings.Contains(hints, want) {
+			t.Errorf("hints lack %q:\n%s", want, hints)
+		}
+	}
+	// without machines on the diagram nothing can be drawn inside one
+	if hints := (&Topology{Components: []Component{{ID: "api", Type: "workload"}}}).PictureHints(); len(hints) != 0 {
+		t.Errorf("hints = %v", hints)
 	}
 }

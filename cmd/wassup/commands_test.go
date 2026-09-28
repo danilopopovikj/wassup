@@ -205,10 +205,10 @@ func TestProbeRowsIdleNeedsARate(t *testing.T) {
 	if r := rows["db"]; r.Label != "idle" {
 		t.Errorf("db has an edge with a rate: %+v", r)
 	}
-	if r := rows["api->cache"]; r.Label != noRate || r.Note == "" || r.State != string(model.Idle) {
+	if r := rows["api->cache"]; r.Label != state.NoRate || r.Note == "" || r.State != string(model.Idle) {
 		t.Errorf("nothing measures api->cache: %+v", r)
 	}
-	if r := rows["cache"]; r.Label != noRate {
+	if r := rows["cache"]; r.Label != state.NoRate || r.Note == "" {
 		t.Errorf("nothing measures the traffic of cache: %+v", r)
 	}
 }

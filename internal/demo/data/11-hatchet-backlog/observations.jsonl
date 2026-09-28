@@ -24,7 +24,7 @@
 {"at":0,"target":"cache","probe":"redis.info","metrics":{"mem_pct":41,"hit_rate":96,"evictions":0,"clients":12}}
 {"at":0,"target":"api->cache","probe":"signoz.edge","metrics":{"rate":5000,"hit_rate":96}}
 {"at":0,"target":"api->db","probe":"pg.pool","metrics":{"pool_used":40,"pool_max":100,"waiters":0,"rate":800,"p95_ms":9}}
-{"at":0,"target":"db-primary","probe":"pg.stats","metrics":{"cpu_pct":30,"mem_pct":52,"disk_pct":61,"connections_used":42,"connections_max":100}}
+{"at":0,"target":"db-primary","probe":"pg.stats","metrics":{"cpu_pct":30,"mem_pct":52,"disk_pct":61,"connections_used":42,"connections_max":100,"rate":850}}
 {"at":0,"target":"db-r1","probe":"cnpg.instance","metrics":{"cpu_pct":8,"mem_pct":40,"disk_pct":61,"lag_bytes":2048}}
 {"at":0,"target":"db-r2","probe":"cnpg.instance","metrics":{"cpu_pct":8,"mem_pct":40,"disk_pct":61,"lag_bytes":4096}}
 {"at":0,"target":"db-primary->db-r1","probe":"pg.stats","metrics":{"lag_bytes":2048,"streaming":1}}
@@ -38,7 +38,8 @@
 {"at":0,"target":"hatchet-workers","probe":"k8s.workload","metrics":{"replicas_ready":6,"replicas_desired":6,"cpu_pct":44,"mem_pct":57,"restarts":0},"detail":{"kind":"Deployment","placement":{"node-2":{"pods":3,"ready":3},"node-3":{"pods":3,"ready":3}}}}
 {"at":0,"target":"hatchet-workers","probe":"hatchet.workers","metrics":{"workers_online":6,"workers_total":6,"pool_used":24,"pool_max":24,"active":24,"waiters":850,"running_s":1500,"p95_s":90},"conditions":[{"kind":"PoolExhausted","ref":"workers/hatchet-worker","since_s":-600,"detail":"all 24 slots busy"},{"kind":"TaskRunning","ref":"task/3f9a","since_s":-1380,"detail":"generate-invoice"}],"detail":{"long_tasks":["generate-invoice 25 min (tenant acme)"]}}
 {"at":0,"target":"billing","probe":"hatchet.workflow","metrics":{"active":0,"succeeded":20,"failed":3,"queued":40},"detail":{"schedule":"cron 0 * * * *","cron":"0 * * * *","last_failure":"8c1d"},"conditions":[{"kind":"JobFailed","ref":"run/8c1d","since_s":-360,"detail":"step generate-invoice timed out after 900 s"}]}
-{"at":0,"target":"hatchet-db","probe":"pg.stats","metrics":{"cpu_pct":18,"mem_pct":40,"disk_pct":35,"connections_used":30,"connections_max":200}}
+{"at":0,"target":"node-4","probe":"k8s.node","metrics":{"cpu_pct":12,"mem_pct":35,"disk_pct":30,"pods":4}}
+{"at":0,"target":"hatchet-db","probe":"pg.stats","metrics":{"cpu_pct":18,"mem_pct":40,"disk_pct":35,"connections_used":30,"connections_max":200,"rate":95}}
 {"at":0,"target":"electric","probe":"k8s.workload","metrics":{"replicas_ready":1,"replicas_desired":1,"cpu_pct":12,"mem_pct":30,"restarts":0},"detail":{"kind":"Deployment","placement":{"node-1":{"pods":1,"ready":1}}}}
 {"at":0,"target":"electric","probe":"electric.sync","metrics":{"latency_ms":6,"ready":1,"shape_ms":40,"up_to_date":1,"columns":9},"detail":{"status":"active","table":"public.issues"}}
 {"at":0,"target":"electric","probe":"pg.stats","metrics":{"lag_bytes":1024,"streaming":1}}

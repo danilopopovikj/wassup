@@ -10,6 +10,11 @@
 // by token_env (default HATCHET_CLIENT_TOKEN); the tenant id comes from the
 // spec or, when absent, from the token's JWT payload (claim tenant_id, then
 // sub), decoded without verification.
+//
+// An API that is only reachable inside the cluster is read through a tunnel
+// the probe opens itself (via: k8s.service/<namespace>/<name>:<port>). The
+// bindings that name the same tunnel share it, and a probe closes its
+// connections before it lets go of the tunnel.
 package hatchet
 
 import (
@@ -58,7 +63,14 @@ const (
 )
 
 // commonFields are the spec fields every probe of this package accepts.
-var commonFields = []string{"url", "token_env", "tenant", "interval", "timeout"}
+var commonFields = []string{"url", "token_env", "tenant", "interval", "timeout", "via", "kubeconfig", "context"}
+
+// viaNeeds is the part of Needs that says what via takes and what it
+// changes about url.
+const viaNeeds = ". With via set to k8s.service/<namespace>/<name>:<port> (or k8s.pod/...) wassup opens its own port-forward to the API, " +
+	"which the identity of the kubeconfig has to be allowed to do in that namespace (get on services, get and list on pods, create on pods/portforward); " +
+	"bindings with the same via share one. url may then be left out and reads http://<name>.<namespace>.svc:<port>; " +
+	"a url that is set keeps its scheme and its path, and its host is the Host header and the name of the certificate, not the address that is dialled"
 
 // withFields returns the common spec fields followed by extra.
 func withFields(extra ...string) []string {
@@ -74,6 +86,16 @@ type config struct {
 	timeout  time.Duration
 	tick     time.Duration
 	target   string
+	// via is the `via` of the binding, a tunnel or a label, for the detail.
+	via string
+}
+
+// noteVia adds the way to the API to the detail of an observation, when the
+// binding names one.
+func (c config) noteVia(detail map[string]any) {
+	if c.via != "" {
+		detail["via"] = c.via
+	}
 }
 
 // requirements says what configure must be able to resolve.
@@ -84,10 +106,10 @@ type requirements struct {
 
 // validateCommon checks the shared spec fields offline.
 func validateCommon(spec map[string]any) error {
-	if err := probe.RequireString(spec, "url"); err != nil {
+	if err := probe.ValidateVia(probe.Str(spec, "via", "")); err != nil {
 		return err
 	}
-	if _, err := parseBase(probe.Str(spec, "url", "")); err != nil {
+	if _, err := baseOf(spec, probe.NewVia(spec)); err != nil {
 		return err
 	}
 	if v, ok := spec["tenant"]; ok {
@@ -116,20 +138,11 @@ func validateDurations(spec map[string]any, keys ...string) error {
 	return nil
 }
 
-// parseBase validates the API base URL and normalizes it: no trailing slash
-// and no trailing /api, since every path this package requests starts with
-// /api.
-func parseBase(raw string) (string, error) {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return "", fmt.Errorf("url: %w", err)
-	}
-	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return "", fmt.Errorf("url %q must be an absolute http(s) URL", raw)
-	}
-	base := strings.TrimRight(raw, "/")
-	base = strings.TrimSuffix(base, "/api")
-	return base, nil
+// baseOf returns the API base URL of a spec, without a trailing /api: every
+// path this package requests starts with /api.
+func baseOf(spec map[string]any, via *probe.Via) (string, error) {
+	base, err := via.URLOf(spec, "url")
+	return strings.TrimSuffix(base, "/api"), err
 }
 
 // configure reads the common spec fields, the token and the tenant, and
@@ -146,8 +159,10 @@ func configure(spec map[string]any, req requirements) (config, *client, error) {
 		timeout:  probe.Dur(spec, "timeout", defaultTimeout),
 		tick:     tickOf(spec),
 		target:   probe.Str(spec, "_target", ""),
+		via:      probe.Str(spec, "via", ""),
 	}
-	base, err := parseBase(probe.Str(spec, "url", ""))
+	via := probe.NewVia(spec)
+	base, err := baseOf(spec, via)
 	if err != nil {
 		return config{}, nil, err
 	}
@@ -174,6 +189,12 @@ func configure(spec map[string]any, req requirements) (config, *client, error) {
 		token:  token,
 		tenant: cfg.tenant,
 		http:   &http.Client{Timeout: cfg.timeout, Transport: probe.ReadOnly(nil)},
+	}
+	if via != nil {
+		c.via = via
+		c.conns = via.Through(http.DefaultTransport.(*http.Transport).Clone())
+		c.http = &http.Client{Timeout: cfg.timeout, Transport: probe.ReadOnly(c.conns)}
+		c.round = roundFactor * cfg.timeout
 	}
 	return cfg, c, nil
 }
@@ -214,6 +235,10 @@ func tickOf(spec map[string]any) time.Duration {
 	return defaultTick
 }
 
+// roundFactor is how many times the timeout of one call a round may take:
+// a round is a handful of calls, one after the other.
+const roundFactor = 4
+
 // client is a minimal read-only Hatchet API client.
 type client struct {
 	base   string
@@ -221,8 +246,48 @@ type client struct {
 	tenant string
 	http   *http.Client
 
+	// via is set when the binding names a tunnel wassup opens itself; conns
+	// is then the transport of http, whose connections go through it, and
+	// round the longest a round may take. The URL only says what to ask
+	// for: the address to dial is the tunnel's.
+	via   *probe.Via
+	conns *http.Transport
+	round time.Duration
+
 	mu        sync.Mutex
 	workflows map[string]string // workflow name -> id
+}
+
+// roundContext returns the context of one round. Through a tunnel a round
+// does not end with the probe's context: a request that is cut halfway
+// reaches the server as a reset, and the port-forward goes down with it
+// (probe.RoundContext). Without one the round runs on ctx, as it always did.
+func (c *client) roundContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if c.via == nil {
+		return ctx, func() {}
+	}
+	return probe.RoundContext(ctx, c.round)
+}
+
+// unanswered is called after a request that got no answer. Through a tunnel
+// it may be the tunnel that broke: the connections are closed and the
+// tunnel is dropped, in that order, so the next request opens a new one.
+func (c *client) unanswered() {
+	if c.via == nil {
+		return
+	}
+	c.conns.CloseIdleConnections()
+	c.via.Drop()
+}
+
+// close releases what the client holds when the probe stops: the
+// connections first, the tunnel after them.
+func (c *client) close() {
+	if c.via == nil {
+		return
+	}
+	c.conns.CloseIdleConnections()
+	c.via.Close()
 }
 
 // tenantPath builds /api/v1/tenants/{tenant}<suffix>.
@@ -298,11 +363,13 @@ func (c *client) do(ctx context.Context, path string, query url.Values) (int, []
 	resp, err := c.http.Do(req)
 	latency := time.Since(start)
 	if err != nil {
+		c.unanswered()
 		return 0, nil, latency, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	if err != nil {
+		c.unanswered()
 		return resp.StatusCode, nil, latency, err
 	}
 	return resp.StatusCode, body, latency, nil
@@ -428,8 +495,12 @@ func firstOf(ts ...apiTime) time.Time {
 func rfc3339(t time.Time) string { return t.UTC().Format(time.RFC3339) }
 
 // run polls at interval and re-emits the last observation every tick in
-// between (with a fresh At), until ctx ends.
-func run(ctx context.Context, out chan<- probe.Observation, tick, interval time.Duration, poll func(ctx context.Context) probe.Observation) {
+// between (with a fresh At), until ctx ends, and releases what the client
+// holds. poll gets the context of its round (roundContext). A round that
+// the stop cut short says nothing about the API: it is not reported and
+// the health stays what it was.
+func run(ctx context.Context, out chan<- probe.Observation, tick, interval time.Duration, c *client, h *probe.Health, poll func(ctx context.Context) probe.Observation) {
+	defer c.close()
 	if interval < tick {
 		interval = tick
 	}
@@ -440,9 +511,13 @@ func run(ctx context.Context, out chan<- probe.Observation, tick, interval time.
 	for {
 		now := time.Now()
 		if lastPoll.IsZero() || now.Sub(lastPoll) >= interval {
-			last = poll(ctx)
+			before := h.Get()
+			rctx, cancel := c.roundContext(ctx)
+			last = poll(rctx)
+			cancel()
 			lastPoll = now
 			if ctx.Err() != nil {
+				h.Set(before.State, before.Message)
 				return
 			}
 		}

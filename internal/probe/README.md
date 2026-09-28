@@ -27,7 +27,11 @@ type Probe interface {
   `pgprobe` and `readOnlyHook` in `redisprobe`), and asks the server for a
   read-only session where the server has one. A request that reads but also
   makes its source do work (a shape on Electric) is off unless the binding
-  asks for it, and the probe's documentation says what it sets off.
+  asks for it, and the probe's documentation says what it sets off. A
+  source that answers a read to a POST (SigNoz: the sign-in, the query) has
+  its client built on `probe.ReadOnlyExcept`, which lets through the
+  requests it names and no other; the file that names the POST is listed
+  in `readsWithPost` of `readonly_test.go`.
 * The runtime builds one probe instance per binding and calls `Start` once.
   `Start` must return promptly and push observations from a goroutine until
   `ctx` is done. The runtime closes nothing; stop when `ctx` ends.
@@ -41,9 +45,14 @@ type Probe interface {
   with an embedded `probe.Lifetime`; a round that was cut short by the stop
   is not reported and does not change the probe's health.
 * A probe that connects into the cluster takes `via` and opens its path with
-  `probe.OpenTunnel`. The provider registers the opener
-  (`probe.RegisterTunnel("k8s.service", ...)`), so the probe never imports
-  the provider.
+  `probe.NewVia`, which shares one tunnel between the bindings that name
+  the same `via` and opens a new one when it broke. The provider registers
+  the opener (`probe.RegisterTunnel("k8s.service", ...)`), so the probe
+  never imports the provider.
+* A probe that reads a counter takes `metric`, `match` and `errors`, read
+  with `probe.Matchers`, and reports `rate` and `error_rate`. A source that
+  several bindings read is read once and shared (`pageStore` in
+  `k8s/scrape.go`, `tableStore` in `signoz/table.go`).
 * The runtime injects the bound element id as `spec["_target"]` and the tick
   as `spec["_tick"]` (a `time.Duration`). Set `Observation.Target` to that id
   unless the probe deliberately reports for other ids too (a load balancer
@@ -84,16 +93,16 @@ type accepts (`model.Catalog[type].Facets`), or an edge facet for edges.
 | `queue` | `QueueFacet` | depth, pending, running, consumers, oldest, rates, growth | `hatchet.queue`, `celery.queue`, `amqp.queue`, `redis.list` |
 | `scheduledjob` | `ScheduledJobFacet` | counts, last failure, current run, schedule | `k8s.cronjob`, `hatchet.workflow` |
 | `loadbalancer` | `LoadBalancerFacet` | connections, rate, targets with health (per-target edges via `LoadBalancerEdges`) | `hcloud.lb` |
-| `ingress` | `IngressFacet` (+ `CertificateFacet`) | rate, errors, hosts, certificate expiry and renewal | `k8s.ingress`, `cert.tls` |
+| `ingress` | `IngressFacet` (+ `CertificateFacet`) | rate, errors, hosts, certificate expiry and renewal | `k8s.ingress`, `cert.tls`, `k8s.scrape` |
 | `firewall` | `FirewallFacet` | rules; on an edge, allowed or the denying rule | `hcloud.firewall`, `terraform.state` |
 | `dns` | `DNSFacet` | resolves, addresses, expected target | `dns.record` |
-| `database` | `DatabaseFacet` | cpu/mem/disk, connections, lock waiters, size, lag, WAL retained, backup/vacuum | `pg.stats`, `cnpg.cluster` |
+| `database` | `DatabaseFacet` | cpu/mem/disk, transactions per second, connections, lock waiters, size, lag, WAL retained, backup/vacuum | `pg.stats`, `cnpg.cluster`, `signoz.edge` |
 | `syncengine` | `SyncEngineFacet` (+ `ReplicationFacet`) | ready, latency, shape handshake; slot, streaming, lag, WAL | `electric.sync`, `pg.stats` |
 | `cache` | `CacheFacet` | memory, hit rate, evictions, clients, full | `redis.info` |
 | `storage` | `StorageFacet` | used/total, iops, objects, last write | `k8s.pvc`, `s3.bucket` |
 | `observability` | `ObservabilityFacet` | ingest rate, disk, no data since | `signoz.health` |
 | `external` | `ExternalFacet` | latency, error and timeout rates, timing out since | `http.ping` |
-| edge | `TrafficFacet` | rate, errors, latency, queued work, pool use, blocked or refused path | `signoz.edge`, `pg.pool`, `hcloud.firewall`, `terraform.state` |
+| edge | `TrafficFacet` | rate, errors, latency, queued work, pool use, blocked or refused path | `k8s.scrape`, `signoz.edge`, `pg.pool`, `hcloud.firewall`, `terraform.state` |
 | edge (`replication`) | `ReplicationFacet` | slot, streaming, lag, WAL retained | `pg.stats` with `replica:` |
 
 Where the numbers come from, per backend:
@@ -130,7 +139,7 @@ are 0–100, rates are per second unless the key says otherwise.
 | Key | Meaning | Used by types |
 | --- | --- | --- |
 | `cpu_pct`, `mem_pct`, `disk_pct` | utilisation | node, workload, db, cache, storage, observability |
-| `rate` | requests, transactions, jobs or operations per second | edges, lb, ingress |
+| `rate` | requests, transactions, jobs or operations per second | edges, lb, ingress, db, queue |
 | `error_rate`, `timeout_rate` | percent of requests | edges, ingress, external |
 | `p95_ms`, `latency_ms` | latency | edges, external, storage, syncengine |
 | `queued`, `waiters`, `pending` | units of work waiting at the destination | edges |

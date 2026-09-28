@@ -35,9 +35,9 @@ var workersAccess = probe.Access{
 	Source: "the Hatchet REST API: the worker list, running and completed task runs and the tenant queue metrics",
 	Delivers: "workers_online, workers_total, pool_used, pool_max (slots), active (running tasks), waiters (queued + pending tasks), " +
 		"running_s (longest running task), p95_s (task duration over the last hour); TaskRunning past long_task, PoolExhausted, NotReady; " +
-		"detail: workers, long tasks",
+		"detail: workers, long tasks, url, via",
 	SpecFields:  withFields("name", "long_task"),
-	Needs:       "a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token",
+	Needs:       "a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token" + viaNeeds,
 	Implemented: true,
 	Tier:        probe.TierToken,
 	Facets:      []string{facet.NameBackgroundWorker},
@@ -48,10 +48,12 @@ func init() {
 }
 
 // WorkersProbe is hatchet.workers, bound to the workload that runs the
-// workers. Spec: url (required), token_env, tenant, interval, timeout, name
-// (optional prefix filter on the worker name), long_task (default 10m).
+// workers. Spec: url (required, unless via names a tunnel), token_env,
+// tenant, interval, timeout, via, name (optional prefix filter on the worker
+// name), long_task (default 10m).
 type WorkersProbe struct {
 	h probe.Health
+	probe.Lifetime
 }
 
 // workersState is what one WorkersProbe carries between polls.
@@ -102,8 +104,10 @@ func (p *WorkersProbe) Start(ctx context.Context, spec map[string]any, out chan<
 		p.h.Set(probe.HealthFailed, err.Error())
 		return err
 	}
-	go run(ctx, out, st.cfg.tick, st.cfg.interval, func(ctx context.Context) probe.Observation {
-		return p.poll(ctx, st)
+	p.Go(func() {
+		run(ctx, out, st.cfg.tick, st.cfg.interval, st.c, &p.h, func(ctx context.Context) probe.Observation {
+			return p.poll(ctx, st)
+		})
 	})
 	return nil
 }
@@ -133,6 +137,7 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 		Metrics: map[string]float64{},
 		Detail:  map[string]any{"url": st.cfg.base, "tenant": st.cfg.tenant},
 	}
+	st.cfg.noteVia(o.Detail)
 	if st.name != "" {
 		o.Detail["name"] = st.name
 	}

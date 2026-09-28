@@ -46,7 +46,9 @@ def topology(workers=("worker",), extras=False):
             {"id": "hatchet-queue", "type": "queue", "label": "Hatchet tasks", "group": "bookstore"},
             {"id": "hatchet-workers", "type": "backgroundworker", "label": "Hatchet workers", "group": "bookstore", "runs_on": ["node-2", "node-3"]},
             {"id": "billing", "type": "scheduledjob", "label": "Billing workflow", "group": "bookstore"},
-            {"id": "hatchet-db", "type": "database", "label": "Hatchet DB", "group": "bookstore", "engine": "postgres"},
+            {"id": "node-4", "type": "node", "group": "k3s"},
+            {"id": "hatchet-db", "type": "database", "label": "Hatchet DB", "group": "bookstore", "engine": "postgres",
+             "runs_on": ["node-4"]},
             {"id": "electric", "type": "syncengine", "label": "Electric", "group": "bookstore", "runs_on": ["node-1"]},
         ]
     edges = [
@@ -130,29 +132,38 @@ def bindings(workers=("worker",), extras=False):
             "hatchet-workers": [{"probe": "k8s.workload", "namespace": "bookstore", "selector": "app=hatchet-worker"},
                                 {"probe": "hatchet.workers", "long_task": "10m", **HATCHET}],
             "billing": [{"probe": "hatchet.workflow", "workflow": "billing", **HATCHET}],
+            "node-4": [{"probe": "k8s.node", "name": "node-4"}],
             "hatchet-db": [{"probe": "pg.stats", "dsn_env": "HATCHET_PG_DSN"}],
             "electric": [{"probe": "k8s.workload", "namespace": "bookstore", "selector": "app=electric"},
                          {"probe": "electric.sync", "url": "http://electric.bookstore:3000", "secret_env": "ELECTRIC_SECRET", "table": "public.issues"},
                          {"probe": "pg.stats", "dsn_env": "BOOKSTORE_PG_DSN", "replica": "electric_slot_default"}],
         })
-    SIGNOZ = "http://signoz.signoz:8080"
-    def edge(frm, to):
-        return {"probe": "signoz.edge", "url": SIGNOZ, "token_env": "SIGNOZ_TOKEN", "from": frm, "to": to}
+    SIGNOZ = {"probe": "signoz.edge", "url": "http://signoz.signoz:8080", "token_env": "SIGNOZ_TOKEN"}
+    FAILED = {"status.code": "STATUS_CODE_ERROR"}
+    def served(service):
+        """The requests a service answers."""
+        return {**SIGNOZ, "metric": "signoz_calls_total", "match": {"service.name": service, "span.kind": "SPAN_KIND_SERVER"}, "errors": FAILED}
+    def stored(service, system):
+        """The statements a service sends to a database or a cache."""
+        return {**SIGNOZ, "metric": "signoz_db_latency_count", "match": {"service.name": service, "db.system": system}, "errors": FAILED}
+    def called(service, address):
+        """The calls a service makes to an address outside of it."""
+        return {**SIGNOZ, "metric": "signoz_external_call_latency_count", "match": {"service.name": service, "address": address}, "errors": FAILED}
     edges = {
-        "lb->ingress": [edge("lb", "ingress")],
-        "ingress->api": [edge("ingress", "api")],
-        "api->db": [{"probe": "pg.pool", "dsn_env": "BOOKSTORE_PGBOUNCER_DSN", "via": "k8s.workload/api"}, edge("api", "postgres")],
-        "api->cache": [edge("api", "redis")],
+        "lb->ingress": [served("ingress")],
+        "ingress->api": [served("api")],
+        "api->db": [{"probe": "pg.pool", "dsn_env": "BOOKSTORE_PGBOUNCER_DSN", "via": "k8s.workload/api"}, stored("api", "postgresql")],
+        "api->cache": [stored("api", "redis")],
         "db-primary->db-r1": [{"probe": "pg.stats", "dsn_env": "BOOKSTORE_PG_DSN", "via": "k8s.workload/api", "replica": "bookstore-db-2"}],
         "db-primary->db-r2": [{"probe": "pg.stats", "dsn_env": "BOOKSTORE_PG_DSN", "via": "k8s.workload/api", "replica": "bookstore-db-3"}],
         "fw->signoz": [{"probe": "hcloud.firewall", "name": "bookstore", "port": 4317}],
     }
     for w in workers:
-        edges[w + "->github"] = [edge(w, "api.github.com")]
+        edges[w + "->github"] = [called(w, "api\\.github\\.com.*")]
     if extras:
         edges["db-primary->electric"] = [{"probe": "pg.stats", "dsn_env": "BOOKSTORE_PG_DSN", "via": "k8s.workload/api", "replica": "electric_slot_default"}]
-        edges["ingress->electric"] = [edge("ingress", "electric")]
-        edges["api->hatchet-queue"] = [edge("api", "hatchet")]
+        edges["ingress->electric"] = [served("electric")]
+        edges["api->hatchet-queue"] = [called("api", "hatchet-api\\.bookstore.*")]
     return {"version": 1, "components": comps, "edges": edges}
 
 # ------------------------------------------------------------- baseline obs
@@ -209,7 +220,7 @@ def baseline(workers=("worker",), extras=False):
     rec("cache", "redis.info", {"mem_pct": 41, "hit_rate": 96, "evictions": 0, "clients": 12})
     rec("api->cache", "signoz.edge", {"rate": 5000, "hit_rate": 96})
     rec("api->db", "pg.pool", {"pool_used": 40, "pool_max": 100, "waiters": 0, "rate": 800, "p95_ms": 9})
-    rec("db-primary", "pg.stats", {"cpu_pct": 30, "mem_pct": 52, "disk_pct": 61, "connections_used": 42, "connections_max": 100})
+    rec("db-primary", "pg.stats", {"cpu_pct": 30, "mem_pct": 52, "disk_pct": 61, "connections_used": 42, "connections_max": 100, "rate": 850})
     rec("db-r1", "cnpg.instance", {"cpu_pct": 8, "mem_pct": 40, "disk_pct": 61, "lag_bytes": 2048})
     rec("db-r2", "cnpg.instance", {"cpu_pct": 8, "mem_pct": 40, "disk_pct": 61, "lag_bytes": 4096})
     rec("db-primary->db-r1", "pg.stats", {"lag_bytes": 2048, "streaming": 1})
@@ -226,7 +237,8 @@ def baseline(workers=("worker",), extras=False):
             detail={"kind": "Deployment", "placement": place(("node-2", 3), ("node-3", 3))})
         rec("hatchet-workers", "hatchet.workers", {"workers_online": 6, "workers_total": 6, "pool_used": 12, "pool_max": 24, "active": 12, "waiters": 4})
         rec("billing", "hatchet.workflow", {"active": 0, "succeeded": 23, "failed": 0, "queued": 0}, detail={"schedule": "cron 0 * * * *", "cron": "0 * * * *"})
-        rec("hatchet-db", "pg.stats", {"cpu_pct": 18, "mem_pct": 40, "disk_pct": 35, "connections_used": 30, "connections_max": 200})
+        rec("node-4", "k8s.node", {"cpu_pct": 12, "mem_pct": 35, "disk_pct": 30, "pods": 4})
+        rec("hatchet-db", "pg.stats", {"cpu_pct": 18, "mem_pct": 40, "disk_pct": 35, "connections_used": 30, "connections_max": 200, "rate": 95})
         rec("electric", "k8s.workload", {"replicas_ready": 1, "replicas_desired": 1, "cpu_pct": 12, "mem_pct": 30, "restarts": 0},
             detail={"kind": "Deployment", "placement": place(("node-1", 1))})
         rec("electric", "electric.sync", {"latency_ms": 6, "ready": 1, "shape_ms": 40, "up_to_date": 1, "columns": 9}, detail={"status": "active", "table": "public.issues"})
@@ -273,15 +285,29 @@ override(obs, "api", metrics={"replicas_ready": 2, "replicas_desired": 3, "cpu_p
                                "  File \"manage.py\", line 22, in <module>", "Error: migration failed, exiting"]})
 override(obs, "ingress->api", metrics={"rate": 1100, "error_rate": 30, "p95_ms": 95})
 override(obs, "ingress", metrics={"rate": 1100, "error_rate": 30, "cert_days": 61})
+override(obs, "api->exports-queue", metrics={"rate": 0})
+override(obs, "exports-queue->worker", metrics={"rate": 0.017})
 scenario(1, "deploy-crash-loop", "Deploy crash loop", "site is giving errors", "2026-09-27T09:50:00Z", 120, obs, {
     "components": {
         "api": {"state": "failing", "label": "failing, 1 of 3 replicas, 6 restarts in 5 min", "severity": "crit"},
-        "lb": {"state": "flowing"},
+        "lb": {"state": "flowing", "label": "flowing, 1.1k req/s"},
         "db": {"state": "flowing"},
+        # its own count of transactions, not the busiest edge that touches it
+        "db-primary": {"state": "flowing", "label": "flowing, 850 tx/s"},
+        # a job that says it is not running is idle, with or without a rate
+        "docs-sync": {"state": "idle", "label": "idle"},
+        # a machine takes its state from what runs on it
+        "node-1": {"state": "flowing"},
     },
     "edges": {
         "ingress->api": {"state": "failing", "label": "failing, 30 percent errors"},
         "lb->ingress": {"state": "flowing", "label": "flowing, 1.1k req/s"},
+        # measured, and nothing went through
+        "api->exports-queue": {"state": "idle", "label": "idle"},
+        # a job a minute is not no job
+        "exports-queue->worker": {"state": "flowing", "label": "flowing, 1 jobs/min"},
+        # nothing measures it, which is not the same as nothing going through
+        "docs-sync->worker": {"state": "idle", "label": "no rate measured"},
     },
     "cause": "api",
     "story_contains": ["requests arrive, 1.1k/s", "load balancer passes them to 3 of 3 nodes",
@@ -498,6 +524,10 @@ scenario(11, "hatchet-backlog", "Hatchet backlog, every worker slot busy", "invo
         "hatchet-workers": {"state": "waiting", "label": "waiting, all 24 slots busy, 850 queued"},
         "billing": {"state": "failing", "contains": "last run failed"},
         "hatchet": {"state": "flowing"},
+        # 95 transactions of its own, where the edge into it carries 120
+        "hatchet-db": {"state": "flowing", "label": "flowing, 95 tx/s"},
+        # no edge reaches the machine: it is busy because the database on it is
+        "node-4": {"state": "flowing", "label": "flowing"},
     },
     "cause": "hatchet-workers",
     "story_contains": ["jobs are queued and growing, 850 queued, oldest 14 min",

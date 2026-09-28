@@ -38,7 +38,8 @@
 {"at":0,"target":"hatchet-workers","probe":"k8s.workload","metrics":{"replicas_ready":6,"replicas_desired":6,"cpu_pct":44,"mem_pct":57,"restarts":0},"detail":{"kind":"Deployment","placement":{"node-2":{"pods":3,"ready":3},"node-3":{"pods":3,"ready":3}}}}
 {"at":0,"target":"hatchet-workers","probe":"hatchet.workers","metrics":{"workers_online":6,"workers_total":6,"pool_used":12,"pool_max":24,"active":12,"waiters":4}}
 {"at":0,"target":"billing","probe":"hatchet.workflow","metrics":{"active":0,"succeeded":23,"failed":0,"queued":0},"detail":{"schedule":"cron 0 * * * *","cron":"0 * * * *"}}
-{"at":0,"target":"hatchet-db","probe":"pg.stats","metrics":{"cpu_pct":18,"mem_pct":40,"disk_pct":35,"connections_used":30,"connections_max":200}}
+{"at":0,"target":"node-4","probe":"k8s.node","metrics":{"cpu_pct":12,"mem_pct":35,"disk_pct":30,"pods":4}}
+{"at":0,"target":"hatchet-db","probe":"pg.stats","metrics":{"cpu_pct":18,"mem_pct":40,"disk_pct":35,"connections_used":30,"connections_max":200,"rate":95}}
 {"at":0,"target":"electric","probe":"k8s.workload","metrics":{"replicas_ready":1,"replicas_desired":1,"cpu_pct":12,"mem_pct":30,"restarts":0},"detail":{"kind":"Deployment","placement":{"node-1":{"pods":1,"ready":1}}}}
 {"at":0,"target":"electric","probe":"electric.sync","metrics":{"latency_ms":7,"ready":0},"detail":{"status":"waiting","table":"public.issues"},"conditions":[{"kind":"NotReady","ref":"http://electric.bookstore:3000/v1/health","since_s":-7080,"detail":"waiting for Postgres"}]}
 {"at":0,"target":"electric","probe":"pg.stats","metrics":{"wal_retained_bytes":12884901888,"streaming":0},"conditions":[{"kind":"ReplicationBroken","ref":"slot/electric_slot_default","since_s":-7080,"detail":"replication slot electric_slot_default inactive"},{"kind":"SlotInactive","ref":"slot/electric_slot_default","since_s":-7080}]}

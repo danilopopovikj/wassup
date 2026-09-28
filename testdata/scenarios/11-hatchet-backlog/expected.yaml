@@ -10,6 +10,12 @@ components:
     contains: last run failed
   hatchet:
     state: flowing
+  hatchet-db:
+    state: flowing
+    label: "flowing, 95 tx/s"
+  node-4:
+    state: flowing
+    label: flowing
 cause: hatchet-workers
 story_contains:
   - "jobs are queued and growing, 850 queued, oldest 14 min"

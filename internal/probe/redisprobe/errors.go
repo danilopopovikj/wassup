@@ -23,11 +23,21 @@ type server struct {
 	user        string
 	passwordEnv string
 	tls         bool
+	// via is the tunnel the connection goes through, "" when it goes
+	// straight to addr.
+	via string
 }
 
 // serverOf describes the connection of a spec for the messages.
 func serverOf(opt *redis.Options, spec map[string]any) server {
-	return server{addr: opt.Addr, user: opt.Username, passwordEnv: probe.Str(spec, "password_env", ""), tls: opt.TLSConfig != nil}
+	return server{addr: opt.Addr, user: opt.Username, passwordEnv: probe.Str(spec, "password_env", ""), tls: opt.TLSConfig != nil,
+		via: probe.NewVia(spec).String()}
+}
+
+// isBroken reports whether the connection ended instead of answering.
+func isBroken(err error) bool {
+	return errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE) ||
+		errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
 // password names where the password comes from.
@@ -66,7 +76,7 @@ func isCertificate(err error) bool {
 // error, as before.
 func (s server) explain(command string, err error) string {
 	raw := command + ": " + err.Error()
-	if errors.Is(err, probe.ErrReadOnly) {
+	if errors.Is(err, probe.ErrReadOnly) || errors.Is(err, probe.ErrNoTunnel) {
 		return raw
 	}
 	say := func(format string, args ...any) string {
@@ -92,6 +102,14 @@ func (s server) explain(command string, err error) string {
 		return say("the server is loading its data and answers nothing yet: the next round tries again")
 	case strings.Contains(lower, "first record does not look like a tls handshake"):
 		return say("the server at %s does not speak TLS: set tls to false, or use redis:// instead of rediss://", s.addr)
+	case s.via != "" && isBroken(err):
+		// What is dialled is the local end of the tunnel: the address of
+		// the server and a firewall have nothing to do with it.
+		hint := ""
+		if !s.tls && !errors.Is(err, syscall.ECONNREFUSED) {
+			hint = ". If it goes on, the server may only take TLS: set tls to true"
+		}
+		return say("the connection through %s did not hold, the port-forward may have ended: the next round opens a new one%s", s.via, hint)
 	case isCertificate(err):
 		return say("the certificate of %s was not accepted: the address has to be the name in the certificate, signed by an authority this machine trusts", s.addr)
 	case errors.As(err, &dns):

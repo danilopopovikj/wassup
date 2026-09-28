@@ -30,9 +30,13 @@ var workerAccess = probe.Access{
 	Kind:   "celery.worker",
 	Source: "Flower's REST API (/api/workers with and without status=true, /api/tasks?state=SUCCESS)",
 	Delivers: "workers_online, workers_total, active, pool_max, pool_used, running_s, p95_s (when at least 10 finished tasks are known), queues; " +
-		"TaskRunning for tasks older than long_task, NotReady when no worker is online",
-	SpecFields:  []string{"flower_url", "name", "long_task", "interval", "timeout"},
-	Needs:       "HTTP access to Flower; no credentials",
+		"TaskRunning for tasks older than long_task, NotReady when no worker is online; detail: flower_url, via, workers, queues, long_tasks",
+	SpecFields: []string{"flower_url", "name", "long_task", "interval", "timeout", "via", "kubeconfig", "context"},
+	Needs: "HTTP access to Flower; no credentials. " +
+		"With via set to k8s.service/<namespace>/<name>:<port> (or k8s.pod/...) wassup opens its own port-forward to Flower, " +
+		"which the identity of the kubeconfig has to be allowed to do in that namespace (get on services, get and list on pods, create on pods/portforward); " +
+		"bindings with the same via share one. flower_url may then be left out and reads http://<name>.<namespace>.svc:<port>; " +
+		"one that is set keeps its scheme and its path, and its host is the Host header and the name of the certificate, not the address that is dialled",
 	Implemented: true,
 	Facets:      []string{facet.NameBackgroundWorker},
 }
@@ -60,15 +64,22 @@ type flowerWorkerFull struct {
 }
 
 // WorkerProbe is celery.worker: the Celery workers behind a workload as Flower
-// sees them. Spec: flower_url (required), name (optional prefix filter on the
-// worker hostname), long_task (default 10m), interval (default tick, min 5s),
-// timeout (default 5s).
+// sees them. Spec: flower_url (required, unless via names a tunnel), name
+// (optional prefix filter on the worker hostname), long_task (default 10m),
+// interval (default tick, min 5s), timeout (default 5s), via (to Flower).
 type WorkerProbe struct {
 	h probe.Health
+	probe.Lifetime
 
 	// now and client are overridable for tests.
 	now    func() time.Time
 	client *http.Client
+
+	// tunnel is set when the binding names a tunnel wassup opens itself;
+	// conns is then the transport of client, whose connections go through
+	// it. flower_url only says what to ask for.
+	tunnel *probe.Via
+	conns  *http.Transport
 }
 
 // workerConfig is the parsed spec.
@@ -80,6 +91,8 @@ type workerConfig struct {
 	tick     time.Duration
 	interval time.Duration
 	timeout  time.Duration
+	// via is the `via` of the binding, a tunnel or a label, for the detail.
+	via string
 }
 
 // Kind implements probe.Probe.
@@ -87,12 +100,11 @@ func (p *WorkerProbe) Kind() string { return workerAccess.Kind }
 
 // Validate implements probe.Probe.
 func (p *WorkerProbe) Validate(spec map[string]any) error {
-	if err := probe.RequireString(spec, "flower_url"); err != nil {
+	if err := probe.ValidateVia(probe.Str(spec, "via", "")); err != nil {
 		return err
 	}
-	u, err := url.Parse(probe.Str(spec, "flower_url", ""))
-	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("flower_url must be an absolute http(s) URL")
+	if _, err := flowerURL(spec); err != nil {
+		return err
 	}
 	if v, ok := spec["name"]; ok {
 		if _, isStr := v.(string); !isStr {
@@ -112,6 +124,11 @@ func (p *WorkerProbe) Validate(spec map[string]any) error {
 // Health implements probe.Probe.
 func (p *WorkerProbe) Health() probe.ProbeHealth { return p.h.Get() }
 
+// flowerURL returns the URL of Flower in a spec.
+func flowerURL(spec map[string]any) (string, error) {
+	return probe.NewVia(spec).URLOf(spec, "flower_url")
+}
+
 // clock returns the current time from the test hook or the wall clock.
 func (p *WorkerProbe) clock() time.Time {
 	if p.now != nil {
@@ -124,12 +141,13 @@ func (p *WorkerProbe) clock() time.Time {
 func parseWorkerSpec(spec map[string]any) workerConfig {
 	c := workerConfig{
 		target:   target(spec),
-		flower:   strings.TrimRight(probe.Str(spec, "flower_url", ""), "/"),
 		name:     probe.Str(spec, "name", ""),
 		longTask: probe.Dur(spec, "long_task", 10*time.Minute),
 		tick:     tick(spec),
 		timeout:  probe.Dur(spec, "timeout", roundTimeout),
+		via:      probe.Str(spec, "via", ""),
 	}
+	c.flower, _ = flowerURL(spec)
 	c.interval = max(probe.Dur(spec, "interval", c.tick), workerMinInterval, c.tick)
 	return c
 }
@@ -141,15 +159,21 @@ func (p *WorkerProbe) Start(ctx context.Context, spec map[string]any, out chan<-
 		return err
 	}
 	c := parseWorkerSpec(spec)
+	p.tunnel = probe.NewVia(spec)
+	if p.client == nil && p.tunnel != nil {
+		p.conns = p.tunnel.Through(http.DefaultTransport.(*http.Transport).Clone())
+		p.client = &http.Client{Timeout: c.timeout, Transport: probe.ReadOnly(p.conns)}
+	}
 	if p.client == nil {
 		p.client = &http.Client{Timeout: c.timeout, Transport: probe.ReadOnly(nil)}
 	}
-	flower := &flowerClient{base: c.flower, http: p.client}
+	flower := &flowerClient{base: c.flower, http: p.client, unanswered: p.unanswered}
 	p.h.Set(probe.HealthOK, "polling "+c.flower)
-	go func() {
+	p.Go(func() {
+		defer p.release()
 		seen := firstSeen{}
-		last := p.round(ctx, flower, c, seen)
-		if !probe.Send(ctx, out, last) {
+		last := p.turn(ctx, flower, c, seen)
+		if ctx.Err() != nil || !probe.Send(ctx, out, last) {
 			return
 		}
 		pollT := time.NewTicker(c.interval)
@@ -165,7 +189,7 @@ func (p *WorkerProbe) Start(ctx context.Context, spec map[string]any, out chan<-
 			case <-ctx.Done():
 				return
 			case <-pollT.C:
-				last = p.round(ctx, flower, c, seen)
+				last = p.turn(ctx, flower, c, seen)
 				if ctx.Err() != nil {
 					return
 				}
@@ -180,8 +204,48 @@ func (p *WorkerProbe) Start(ctx context.Context, spec map[string]any, out chan<-
 				}
 			}
 		}
-	}()
+	})
 	return nil
+}
+
+// turn runs one round. Through a tunnel it does not end with the probe's
+// context: a request that is cut halfway reaches the server as a reset, and
+// the port-forward goes down with it (probe.RoundContext). A round that the
+// stop cut short says nothing about Flower: the health stays what it was.
+func (p *WorkerProbe) turn(ctx context.Context, flower *flowerClient, c workerConfig, seen firstSeen) probe.Observation {
+	before := p.h.Get()
+	rctx, cancel := ctx, context.CancelFunc(func() {})
+	if p.tunnel != nil {
+		rctx, cancel = probe.RoundContext(ctx, c.timeout)
+	}
+	defer cancel()
+	o := p.round(rctx, flower, c, seen)
+	if ctx.Err() != nil {
+		p.h.Set(before.State, before.Message)
+	}
+	return o
+}
+
+// unanswered is called after a request that got no answer. Through a tunnel
+// it may be the tunnel that broke: the connections are closed and the
+// tunnel is dropped, in that order, so the next round opens a new one.
+func (p *WorkerProbe) unanswered() {
+	if p.tunnel == nil {
+		return
+	}
+	if p.conns != nil {
+		p.conns.CloseIdleConnections()
+	}
+	p.tunnel.Drop()
+}
+
+// release lets go of what the probe holds when it stops: the connections
+// first, the tunnel after them.
+func (p *WorkerProbe) release() {
+	if p.conns != nil {
+		p.conns.CloseIdleConnections()
+	}
+	p.tunnel.Close()
 }
 
 // workerMatches applies the optional name prefix to a Flower worker name
@@ -209,6 +273,9 @@ type longTaskInfo struct {
 func (p *WorkerProbe) round(ctx context.Context, flower *flowerClient, c workerConfig, seen firstSeen) probe.Observation {
 	now := p.clock()
 	o := probe.Observation{Target: c.target, Probe: p.Kind(), At: now, Detail: map[string]any{"flower_url": c.flower}}
+	if c.via != "" {
+		o.Detail["via"] = c.via
+	}
 	if c.name != "" {
 		o.Detail["name"] = c.name
 	}

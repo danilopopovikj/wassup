@@ -561,6 +561,7 @@ func EmitDNS(o *probe.Observation, d DNSFacet, now time.Time) {
 // DatabaseFacet is a database server or cluster member.
 type DatabaseFacet struct {
 	CPUPct, MemPct, DiskPct         Num
+	Rate                            Num // transactions per second
 	ConnectionsUsed, ConnectionsMax Num
 	ActiveConnections, LockWaiters  Num
 	UsedBytes, TotalBytes           Num
@@ -578,6 +579,7 @@ func EmitDatabase(o *probe.Observation, d DatabaseFacet, now time.Time) {
 	put(o, "cpu_pct", d.CPUPct)
 	put(o, "mem_pct", d.MemPct)
 	put(o, "disk_pct", d.DiskPct)
+	put(o, "rate", d.Rate)
 	put(o, "connections_used", d.ConnectionsUsed)
 	put(o, "connections_max", d.ConnectionsMax)
 	put(o, "active_connections", d.ActiveConnections)

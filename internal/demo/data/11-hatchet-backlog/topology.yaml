@@ -117,11 +117,16 @@ components:
     type: scheduledjob
     label: Billing workflow
     group: bookstore
+  - id: node-4
+    type: node
+    group: k3s
   - id: hatchet-db
     type: database
     label: Hatchet DB
     group: bookstore
     engine: postgres
+    runs_on:
+      - node-4
   - id: electric
     type: syncengine
     label: Electric

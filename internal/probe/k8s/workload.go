@@ -362,7 +362,10 @@ func (w *workloadProbe) observe(ctx context.Context, c *Clients, ls workloadList
 	placement := map[string]map[string]int{}
 	nodeOfPod := map[string]string{}
 	for _, p := range pods {
-		if n := p.Spec.NodeName; n != "" {
+		// A pod that ran to its end (a migration that finished, a pod that
+		// was evicted) still carries the labels and holds no place on its
+		// machine: counted there it would read as a replica that is not ready.
+		if n := p.Spec.NodeName; n != "" && !podEnded(p) {
 			nodeOfPod[p.Name] = n
 			if placement[n] == nil {
 				placement[n] = map[string]int{}

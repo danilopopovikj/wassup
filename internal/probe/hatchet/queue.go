@@ -22,9 +22,9 @@ var queueAccess = probe.Access{
 	Kind:   KindQueue,
 	Source: "the Hatchet REST API: tenant queue metrics, the worker list and the queued task runs",
 	Delivers: "depth (queued + pending), pending, running, active, growth_per_min, consumers (active workers), " +
-		"oldest_age_s (age of the oldest queued task); detail: queues, total, the queue or workflow filter, url",
+		"oldest_age_s (age of the oldest queued task); detail: queues, total, the queue or workflow filter, url, via",
 	SpecFields:  withFields("queue", "workflow"),
-	Needs:       "a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token",
+	Needs:       "a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token" + viaNeeds,
 	Implemented: true,
 	Tier:        probe.TierToken,
 	Facets:      []string{facet.NameQueue},
@@ -35,11 +35,13 @@ func init() {
 }
 
 // QueueProbe is hatchet.queue, bound to a queue component. Spec: url
-// (required), token_env, tenant, interval, timeout, and at most one of queue
-// (a name in the queues map) or workflow (a name in the workflow map); with
-// neither, the tenant total is reported.
+// (required, unless via names a tunnel), token_env, tenant, interval,
+// timeout, via, and at most one of queue (a name in the queues map) or
+// workflow (a name in the workflow map); with neither, the tenant total is
+// reported.
 type QueueProbe struct {
 	h probe.Health
+	probe.Lifetime
 }
 
 // queueState is what one QueueProbe carries between polls.
@@ -100,8 +102,10 @@ func (p *QueueProbe) Start(ctx context.Context, spec map[string]any, out chan<- 
 		p.h.Set(probe.HealthFailed, err.Error())
 		return err
 	}
-	go run(ctx, out, st.cfg.tick, st.cfg.interval, func(ctx context.Context) probe.Observation {
-		return p.poll(ctx, st)
+	p.Go(func() {
+		run(ctx, out, st.cfg.tick, st.cfg.interval, st.c, &p.h, func(ctx context.Context) probe.Observation {
+			return p.poll(ctx, st)
+		})
 	})
 	return nil
 }
@@ -142,6 +146,7 @@ func (p *QueueProbe) poll(ctx context.Context, st *queueState) probe.Observation
 			"legacy": qm.legacy,
 		},
 	}
+	st.cfg.noteVia(o.Detail)
 	q := facet.QueueFacet{Depth: facet.N(s.queued)}
 	if s.known {
 		q.Pending, q.Running = facet.N(s.pending), facet.N(s.running)

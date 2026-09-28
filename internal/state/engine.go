@@ -39,6 +39,8 @@ type ctx struct {
 	t      *model.Topology
 	snap   *model.Snapshot
 	noData bool // the traffic source is down, so idle edges say "no data"
+	// nodeNames maps the name a provider knows a machine by to its id.
+	nodeNames map[string]string
 }
 
 // Evaluate produces a snapshot from the input.
@@ -78,29 +80,25 @@ func Evaluate(in Input) *model.Snapshot {
 	for _, e := range c.t.Edges {
 		c.snap.Edges[e.ID()] = c.evalEdge(e)
 	}
-	// Pass 3: finish components: flowing if any incident edge flows, else idle.
-	for _, comp := range comps {
-		if !pending[comp.ID] {
-			continue
+	// Pass 3: finish components: flowing when they report a rate of their
+	// own or an incident edge flows, else idle.
+	finish := func(machines bool) {
+		for _, comp := range comps {
+			if pending[comp.ID] && (comp.Type == "node") == machines {
+				c.snap.Components[comp.ID] = c.finish(comp, c.snap.Components[comp.ID])
+			}
 		}
-		es := c.snap.Components[comp.ID]
-		rate, unit, flowing := c.incidentFlow(comp.ID)
-		if flowing {
-			es.State = model.Flowing
-			es.Rate = rate
-			es.Unit = unit
-		} else {
-			es.State = model.Idle
-		}
-		es.Label = c.componentLabel(comp, es)
-		c.snap.Components[comp.ID] = es
 	}
+	finish(false)
 	// Roles: a db with roles inherits from its primary and notes replica trouble.
 	for _, comp := range c.t.Components {
 		if comp.Type == "database" && comp.Roles != nil && comp.Roles.Primary != "" {
 			c.rollupRoles(comp)
 		}
 	}
+	// Machines come last, after the databases took the state of their
+	// primary: a machine is busy when what runs on it is.
+	finish(true)
 	// Severity, gauges, notes, since.
 	for id, es := range c.snap.Components {
 		comp, _ := c.t.Component(id)
@@ -622,6 +620,92 @@ func (c *ctx) processingReason(comp model.Component, j *bind.Joined) string {
 	return ""
 }
 
+// NoRate is the label of an element that is bound and in order while
+// nothing reports what goes through it: whether it is idle is then not
+// known, and the label does not claim it.
+const NoRate = "no rate measured"
+
+// measured reports whether the metrics of an element say how much goes
+// through it: a rate, or one of the measures of work its type names.
+func measured(m map[string]float64, work []string) bool {
+	if _, ok := m["rate"]; ok {
+		return true
+	}
+	for _, k := range work {
+		if _, ok := m[k]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// edgeWork is what says how much goes through an edge besides a rate: a
+// replication edge is measured by how far its consumer is behind.
+var edgeWork = []string{"lag_bytes"}
+
+// finish decides between flowing and idle for a component that is in
+// order. Its own rate is what its label says, in the unit of its type; the
+// busiest edge that touches it stands in where it reports none.
+func (c *ctx) finish(comp model.Component, es model.ElementState) model.ElementState {
+	rate, unit, flowing := c.incidentFlow(comp.ID)
+	if own, ok := es.Metrics["rate"]; ok && own > 0 {
+		rate, unit, flowing = own, model.RateUnitOf(comp.Type), true
+	}
+	known := measured(es.Metrics, model.Catalog[comp.Type].Work) || c.incidentMeasured(comp.ID)
+	if comp.Type == "node" {
+		busy, hostedKnown := c.busyOn(comp.ID)
+		flowing = flowing || busy
+		known = known || hostedKnown
+	}
+	switch {
+	case flowing:
+		es.State, es.Rate, es.Unit = model.Flowing, rate, unit
+		es.Label = "flowing"
+		if rate > 0 {
+			es.Label = "flowing, " + Rate(rate, unit)
+		}
+	case known:
+		es.State, es.Label = model.Idle, "idle"
+	default:
+		es.State, es.Label = model.Idle, NoRate
+	}
+	return es
+}
+
+// incidentMeasured reports whether a rate was read for one of the edges
+// that touch a component.
+func (c *ctx) incidentMeasured(id string) bool {
+	for _, e := range c.t.Edges {
+		if (e.From == id || e.To == id) && measured(c.snap.Edges[e.ID()].Metrics, edgeWork) {
+			return true
+		}
+	}
+	return false
+}
+
+// busyOn reports whether work goes through something that runs on a
+// machine, and whether that is known for everything that runs on it. A
+// machine that holds nothing knows nothing.
+func (c *ctx) busyOn(nodeID string) (busy, known bool) {
+	hosted := c.hostedOn(nodeID)
+	known = len(hosted) > 0
+	for _, h := range hosted {
+		if h.Known && h.Pods == 0 {
+			continue // none of it is here
+		}
+		switch h.State {
+		case model.Flowing, model.Waiting, model.Processing:
+			busy = true
+		}
+		// Unbound, without data, or in order with nothing counting: what goes
+		// through it is not known, and so not what goes through the machine.
+		if h.Marker == model.MarkerUnbound || h.Marker == model.MarkerNoData || c.snap.Components[h.ID].Label == NoRate {
+			known = false
+		}
+	}
+	return busy, known
+}
+
 // incidentFlow reports whether any incident edge flows, and the busiest rate.
 func (c *ctx) incidentFlow(id string) (float64, string, bool) {
 	var best float64
@@ -643,25 +727,7 @@ func (c *ctx) incidentFlow(id string) (float64, string, bool) {
 			}
 		}
 	}
-	if !flowing {
-		if j := c.joined(id); j != nil {
-			if r, ok := metric(j, "rate"); ok && r > 0 {
-				return r, "req/s", true
-			}
-		}
-	}
 	return best, unit, flowing
-}
-
-// componentLabel builds the label for a flowing or idle component.
-func (c *ctx) componentLabel(comp model.Component, es model.ElementState) string {
-	if es.State == model.Idle {
-		return "idle"
-	}
-	if es.Rate > 0 {
-		return fmt.Sprintf("flowing, %s %s", Num(es.Rate), es.Unit)
-	}
-	return "flowing"
 }
 
 // evalEdge applies the edge rules.
@@ -785,7 +851,7 @@ func (c *ctx) evalEdge(e model.Edge) model.ElementState {
 		if r, ok := es.Metrics["rate"]; ok && r > 0 {
 			es.State = model.Flowing
 			es.Rate = r
-			es.Label = fmt.Sprintf("flowing, %s %s", Num(r), es.Unit)
+			es.Label = "flowing, " + Rate(r, es.Unit)
 			if e.Kind == "cache" {
 				if hit, ok := es.Metrics["hit_rate"]; ok {
 					es.Label += fmt.Sprintf(", %s miss", Pct(100-hit))
@@ -795,7 +861,7 @@ func (c *ctx) evalEdge(e model.Edge) model.ElementState {
 			}
 			if base := c.baseline(id, es); base > 0 && r >= th.RateSpikeFactor*base {
 				es.Label += ", double normal"
-				es.Notes = append(es.Notes, fmt.Sprintf("usual %s %s", Num(base), es.Unit))
+				es.Notes = append(es.Notes, "usual "+Rate(base, es.Unit))
 			}
 			return es
 		}
@@ -812,12 +878,17 @@ func (c *ctx) evalEdge(e model.Edge) model.ElementState {
 		if r := c.derivedRate(e, src, dst); r > 0 {
 			es.State = model.Flowing
 			es.Rate = r
-			es.Label = fmt.Sprintf("flowing, %s %s", Num(r), es.Unit)
+			es.Label = "flowing, " + Rate(r, es.Unit)
 			return es
 		}
 	}
+	// Idle is what was measured at nothing. An edge nobody measures does not
+	// say idle: that would read as no traffic where the traffic is not known.
 	es.State = model.Idle
-	es.Label = "idle"
+	es.Label = NoRate
+	if own && measured(es.Metrics, edgeWork) {
+		es.Label = "idle"
+	}
 	return es
 }
 
@@ -1108,7 +1179,8 @@ func Gauges(th model.Thresholds, comp model.Component, es model.ElementState) []
 
 // hostedOn lists what runs on a node: every component whose runs_on names
 // it, plus any whose live placement (the pods the provider saw on this
-// node) does, with the per-node counts when known. The row takes the
+// node) does, with the per-node counts when known; a component that says
+// where its pods are and does not name this node has none here. The row takes the
 // component's state, except that live counts tell the truth locally: a
 // failing workload whose pods on this node are all ready and quiet reads
 // flowing here, and a pod that is not ready on this node fails here even
@@ -1123,7 +1195,13 @@ func (c *ctx) hostedOn(nodeID string) []model.Hosted {
 		seen[comp.ID] = true
 		ws := c.snap.Components[comp.ID]
 		h := model.Hosted{ID: comp.ID, Label: comp.DisplayLabel(), State: ws.State, Marker: ws.Marker}
-		if pl, ok := c.placementOf(comp.ID)[nodeID]; ok {
+		if p, ok := c.t.Component(comp.Parent); ok && comp.Parent != "" {
+			h.Label = p.DisplayLabel() + " " + comp.Notes // "Main database primary"
+		}
+		// A workload that says where its pods are says where they are not
+		// as well: on a machine it does not name there is none.
+		if all := c.placementOf(comp.ID); all != nil {
+			pl := all[nodeID]
 			h.Known, h.Pods, h.Ready, h.Restarts = true, pl.Pods, pl.Ready, pl.Restarts
 			switch {
 			case pl.Pods == 0:
@@ -1158,9 +1236,32 @@ func (c *ctx) hostedOn(nodeID string) []model.Hosted {
 // placement is what a provider reported about one component on one node.
 type placement struct{ Pods, Ready, Restarts int }
 
+// nodeID returns the id on the diagram of the machine a provider knows by
+// name: the node whose probe reported that name, then the node of that id,
+// then the slug, so "worker-node-2" finds worker-node-2.
+func (c *ctx) nodeID(name string) string {
+	if c.nodeNames == nil {
+		c.nodeNames = map[string]string{}
+		for _, comp := range c.t.AllComponents() {
+			if comp.Type != "node" {
+				continue
+			}
+			if n := detailStr(c.joined(comp.ID), "name"); n != "" {
+				c.nodeNames[n] = comp.ID
+			}
+		}
+	}
+	if id, ok := c.nodeNames[name]; ok {
+		return id
+	}
+	if _, ok := c.t.Component(name); ok {
+		return name
+	}
+	return model.SlugifyID(name)
+}
+
 // placementOf reads the "placement" detail a workload probe leaves: node
-// name -> pods, ready, restarts. Node names are matched to node ids
-// directly, then by slug, so "worker-node-2" finds worker-node-2.
+// name -> pods, ready, restarts, keyed here by the id of the node.
 func (c *ctx) placementOf(compID string) map[string]placement {
 	j := c.joined(compID)
 	if j == nil {
@@ -1172,11 +1273,7 @@ func (c *ctx) placementOf(compID string) map[string]placement {
 	}
 	out := map[string]placement{}
 	each := func(node string, fields map[string]any) {
-		id := node
-		if _, ok := c.t.Component(id); !ok {
-			id = model.SlugifyID(node)
-		}
-		out[id] = placement{Pods: toInt(fields["pods"]), Ready: toInt(fields["ready"]), Restarts: toInt(fields["restarts"])}
+		out[c.nodeID(node)] = placement{Pods: toInt(fields["pods"]), Ready: toInt(fields["ready"]), Restarts: toInt(fields["restarts"])}
 	}
 	switch m := raw.(type) {
 	case map[string]any:

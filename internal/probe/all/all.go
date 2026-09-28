@@ -13,6 +13,7 @@ import (
 	_ "github.com/danilopopovikj/wassup/internal/probe/pgprobe"
 	_ "github.com/danilopopovikj/wassup/internal/probe/redisprobe"
 	_ "github.com/danilopopovikj/wassup/internal/probe/s3probe"
+	_ "github.com/danilopopovikj/wassup/internal/probe/signoz"
 	_ "github.com/danilopopovikj/wassup/internal/probe/stubs"
 	_ "github.com/danilopopovikj/wassup/internal/probe/terraform"
 )

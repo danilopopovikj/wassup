@@ -70,6 +70,9 @@ func TestNodeNotReadyMemoryPressure(t *testing.T) {
 	if _, ok := model.HasCondition(o.Conditions, model.CondRebooted); ok {
 		t.Errorf("unexpected Rebooted with an old boot")
 	}
+	if o.Detail["name"] != "node-2" {
+		t.Errorf("the name the cluster knows the machine by: %v", o.Detail["name"])
+	}
 	if o.Detail["kubelet_version"] != "v1.33.4" {
 		t.Errorf("detail = %v", o.Detail)
 	}

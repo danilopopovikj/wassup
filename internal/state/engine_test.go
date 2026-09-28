@@ -156,11 +156,24 @@ func TestBlockedByFirewallCondition(t *testing.T) {
 }
 
 func TestFormatting(t *testing.T) {
-	cases := map[float64]string{38: "38", 1200: "1.2k", 2400: "2.4k", 1000: "1k", 0.2: "0.2", 3100000: "3.1M"}
+	cases := map[float64]string{38: "38", 1200: "1.2k", 2400: "2.4k", 1000: "1k", 0.2: "0.2", 3100000: "3.1M",
+		// less than one keeps two digits that say something
+		0: "0", 0.017: "0.017", 0.12: "0.12", 0.004: "0.004", 0.0123: "0.012", 0.5: "0.5", 0.96: "1", 1.04: "1", 1.26: "1.3", -0.017: "-0.017"}
 	for in, want := range cases {
 		if got := Num(in); got != want {
 			t.Errorf("Num(%v) = %q, want %q", in, got, want)
 		}
+	}
+	// a rate is said in the unit a person would count in
+	rates := map[float64]string{40: "40 req/s", 1.26: "1.3 req/s", 0.96: "1 req/s", 0.24: "14.4 req/min", 0.017: "1 req/min",
+		0.0042: "15.1 req/h", 0.0001: "0.36 req/h", 0: "0 req/s"}
+	for in, want := range rates {
+		if got := Rate(in, "req/s"); got != want {
+			t.Errorf("Rate(%v) = %q, want %q", in, got, want)
+		}
+	}
+	if got := Rate(0.5, "B lag"); got != "0.5 B lag" {
+		t.Errorf("what is no rate keeps its unit: %q", got)
 	}
 	if Dur(35*time.Minute) != "35 min" || Dur(3*time.Hour) != "3 h" || Dur(3*time.Hour+2*time.Minute) != "3 h" || Dur(90*time.Second) != "2 min" {
 		t.Errorf("Dur: %s %s %s", Dur(35*time.Minute), Dur(3*time.Hour), Dur(90*time.Second))
@@ -263,5 +276,188 @@ func TestPartialProbeFailureKeepsTheData(t *testing.T) {
 		t.Errorf("edge = %+v", e)
 	} else if errs, _ := e.Detail["probe_errors"].([]string); len(errs) != 1 {
 		t.Errorf("probe_errors = %+v", e.Detail["probe_errors"])
+	}
+}
+
+// up binds the components of topo with what a cluster alone says: they
+// run, and nothing says how much goes through them.
+func up() []probe.Observation {
+	return []probe.Observation{
+		{Target: "api", Probe: "k8s.workload", Metrics: map[string]float64{"replicas_ready": 2, "replicas_desired": 2}},
+		{Target: "n1", Probe: "k8s.node", Metrics: map[string]float64{"cpu_pct": 20, "mem_pct": 30}},
+		{Target: "db", Probe: "cnpg.cluster", Metrics: map[string]float64{"cpu_pct": 10}},
+		{Target: "ingress", Probe: "k8s.ingress", Metrics: map[string]float64{"cert_days": 60}},
+	}
+}
+
+func TestAComponentSaysItsOwnRateInItsOwnUnit(t *testing.T) {
+	s := eval(t, append(up(),
+		probe.Observation{Target: "db", Probe: "pg.stats", Metrics: map[string]float64{"rate": 95}},
+		probe.Observation{Target: "api->db", Probe: "pg.pool", Metrics: map[string]float64{"rate": 120}},
+		probe.Observation{Target: "ingress->api", Probe: "signoz.edge", Metrics: map[string]float64{"rate": 40}},
+	)...)
+	if got := s.Components["db"].Label; got != "flowing, 95 tx/s" {
+		t.Errorf("the database counts its transactions itself: %q", got)
+	}
+	// the API reports no rate: the busiest edge that touches it stands in
+	if got := s.Components["api"].Label; got != "flowing, 120 tx/s" {
+		t.Errorf("api: %q", got)
+	}
+	// a rate of nothing of its own does not hide an edge that flows
+	s = eval(t, append(up(),
+		probe.Observation{Target: "db", Probe: "pg.stats", Metrics: map[string]float64{"rate": 0}},
+		probe.Observation{Target: "api->db", Probe: "pg.pool", Metrics: map[string]float64{"rate": 120}},
+	)...)
+	if got := s.Components["db"].Label; got != "flowing, 120 tx/s" {
+		t.Errorf("db: %q", got)
+	}
+}
+
+func TestIdleIsOnlySaidWhereSomethingWasMeasured(t *testing.T) {
+	s := eval(t, up()...)
+	for _, id := range []string{"api", "db", "ingress", "n1"} {
+		if es := s.Components[id]; es.State != model.Idle || es.Label != NoRate || es.Marker != "" {
+			t.Errorf("%s: nothing measures it: %s %q %q", id, es.State, es.Label, es.Marker)
+		}
+	}
+	for _, id := range []string{"ingress->api", "api->db"} {
+		if es := s.Edges[id]; es.State != model.Idle || es.Label != NoRate {
+			t.Errorf("%s: nothing measures it: %s %q", id, es.State, es.Label)
+		}
+	}
+	if sev, _, _ := WorstSeverity(s); sev != model.Info {
+		t.Errorf("not knowing a rate is no trouble: %v", sev)
+	}
+
+	s = eval(t, append(up(),
+		probe.Observation{Target: "ingress->api", Probe: "signoz.edge", Metrics: map[string]float64{"rate": 0}},
+		probe.Observation{Target: "q", Probe: "celery.queue", Metrics: map[string]float64{"depth": 0}},
+	)...)
+	if es := s.Edges["ingress->api"]; es.State != model.Idle || es.Label != "idle" {
+		t.Errorf("a rate of nothing was read: %s %q", es.State, es.Label)
+	}
+	for _, id := range []string{"api", "ingress", "q"} {
+		if es := s.Components[id]; es.Label != "idle" {
+			t.Errorf("%s: what touches it was measured at nothing: %q", id, es.Label)
+		}
+	}
+	if es := s.Components["db"]; es.Label != NoRate {
+		t.Errorf("db: nothing measures it still: %q", es.Label)
+	}
+	if es := s.Edges["api->db"]; es.Label != NoRate {
+		t.Errorf("api->db: %q", es.Label)
+	}
+}
+
+func TestAMachineIsBusyWhenWhatRunsOnItIs(t *testing.T) {
+	// no edge touches n1: all it has is the API that runs on it
+	s := eval(t, append(up(), probe.Observation{Target: "ingress->api", Probe: "signoz.edge", Metrics: map[string]float64{"rate": 40}})...)
+	if es := s.Components["n1"]; es.State != model.Flowing || es.Label != "flowing" {
+		t.Errorf("the API on it flows: %s %q", es.State, es.Label)
+	}
+	s = eval(t, append(up(), probe.Observation{Target: "ingress->api", Probe: "signoz.edge", Metrics: map[string]float64{"rate": 0}})...)
+	if es := s.Components["n1"]; es.State != model.Idle || es.Label != "idle" {
+		t.Errorf("the API on it was measured at nothing: %s %q", es.State, es.Label)
+	}
+	s = eval(t, append(up(), probe.Observation{Target: "api", Probe: "k8s.workload",
+		Metrics:    map[string]float64{"replicas_ready": 0, "replicas_desired": 2},
+		Conditions: []model.Condition{{Kind: model.CondCrashLoopBackOff, Ref: "pod/api-1", Since: now.Add(-time.Minute)}}})...)
+	if es := s.Components["n1"]; es.State == model.Failing || es.State == model.Flowing {
+		t.Errorf("a machine does not fail, and is not busy, because what runs on it crashes: %s %q", es.State, es.Label)
+	}
+}
+
+// The cluster knows a machine by a name of its own. What runs on it is
+// counted on the machine whose probe reported that name.
+func TestPlacementFindsTheMachineByTheNameTheClusterKnows(t *testing.T) {
+	s := eval(t,
+		probe.Observation{Target: "n1", Probe: "k8s.node", Metrics: map[string]float64{"cpu_pct": 20},
+			Detail: map[string]any{"name": "bookstore-agent-large-x7k"}},
+		probe.Observation{Target: "api", Probe: "k8s.workload", Metrics: map[string]float64{"replicas_ready": 2, "replicas_desired": 2},
+			Detail: map[string]any{"placement": map[string]any{"bookstore-agent-large-x7k": map[string]any{"pods": 2, "ready": 2}}}},
+	)
+	hosted := s.Components["n1"].Hosted
+	if len(hosted) != 1 || hosted[0].ID != "api" {
+		t.Fatalf("hosted = %+v", hosted)
+	}
+	if h := hosted[0]; !h.Known || h.Pods != 2 || h.Ready != 2 {
+		t.Errorf("the API on n1 = %+v, want its 2 pods of 2 ready", h)
+	}
+}
+
+// A machine knows what goes through it only when that is known of
+// everything on it: a probe that failed says nothing, and so does the
+// machine.
+func TestAMachineWithSomethingUnknownOnItDoesNotSayIdle(t *testing.T) {
+	s := eval(t,
+		probe.Observation{Target: "n1", Probe: "k8s.node", Metrics: map[string]float64{"cpu_pct": 20}},
+		probe.Observation{Target: "api", Probe: "k8s.workload", Err: "connection refused"},
+	)
+	if es := s.Components["api"]; es.Marker != model.MarkerUnbound {
+		t.Fatalf("api = %s %q %q", es.State, es.Label, es.Marker)
+	}
+	if es := s.Components["n1"]; es.State != model.Idle || es.Label != NoRate {
+		t.Errorf("nothing was measured on n1: %s %q", es.State, es.Label)
+	}
+}
+
+// A database with roles takes the state of its primary. A machine that
+// holds the database reads what the database reads.
+func TestAMachineReadsTheDatabaseOnItAfterItTookItsPrimarysState(t *testing.T) {
+	top := topo()
+	for i := range top.Components {
+		if top.Components[i].ID == "db" {
+			// three instances on one machine named: nothing says which holds
+			// which, so the machine holds the database as a whole
+			top.Components[i].Roles = &model.Roles{Primary: "db-primary", Replicas: []string{"db-r1", "db-r2"}}
+			top.Components[i].RunsOn = []string{"n1"}
+		}
+		if top.Components[i].ID == "api" {
+			top.Components[i].RunsOn = nil
+		}
+	}
+	b := bind.New()
+	for _, o := range []probe.Observation{
+		{Target: "n1", Probe: "k8s.node", Metrics: map[string]float64{"cpu_pct": 20}},
+		{Target: "db-primary", Probe: "pg.stats", Metrics: map[string]float64{"rate": 850, "connections_used": 4}},
+	} {
+		o.At = now
+		b.Apply(o)
+	}
+	s := Evaluate(Input{Topology: top, Joined: b.All(), Now: now, Tick: 1, TickEvery: 5 * time.Second})
+	if es := s.Components["db"]; es.State != model.Flowing {
+		t.Fatalf("db = %s %q", es.State, es.Label)
+	}
+	if es := s.Components["n1"]; es.State != model.Flowing {
+		t.Errorf("the database on n1 flows: n1 = %s %q", es.State, es.Label)
+	}
+}
+
+// A workload that says where its pods are says where they are not as well:
+// on a machine its runs_on names and its placement does not, there is none,
+// and that is known. The diagram leaves the place empty instead of drawing
+// a copy that is not there.
+func TestAMachineKnowsWhatIsNotOnIt(t *testing.T) {
+	tp := &model.Topology{Name: "t", Components: []model.Component{
+		{ID: "n1", Type: "node"}, {ID: "n2", Type: "node"},
+		{ID: "api", Type: "workload", Label: "API", RunsOn: []string{"n1", "n2"}},
+	}}
+	b := bind.New()
+	for _, o := range []probe.Observation{
+		{Target: "n1", Probe: "k8s.node", Metrics: map[string]float64{"cpu_pct": 20}},
+		{Target: "n2", Probe: "k8s.node", Metrics: map[string]float64{"cpu_pct": 20}},
+		{Target: "api", Probe: "k8s.workload", Metrics: map[string]float64{"replicas_ready": 1, "replicas_desired": 1},
+			Detail: map[string]any{"placement": map[string]any{"n1": map[string]any{"pods": 1, "ready": 1}}}},
+	} {
+		o.At = now
+		b.Apply(o)
+	}
+	s := Evaluate(Input{Topology: tp, Joined: b.All(), Now: now, Tick: 1, TickEvery: 5 * time.Second})
+	here, there := s.Components["n1"].Hosted, s.Components["n2"].Hosted
+	if len(here) != 1 || !here[0].Known || here[0].Pods != 1 {
+		t.Errorf("n1 holds the pod: %+v", here)
+	}
+	if len(there) != 1 || there[0].ID != "api" || !there[0].Known || there[0].Pods != 0 || there[0].State != model.Idle {
+		t.Errorf("n2 holds none, and that is known: %+v", there)
 	}
 }

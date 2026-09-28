@@ -230,3 +230,32 @@ func TestImageTag(t *testing.T) {
 		}
 	}
 }
+
+// A pod that ran to its end keeps the labels of the workload. It holds no
+// place on its machine, so the machine does not read as one with a replica
+// that is not ready.
+func TestWorkloadPlacementLeavesOutPodsThatEnded(t *testing.T) {
+	migrated := apiPod("api-migrate-x7k2p", false, 0, nil, nil)
+	migrated.Status.Phase = corev1.PodSucceeded
+	evicted := apiPod("api-7d9f4b-cccc", false, 0, nil, nil)
+	evicted.Status.Phase, evicted.Status.Reason = corev1.PodFailed, "Evicted"
+	elsewhere := apiPod("api-7d9f4b-bbbb", true, 0, nil, nil)
+	elsewhere.Spec.NodeName = "node-2"
+	objs := []runtime.Object{
+		apiDeployment("ghcr.io/bookstore/api:b7e9f21", 2),
+		apiPod("api-7d9f4b-aaaa", true, 0, nil, nil), elsewhere, migrated, evicted,
+	}
+	p := &workloadProbe{base: base{kind: kindWorkload, clients: newTestClients(objs, nil, nil)}}
+	out, _ := startProbe(t, p, testSpec("api", "namespace", "prod", "selector", "app=api"))
+	o := firstOK(t, out)
+	placement, _ := o.Detail["placement"].(map[string]map[string]int)
+	want := map[string]map[string]int{"node-1": {"pods": 1, "ready": 1}, "node-2": {"pods": 1, "ready": 1}}
+	if len(placement) != len(want) {
+		t.Fatalf("placement = %v", o.Detail["placement"])
+	}
+	for node, w := range want {
+		if got := placement[node]; got["pods"] != w["pods"] || got["ready"] != w["ready"] {
+			t.Errorf("%s = %v, want %v", node, got, w)
+		}
+	}
+}

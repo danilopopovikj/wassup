@@ -3,8 +3,10 @@ package pgprobe
 import (
 	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -67,6 +69,14 @@ type Stats struct {
 	Slots          []SlotRow
 	UsedBytes      float64
 	Waiting        []WaitingRow
+	// Transactions is how many transactions the database of the connection
+	// has finished since its statistics were reset, committed and rolled
+	// back. TxPerSecond is its growth between two rounds, which the probe
+	// fills in; TxRateKnown is false before the second round and after a
+	// reset.
+	Transactions float64
+	TxPerSecond  float64
+	TxRateKnown  bool
 }
 
 // StatsOptions is the part of the spec that shapes the observation.
@@ -272,6 +282,9 @@ func Observe(s Stats, opts StatsOptions) (map[string]float64, []model.Condition,
 		return m, conds, detail
 	}
 
+	if s.TxRateKnown {
+		m["rate"] = s.TxPerSecond
+	}
 	m["connections_used"] = s.Connections
 	if s.MaxConnections > 0 {
 		m["connections_max"] = s.MaxConnections
@@ -360,22 +373,24 @@ func replicationRow(pid *int64, name string, state *string, lag *float64) Replic
 		r.State = *state
 	}
 	if lag != nil {
-		r.LagBytes = *lag
+		r.LagBytes = max(*lag, 0)
 	}
 	return r
 }
 
 // slotRow builds a row from the nullable columns of pg_replication_slots.
+// A consumer that confirmed a position past the one the lag is measured
+// from is not behind: the distance is then below zero and reads as none.
 func slotRow(name, kind string, active bool, pid *int64, retained, lag *float64) SlotRow {
 	r := SlotRow{Name: name, Type: kind, Active: active, LagKnown: lag != nil}
 	if pid != nil {
 		r.ActivePID = *pid
 	}
 	if retained != nil {
-		r.RetainedBytes = *retained
+		r.RetainedBytes = max(*retained, 0)
 	}
 	if lag != nil {
-		r.LagBytes = *lag
+		r.LagBytes = max(*lag, 0)
 	}
 	return r
 }
@@ -468,6 +483,12 @@ func collectStats(ctx context.Context, conn reads) (Stats, error) {
 		return s, fmt.Errorf("pg_database_size: %w", err)
 	}
 
+	// Every role reads the counters of pg_stat_database.
+	if err := conn.QueryRow(ctx, "SELECT coalesce(sum(xact_commit + xact_rollback), 0)::float8 FROM pg_stat_database "+
+		"WHERE datname = current_database()").Scan(&s.Transactions); err != nil {
+		return s, fmt.Errorf("pg_stat_database: %w", err)
+	}
+
 	rows, err = conn.Query(ctx, "SELECT coalesce(state, ''), coalesce(wait_event, ''), left(query, 120), "+
 		"coalesce(extract(epoch FROM now() - query_start), 0)::float8 FROM pg_stat_activity "+
 		"WHERE backend_type = 'client backend' AND state = 'active' AND wait_event IS NOT NULL "+
@@ -489,8 +510,9 @@ func collectStats(ctx context.Context, conn reads) (Stats, error) {
 // statsAccess documents pg.stats.
 var statsAccess = probe.Access{
 	Kind:   "pg.stats",
-	Source: "pg_stat_activity, pg_stat_replication, pg_replication_slots and pg_database_size over a read-only connection",
-	Delivers: "connections_used, connections_max, active_connections, waiters, lag_bytes, wal_retained_bytes, used_bytes, disk_pct; " +
+	Source: "pg_stat_activity, pg_stat_database, pg_stat_replication, pg_replication_slots and pg_database_size over a read-only connection",
+	Delivers: "rate (transactions per second of the database of the connection, without the one each round of wassup ends with), " +
+		"connections_used, connections_max, active_connections, waiters, lag_bytes, wal_retained_bytes, used_bytes, disk_pct; " +
 		"on a replication edge (replica set): lag_bytes, streaming, wal_retained_bytes and ReplicationBroken/SlotInactive; " +
 		"detail: version, replicas, slots, top_waiting",
 	SpecFields: []string{"dsn_env", "host", "port", "user", "database", "sslmode", "password_env", "via", "replica", "disk_total_bytes", "interval"},
@@ -551,6 +573,8 @@ func (p *StatsProbe) Start(ctx context.Context, spec map[string]any, out chan<- 
 	every := tick(spec)
 	interval := probe.Dur(spec, "interval", every)
 	since := map[string]time.Time{}
+	var tx txCounter
+	server := c.server()
 	poll := func(rctx context.Context) probe.Observation {
 		o := probe.Observation{Target: tgt, Probe: p.Kind(), At: time.Now()}
 		conn, err := c.acquire(rctx)
@@ -558,6 +582,10 @@ func (p *StatsProbe) Start(ctx context.Context, spec map[string]any, out chan<- 
 			var s Stats
 			s, err = collect(rctx, conn)
 			if err == nil {
+				// The round that was just read ended with a commit of its own,
+				// as did the rounds of every other binding on this database.
+				s.TxPerSecond, s.TxRateKnown = tx.rate(s.Transactions, own.rounds(server), o.At)
+				own.add(server)
 				o.Metrics, o.Conditions, o.Detail = Observe(s, opts)
 				stamp(o.Conditions, since, o.At)
 				// The probe read what the role may see, so it is in order; the
@@ -575,6 +603,51 @@ func (p *StatsProbe) Start(ctx context.Context, spec map[string]any, out chan<- 
 	}
 	p.spawn(ctx, out, every, interval, c, poll)
 	return nil
+}
+
+// ownRounds counts, per database, the rounds the pg.stats bindings of this
+// process finished. Each ends with a commit, which the database counts as
+// a transaction like any other; a rate that kept them would never read
+// nothing on a database nobody else uses.
+type ownRounds struct {
+	mu sync.Mutex
+	n  map[string]float64
+}
+
+var own = &ownRounds{n: map[string]float64{}}
+
+func (o *ownRounds) add(server string) {
+	o.mu.Lock()
+	o.n[server]++
+	o.mu.Unlock()
+}
+
+func (o *ownRounds) rounds(server string) float64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.n[server]
+}
+
+// txCounter turns the transaction counter of two rounds into a rate.
+type txCounter struct {
+	count, own float64
+	at         time.Time
+}
+
+// rate returns the transactions per second since the round before, without
+// the ones wassup finished itself in between (own is how many it had
+// finished when count was read). It is not known on the first round, and
+// not after the counter went down, which is what a reset of the statistics
+// or a switch to another server does.
+func (t *txCounter) rate(count, own float64, at time.Time) (float64, bool) {
+	prev := *t
+	t.count, t.own, t.at = count, own, at
+	dt := at.Sub(prev.at).Seconds()
+	if prev.at.IsZero() || dt <= 0 || count < prev.count {
+		return 0, false
+	}
+	others := max(count-prev.count-(own-prev.own), 0)
+	return math.Round(others/dt*10) / 10, true
 }
 
 // stamp sets Since on each condition to the first time this probe saw that

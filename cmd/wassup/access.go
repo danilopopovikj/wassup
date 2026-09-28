@@ -26,6 +26,10 @@ type accessPlan struct {
 	// via: k8s.service/...; the port-forward is granted there and nowhere
 	// else.
 	ForwardNamespaces []string `json:"forward_namespaces,omitempty"`
+	// ScrapeNamespaces are the namespaces a k8s.scrape binding reads the
+	// metrics pages of pods in; a GET through the API server to a pod is
+	// granted there and nowhere else.
+	ScrapeNamespaces []string `json:"scrape_namespaces,omitempty"`
 	// LeftOut says what the probes could use and the account does not get.
 	LeftOut  []string `json:"left_out,omitempty"`
 	Manifest string   `json:"manifest"`
@@ -48,6 +52,7 @@ func buildAccess(b model.Bindings, name, namespace, duration string, logs bool) 
 		}
 	}
 	forward := map[string]bool{}
+	scrape := map[string]bool{}
 	leftOut := map[string]bool{}
 	each := func(specs []model.ProbeSpec) {
 		for _, s := range specs {
@@ -57,6 +62,9 @@ func buildAccess(b model.Bindings, name, namespace, duration string, logs bool) 
 			}
 			if ns := k8s.ViaNamespace(s.String("via")); ns != "" {
 				forward[ns] = true
+			}
+			if ns := k8s.ScrapeNamespace(s.Kind(), s); ns != "" {
+				scrape[ns] = true
 			}
 			switch s.Kind() {
 			case "k8s.node", "k8s.pvc":
@@ -82,6 +90,7 @@ func buildAccess(b model.Bindings, name, namespace, duration string, logs bool) 
 	}
 	p.Rules = mergeRules(verbs)
 	p.ForwardNamespaces = sortedSet(forward)
+	p.ScrapeNamespaces = sortedSet(scrape)
 	p.LeftOut = sortedSet(leftOut)
 	p.Manifest = accessManifest(p)
 	p.Commands = accessCommands(p)
@@ -137,8 +146,19 @@ func yamlRules(b *strings.Builder, rules []probe.Rule) {
 	}
 }
 
+// namespaceRole renders a Role in one namespace and its binding to the
+// account.
+func namespaceRole(b *strings.Builder, p accessPlan, suffix, ns string, rules []probe.Rule) {
+	fmt.Fprintf(b, "---\napiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: %s-%s\n  namespace: %s\n", p.Name, suffix, ns)
+	yamlRules(b, rules)
+	fmt.Fprintf(b, "---\napiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\nmetadata:\n  name: %s-%s\n  namespace: %s\n", p.Name, suffix, ns)
+	fmt.Fprintf(b, "roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: Role\n  name: %s-%s\n", p.Name, suffix)
+	fmt.Fprintf(b, "subjects:\n  - kind: ServiceAccount\n    name: %s\n    namespace: %s\n", p.Name, p.Namespace)
+}
+
 // accessManifest renders the account, the role of reads and its binding,
-// and one role per namespace for the port-forward.
+// and one role per namespace for the port-forward and for the metrics
+// pages of pods.
 func accessManifest(p accessPlan) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "apiVersion: v1\nkind: ServiceAccount\nmetadata:\n  name: %s\n  namespace: %s\n", p.Name, p.Namespace)
@@ -150,11 +170,10 @@ func accessManifest(p accessPlan) string {
 		fmt.Fprintf(&b, "subjects:\n  - kind: ServiceAccount\n    name: %s\n    namespace: %s\n", p.Name, p.Namespace)
 	}
 	for _, ns := range p.ForwardNamespaces {
-		fmt.Fprintf(&b, "---\napiVersion: rbac.authorization.k8s.io/v1\nkind: Role\nmetadata:\n  name: %s-forward\n  namespace: %s\n", p.Name, ns)
-		yamlRules(&b, k8s.ForwardRules())
-		fmt.Fprintf(&b, "---\napiVersion: rbac.authorization.k8s.io/v1\nkind: RoleBinding\nmetadata:\n  name: %s-forward\n  namespace: %s\n", p.Name, ns)
-		fmt.Fprintf(&b, "roleRef:\n  apiGroup: rbac.authorization.k8s.io\n  kind: Role\n  name: %s-forward\n", p.Name)
-		fmt.Fprintf(&b, "subjects:\n  - kind: ServiceAccount\n    name: %s\n    namespace: %s\n", p.Name, p.Namespace)
+		namespaceRole(&b, p, "forward", ns, k8s.ForwardRules())
+	}
+	for _, ns := range p.ScrapeNamespaces {
+		namespaceRole(&b, p, "scrape", ns, k8s.ScrapeRules())
 	}
 	return b.String()
 }
@@ -199,8 +218,9 @@ func accessCmd() *cobra.Command {
 the cluster, and nothing more: a ServiceAccount, a ClusterRole that can get,
 list and watch the resources those probes read, and, for bindings that reach
 a Service inside the cluster (via: k8s.service/...), a Role for the
-port-forward in that namespace only. Secrets, nodes/proxy and exec are never
-part of it.
+port-forward in that namespace only, and for bindings that read the metrics
+pages of pods (k8s.scrape), a Role for a GET to the pods of that namespace
+only. Secrets, nodes/proxy and exec are never part of it.
 
 It then prints the commands that create the account and write a kubeconfig
 with a token that expires. wassup runs none of them and contacts nothing.`,
@@ -217,7 +237,7 @@ with a token that expires. wassup runs none of them and contacts nothing.`,
 				fmt.Print(p.Manifest)
 				return nil
 			}
-			if len(p.Rules) == 0 && len(p.ForwardNamespaces) == 0 {
+			if len(p.Rules) == 0 && len(p.ForwardNamespaces) == 0 && len(p.ScrapeNamespaces) == 0 {
 				fmt.Println("no binding reads the cluster: no account is needed")
 				return nil
 			}

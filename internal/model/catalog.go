@@ -45,6 +45,12 @@ type TypeSpec struct {
 	Entry bool
 	// Container marks a type that hosts workloads placed by runs_on.
 	Container bool
+	// RateUnit is the unit the type labels its own rate in; "" is requests.
+	RateUnit string
+	// Work names the metrics that say how much work the type holds where it
+	// has no rate: a job that reports it is not running is idle, and known
+	// to be.
+	Work []string
 }
 
 // Catalog is the thirteen building block types plus custom.
@@ -60,7 +66,7 @@ var Catalog = map[string]TypeSpec{
 		{Name: "req/s", Short: "req", Metric: "rate", RateOnly: true},
 		{Name: "errors", Short: "err", Metric: "error_rate", Unit: "%"},
 		{Name: "cert", Metric: "cert_days", Unit: "d", Countdown: true},
-	}, Probes: []string{"k8s.ingress", "cert.tls"}, Entry: true, Notes: "Merges into lb box when both exist and user prefers"},
+	}, Probes: []string{"k8s.ingress", "cert.tls", "k8s.scrape"}, Entry: true, Notes: "Merges into lb box when both exist and user prefers"},
 	"node": {Type: "node", Lane: LaneMachines, Facets: []string{"NodeFacet"}, Gauges: []GaugeSpec{
 		{Name: "cpu", Metric: "cpu_pct"},
 		{Name: "ram", Metric: "mem_pct"},
@@ -73,7 +79,7 @@ var Catalog = map[string]TypeSpec{
 		{Name: "ram", Metric: "mem_pct"},
 		{Name: "restarts", Short: "rst", Metric: "restarts", RateOnly: true},
 	}, Probes: []string{"k8s.workload", "hatchet.health", "http.ping"}, Notes: "Deployment, StatefulSet or DaemonSet; one box per workload, not per pod. Worker fleets are the worker type"},
-	"backgroundworker": {Type: "backgroundworker", Lane: LaneCompute, Facets: []string{"BackgroundWorkerFacet", "WorkloadFacet"}, Gauges: []GaugeSpec{
+	"backgroundworker": {Type: "backgroundworker", RateUnit: "jobs/s", Work: []string{"active"}, Lane: LaneCompute, Facets: []string{"BackgroundWorkerFacet", "WorkloadFacet"}, Gauges: []GaugeSpec{
 		{Name: "workers", Short: "wrkr", Used: "workers_online", Max: "workers_total"},
 		{Name: "slots", Short: "slot", Used: "pool_used", Max: "pool_max"},
 		{Name: "ready", Short: "up", Used: "replicas_ready", Max: "replicas_desired"},
@@ -81,40 +87,40 @@ var Catalog = map[string]TypeSpec{
 		{Name: "ram", Metric: "mem_pct"},
 		{Name: "restarts", Short: "rst", Metric: "restarts", RateOnly: true},
 	}, Probes: []string{"hatchet.workers", "celery.worker", "k8s.workload"}, Notes: "A fleet of background workers (Celery, Hatchet); every slot busy with work queued reads as waiting"},
-	"scheduledjob": {Type: "scheduledjob", Lane: LaneCompute, Facets: []string{"ScheduledJobFacet"}, Gauges: []GaugeSpec{
+	"scheduledjob": {Type: "scheduledjob", RateUnit: "jobs/s", Work: []string{"active"}, Lane: LaneCompute, Facets: []string{"ScheduledJobFacet"}, Gauges: []GaugeSpec{
 		{Name: "running", Short: "run", Metric: "active", RateOnly: true},
 		{Name: "ok 24h", Short: "ok", Metric: "succeeded", RateOnly: true},
 		{Name: "failed", Short: "fail", Metric: "failed", RateOnly: true},
 	}, Probes: []string{"k8s.cronjob", "hatchet.workflow"}, Entry: true, Notes: "CronJobs, one-off jobs and Hatchet workflows"},
-	"queue": {Type: "queue", Lane: LaneCompute, Facets: []string{"QueueFacet"}, Gauges: []GaugeSpec{
+	"queue": {Type: "queue", RateUnit: "jobs/s", Work: []string{"depth"}, Lane: LaneCompute, Facets: []string{"QueueFacet"}, Gauges: []GaugeSpec{
 		{Name: "depth", Short: "dpth", Metric: "depth", RateOnly: true},
 		{Name: "oldest", Short: "old", Metric: "oldest_age_s", Unit: "s", RateOnly: true},
 		{Name: "consumers", Short: "cons", Metric: "consumers", RateOnly: true},
 	}, Probes: []string{"celery.queue", "redis.list", "amqp.queue", "hatchet.queue"}, Notes: "Depth is drawn as a growing pile"},
-	"cache": {Type: "cache", Lane: LaneData, Facets: []string{"CacheFacet"}, Gauges: []GaugeSpec{
+	"cache": {Type: "cache", RateUnit: "ops/s", Lane: LaneData, Facets: []string{"CacheFacet"}, Gauges: []GaugeSpec{
 		{Name: "mem", Metric: "mem_pct"},
 		{Name: "hits", Metric: "hit_rate", Unit: "%"},
 		{Name: "evicted", Short: "evic", Metric: "evictions", RateOnly: true},
 	}, Probes: []string{"redis.info"}, Notes: "Hit rate below threshold flips it to failing"},
-	"database": {Type: "database", Lane: LaneData, Facets: []string{"DatabaseFacet", "ReplicationFacet"}, Gauges: []GaugeSpec{
+	"database": {Type: "database", RateUnit: "tx/s", Lane: LaneData, Facets: []string{"DatabaseFacet", "ReplicationFacet"}, Gauges: []GaugeSpec{
 		{Name: "cpu", Metric: "cpu_pct"},
 		{Name: "ram", Metric: "mem_pct"},
 		{Name: "disk", Metric: "disk_pct"},
 		{Name: "conns", Short: "conn", Used: "connections_used", Max: "connections_max"},
 		{Name: "lag", Metric: "lag_bytes", Unit: "B", RateOnly: true},
-	}, Probes: []string{"cnpg.cluster", "cnpg.instance", "pg.stats"}, Notes: "Has roles: one primary, replicas; replication edges drawn between them"},
+	}, Probes: []string{"cnpg.cluster", "cnpg.instance", "pg.stats", "signoz.edge"}, Notes: "Has roles: one primary, replicas; replication edges drawn between them"},
 	"storage": {Type: "storage", Lane: LaneData, Facets: []string{"StorageFacet"}, Gauges: []GaugeSpec{
 		{Name: "used", Metric: "disk_pct"},
 		{Name: "size", Metric: "used_bytes", Unit: "B", RateOnly: true},
 		{Name: "objects", Short: "objs", Metric: "objects", RateOnly: true},
 		{Name: "iops", Metric: "iops", RateOnly: true},
 	}, Probes: []string{"k8s.pvc", "s3.bucket"}, Notes: "Volumes (k8s.pvc) and buckets (s3.bucket); a bucket shows its size and object count, and a fill gauge only when quota_bytes is set"},
-	"syncengine": {Type: "syncengine", Lane: LaneData, Facets: []string{"SyncEngineFacet", "ReplicationFacet"}, Gauges: []GaugeSpec{
+	"syncengine": {Type: "syncengine", Work: []string{"lag_bytes"}, Lane: LaneData, Facets: []string{"SyncEngineFacet", "ReplicationFacet"}, Gauges: []GaugeSpec{
 		{Name: "lag", Metric: "lag_bytes", Unit: "B", RateOnly: true},
 		{Name: "wal", Metric: "wal_retained_bytes", Unit: "B", RateOnly: true},
 		{Name: "latency", Short: "lat", Metric: "latency_ms", Unit: "ms", RateOnly: true},
 	}, Probes: []string{"electric.sync", "pg.stats"}, Notes: "A sync engine that follows the database's replication stream (Electric SQL); bind pg.stats with its slot name so an inactive slot shows on the replication edge"},
-	"observability": {Type: "observability", Lane: LaneSide, Facets: []string{"ObservabilityFacet", "ExternalFacet"}, Gauges: []GaugeSpec{
+	"observability": {Type: "observability", Work: []string{"ingest_rate"}, Lane: LaneSide, Facets: []string{"ObservabilityFacet", "ExternalFacet"}, Gauges: []GaugeSpec{
 		{Name: "ingest", Short: "ing", Metric: "ingest_rate", RateOnly: true},
 		{Name: "disk", Metric: "disk_pct"},
 	}, Probes: []string{"signoz.health"}, Notes: "Marked as the source of traffic data; if it fails, edges show no data, not idle"},
@@ -122,7 +128,7 @@ var Catalog = map[string]TypeSpec{
 		{Name: "latency", Short: "lat", Metric: "latency_ms", Unit: "ms", RateOnly: true},
 		{Name: "errors", Short: "err", Metric: "error_rate", Unit: "%"},
 		{Name: "timeouts", Short: "tmo", Metric: "timeout_rate", Unit: "%"},
-	}, Probes: []string{"signoz.edge", "http.ping"}, Notes: "GitHub, LLM providers, payment APIs, anything outside your control"},
+	}, Probes: []string{"http.ping"}, Notes: "GitHub, LLM providers, payment APIs, anything outside your control"},
 	"custom": {Type: "custom", Lane: LaneCompute, Facets: nil, Notes: "Free icon, no gauges"},
 }
 
@@ -167,6 +173,14 @@ func RateUnit(kind string) string {
 		return "conn/s"
 	}
 	return "/s"
+}
+
+// RateUnitOf returns the unit a component of a type labels its own rate in.
+func RateUnitOf(componentType string) string {
+	if u := Catalog[componentType].RateUnit; u != "" {
+		return u
+	}
+	return RateUnit("http")
 }
 
 // LaneOf returns the lane of a component, honoring the lane override.
