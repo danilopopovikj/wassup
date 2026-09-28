@@ -34,13 +34,16 @@ already taken so they are not re-litigated in every session.
 6. **Never fabricate.** A number the provider did not report is omitted
    (`facet.Num` unset), never written as 0. A component with no probe data is
    drawn unbound, never healthy. Idle, unbound, stale and no data must look
-   different at a glance. A probe that failed, timed out or may not read
+   different at a glance. Idle is a rate that was read at zero: what nothing
+   counts reads `no rate measured`. A probe that failed, timed out or may not read
    its source says nothing about the system: the element reads "no data"
    with the reason, and failing is only ever concluded from data that was
    read. A value the source hides from the role (NULL) is not known.
 7. **Layout is the user's.** Boxes never jump on their own. `layout.json`
    belongs to the user; code writes it only from a drag, a resize, a collapse
-   or a detail toggle, and `sync --apply` never touches it.
+   or a detail toggle, and `sync --apply` never touches it. What the
+   cluster does changes what a place shows, never where it is: a pod that
+   moves to another machine empties one place and fills another.
 8. **Extensible by type, not by special case.** New infrastructure comes in
    as a probe that fills a facet, and, only when it is a genuinely new shape,
    as a catalog type with a facet named after it. The renderer, the state
@@ -52,6 +55,11 @@ already taken so they are not re-litigated in every session.
 10. **Keep it simple.** Standard library first; a dependency needs a reason
     that survives a code review. No frameworks for probes, no plugin loaders,
     no reflection tricks. Small functions, doc comments that say why.
+11. **A wire can be followed.** Few corners, one arrowhead per box, right
+    for what is outside and down for the data. A joint is a tee and a
+    crossing is not. When a picture is hard to follow the layout is wrong,
+    not the reader, and the fix is in the layout or in the topology, never
+    in `layout.json`.
 
 ## One vocabulary
 
@@ -92,14 +100,26 @@ Probes (`internal/probe/*`) read a provider and fill a facet
 (`internal/state`) turns each joined view into exactly one state, a label, a
 severity, and computes the issue lens: lit path, cause, story. History
 (`internal/history`) keeps compact frames for the timeline, trends and
-baselines. Layout (`internal/layout`) places lanes (edge, machines, compute, data,
-side) and routes edges with an orthogonal A*. The machines row holds the
-nodes in topology order; a node is a frame, and every component that runs on
-it (`runs_on`, confirmed by the live pod placement) is drawn as an instance
-box inside it, so the picture shows which API and which worker sits on which
-server. Edges attach to the instances; the routes of one logical edge share
-a trunk (an api on three nodes reaches the database as one bundle), and a
-route never crosses a machine's header or rides along a frame border. The renderer (`internal/render`) paints a canvas and hosts the
+baselines. Layout (`internal/layout`) gives the picture one shape: the way
+in on top, one band per step; the machines that run the application in the
+middle; what runs on no machine below them; what holds data at the bottom,
+with the machines that hold nothing else; what is outside the system in a
+column on the right, the services of others first. A node is a frame, and
+every component that runs on it (`runs_on`) has a place inside it, on the
+same row of every machine, so the picture shows which API and which worker
+sits on which server. A place whose machine holds none of the component's
+pods is drawn as a faint name and no box, and nothing moves when a pod
+does. A machine is busy when what runs on it is. Wires are nets
+(`wire.go`): what leaves a component is one line beside the row of its
+copies, a trunk down the street (the room in the middle, at the same place
+in every band) or a spine beside the side column, and a last stretch into
+every box it reaches. Nets take lanes of their own, so two of them cross
+and never share a cell; how much room that takes is only known once they
+are drawn, so `Compute` places and wires until the room fits. The
+orthogonal A* of `router.go` draws what fits no net: a box somebody dragged
+out of its band, an edge with waypoints. A route never crosses a box or a
+machine's header. `skill/wassup/reference/picture.md` is the description for
+whoever writes a topology; change it with the layout. The renderer (`internal/render`) paints a canvas and hosts the
 Bubble Tea model. Discovery (`internal/discover`) reads Terraform, manifests,
 Helm values, `.env`, code and the cluster into evidence and proposes topology
 and bindings. The runtime (`internal/app`) wires it all and hot-reloads
@@ -116,8 +136,10 @@ and bindings. The runtime (`internal/app`) wires it all and hot-reloads
   port-forward, nothing else (`tuneConfig`). PostgreSQL statements go
   through `reads`, one SELECT or SHOW at a time, in a read-only transaction.
   Redis clients carry a hook that sends INFO, LLEN and LINDEX. HTTP clients
-  are built on `probe.ReadOnly` and send GET and HEAD. What is refused
-  returns `probe.ErrReadOnly` and never leaves the process. A new source
+  are built on `probe.ReadOnly` and send GET and HEAD; the client of a
+  source that answers a read to a POST (SigNoz: the sign-in and the query)
+  is built on `probe.ReadOnlyExcept` and sends those two and no other. What
+  is refused returns `probe.ErrReadOnly` and never leaves the process. A new source
   brings its own guard; `TestTheSourceHasNoWayToWrite` fails on a client
   built around one, on a new driver and on a program started without being
   listed there.
@@ -188,6 +210,16 @@ and bindings. The runtime (`internal/app`) wires it all and hot-reloads
 `internal/probe/facet`, the engine's label rules if the six states need a
 type-specific phrase, the render `primaryGauges` entry, a discovery mapping,
 the catalog doc, and a scenario.
+
+**Change the layout.** `internal/layout/wire_test.go` says what the picture
+promises (the bands, the rows of a machine, nets, no route through a box, a
+dragged box still reached). Add the promise there first. Then look at what
+you changed: `WASSUP_SHOTS=<dir> go test ./internal/render/ -run TestShots`
+writes every scenario as the window shows it and as a whole
+(`<name>-whole.svg`), and `wassup export --dir <.wassup>` draws a real
+system. A layout change that was not looked at is not done. Update
+`skill/wassup/reference/picture.md` and the screenshots in
+`docs/screenshots/` in the same change.
 
 **Change a label or the story.** Change the fixture's `expected.yaml` in
 `testdata/scenarios/gen.py` first, regenerate, watch it fail, then change

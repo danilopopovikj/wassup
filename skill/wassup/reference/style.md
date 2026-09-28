@@ -29,6 +29,18 @@ Markers outside the six states: `unbound, no probe data`, `no data, <reason>`
 when the probes of an element failed (`no data, connection refused`) and
 `stale, <last label>`. A failed probe is never a reason for `failing`.
 
+`idle` is a measurement: a rate was read, and it is zero. An element that is
+bound and in order while nothing counts what goes through it reads
+`no rate measured`. A job that says it is not running and a queue that says
+it is empty are idle without a rate.
+
+A rate is said in the unit a person would count in. Below one a second it
+is said by the minute, below one a minute by the hour: `1 req/min` and
+`15 req/h`, not `0.017 req/s` and never `0 req/s`.
+
+A place on a machine that holds none of a component's pods reads
+`<component>, none here`, faint and without a box, and no wire ends there.
+
 ## Story strip
 
 One sentence per hop, top to bottom, the cause last (first when the cause is

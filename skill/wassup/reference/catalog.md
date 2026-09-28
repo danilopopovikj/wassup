@@ -12,24 +12,32 @@ that ship for it. Use only these types. The older spellings `lb`, `db`, `job`,
 | `dns` | `DNSFacet`, `CertificateFacet` | edge | none | `dns.record` | Optional; shows the hostname and whether it resolves to the LB. Entry point. |
 | `firewall` | `FirewallFacet` | edge | rules count | `hcloud.firewall`, `terraform.state` | Drawn as a gate on the path; a blocked edge names the rule. Entry point. |
 | `loadbalancer` | `LoadBalancerFacet` | edge | connections, req/s, healthy targets | `hcloud.lb` | Shows which nodes are in rotation. Entry point. |
-| `ingress` | `IngressFacet`, `CertificateFacet` | edge | req/s, error rate, cert days left | `k8s.ingress`, `cert.tls` | Behind an `lb` it is a hop, not an entry. |
-| `node` | `NodeFacet` | machines | CPU, RAM, disk, pod count | `k8s.node`, `kubelet.stats` | An actual machine, drawn as a container in its own row: every component with `runs_on` naming it is drawn inside it, one instance box per node, with the pods and ready counts the workload probe saw there. Edges attach to the instances. |
+| `ingress` | `IngressFacet`, `CertificateFacet` | edge | req/s, error rate, cert days left | `k8s.ingress`, `cert.tls`, `k8s.scrape` | Behind an `lb` it is a hop, not an entry. |
+| `node` | `NodeFacet` | machines | CPU, RAM, disk, pod count | `k8s.node`, `kubelet.stats` | An actual machine, drawn as a container: every component with `runs_on` naming it is drawn inside it, on the same row of every machine, with the pods and ready counts the workload probe saw there. A machine that holds none of its pods shows its name and no box. A machine with nothing but data on it stands at the bottom. |
 | `workload` | `WorkloadFacet` | compute | replicas ready/desired, CPU, RAM, restarts | `k8s.workload`, `hatchet.health` | Deployment, StatefulSet or DaemonSet; one box per workload, not per pod. |
 | `backgroundworker` | `BackgroundWorkerFacet`, `WorkloadFacet` | compute | workers online/total, slots used/max, ready, CPU, RAM | `hatchet.workers`, `celery.worker`, `k8s.workload` | A fleet of background workers, whatever runs it. Every slot busy with work queued reads "waiting, all 24 slots busy, 850 queued"; a task past 10× the usual duration reads as stuck. |
 | `scheduledjob` | `ScheduledJobFacet` | compute | running, succeeded, failed last 24h | `k8s.cronjob`, `hatchet.workflow` | CronJobs, one-off jobs and Hatchet workflows. Entry point. |
 | `queue` | `QueueFacet` | compute | depth, oldest age, consumers | `celery.queue`, `amqp.queue`, `redis.list`, `hatchet.queue` | Depth is drawn as a growing pile. Celery on Redis binds `celery.queue`; Celery on RabbitMQ binds `amqp.queue` (management API); Hatchet queues bind `hatchet.queue`. |
 | `cache` | `CacheFacet` | data | memory used/max, hit rate, evictions | `redis.info` | Full memory with a low hit rate flips it to failing. |
-| `database` | `DatabaseFacet`, `ReplicationFacet` | data | CPU, RAM, disk, connections used/max, replication lag | `cnpg.cluster`, `cnpg.instance`, `pg.stats` | `roles: {primary, replicas}` creates one instance component each; replication edges go between them. |
+| `database` | `DatabaseFacet`, `ReplicationFacet` | data | CPU, RAM, disk, connections used/max, replication lag | `cnpg.cluster`, `cnpg.instance`, `pg.stats`, `signoz.edge` | `roles: {primary, replicas}` creates one instance component each; replication edges go between them. |
 | `storage` | `StorageFacet` | data | used/total, IOPS | `k8s.pvc`, `s3.bucket` | Volumes, buckets. |
 | `syncengine` | `SyncEngineFacet`, `ReplicationFacet` | data | replication lag, WAL retained, latency | `electric.sync`, `pg.stats` | A sync engine following the database's replication stream (Electric SQL). Bind `pg.stats` with `replica: <slot name>` on the component and on its replication edge, so an inactive slot shows as failing and the retained WAL as a trend on the primary. |
 | `observability` | `ObservabilityFacet` | side | ingest rate, retention disk | `signoz.health` | The source of traffic data; when it fails, edges show "no data", not idle. |
-| `external` | `ExternalFacet` | side | latency, error rate, timeouts | `signoz.edge`, `http.ping` | GitHub, LLM providers, payment APIs, anything outside your control. |
+| `external` | `ExternalFacet` | side | latency, error rate, timeouts | `http.ping` | GitHub, LLM providers, payment APIs, anything outside your control. |
 | `custom` | any | compute | none | any | Free icon, no gauges. |
 
 Common fields on every component: `id`, `type`, `label`, `group`, `lane`
 (override), `icon`, `runs_on` (workload to nodes), `roles` (db only),
 `notes` (free text for the detail panel), `owner` (a Slack handle shown on
 failing).
+
+A database with `roles` takes `runs_on` with one node per instance, the
+primary first, then the replicas in their order. Each instance is then drawn
+inside its machine, next to what else runs there, with the database's name
+and `primary` or `replica` beside it. With any other count of nodes nothing
+says which machine holds which instance, and the instances are drawn as a
+group in the data lane. The order is where the instances run today: after a
+switchover or a move it has to follow (the Remap workflow).
 
 Groups: `cloud`, `region`, `cluster`, `namespace`, `zone`. Groups draw as
 containers with a title and can be collapsed; a collapsed group shows the
@@ -42,9 +50,11 @@ errors, latency, queued work, pool use, a blocked or refused path) or, for
 label their rate in their own unit: req/s for http, grpc and external, tx/s for sql, jobs/s for
 queue, ops/s for cache, conn/s for tcp, bytes lag for replication.
 
-Lanes: `edge` (top), `compute`, `data` (bottom), `side` (right column for
-observability and externals). A component's lane comes from its type and can
-be overridden with `lane:`.
+Lanes: `edge` (top), `machines`, `compute`, `data` (bottom), `side` (the
+column on the right for what is outside the system). A component's lane
+comes from its type and can be overridden with `lane:`, which is rarely
+right: `picture.md` says where everything stands, how the wires run and
+what to write so that the diagram is easy to follow.
 
 Gauges are one shape everywhere: a bar with the value and its unit, amber at
 80 percent, red at 90 percent (per-type or per-component overrides live in
@@ -101,3 +111,10 @@ shape handshake, `pg.stats` with `replica: electric_slot_default` for the
 slot), a `replication` edge from the primary to it bound with the same
 `pg.stats` replica spec, and an `http` edge from the ingress to it for the
 shape traffic.
+
+A group whose boxes all stand in the side column (the services of others,
+the buckets of a cloud account) is framed there. The services of others
+come first, framed or not, then what watches the system, then the rest,
+then the other frames. A click on a title folds the frame into one box. A
+group that is part of another group is not framed on the side: its frame
+would stand away from the one it belongs in.

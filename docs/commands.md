@@ -61,7 +61,7 @@ more from you than the one before.
 | Tier | Needs | Probes |
 | --- | --- | --- |
 | 0 | the kubeconfig and the network | `k8s.*`, `cnpg.*`, `dns.record`, `cert.tls`, `http.ping`, `terraform.state`, `git.events` |
-| 1 | a token or a key for an API | `hatchet.*`, `electric.sync`, `hcloud.*`, `amqp.queue`, `s3.bucket`, `signoz.*` |
+| 1 | a token or a key for an API | `hatchet.*`, `electric.sync`, `hcloud.*`, `amqp.queue`, `s3.bucket`, `signoz.edge` |
 | 2 | a connection to a data store | `pg.stats`, `pg.pool`, `redis.info`, `redis.list`, `celery.queue` |
 
 An element whose bindings all belong to a later tier prints as `later`. It
