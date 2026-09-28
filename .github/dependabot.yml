@@ -1,0 +1,25 @@
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    # Wait a week after a release before proposing it, so a bad or
+    # compromised version is usually caught before it reaches this repo.
+    cooldown:
+      default-days: 7
+    groups:
+      kubernetes:
+        patterns: ["k8s.io/*"]
+      charm:
+        patterns: ["charm.land/*", "github.com/charmbracelet/*"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]

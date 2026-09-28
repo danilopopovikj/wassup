@@ -43,7 +43,7 @@ already taken so they are not re-litigated in every session.
    as a catalog type with a facet named after it. The renderer, the state
    engine and the story never learn a product name.
 9. **Deterministic and offline-testable.** Layout, routing, the engine and
-   discovery are pure functions over files. The ten (now twelve) recorded
+   discovery are pure functions over files. The twelve recorded
    scenarios are the acceptance suite; every behavior change is a fixture
    change first.
 10. **Keep it simple.** Standard library first; a dependency needs a reason
@@ -169,5 +169,8 @@ with a machine-readable list on validation errors, update the README table and
   while it is in progress.
 - Commit messages say what changed and why in prose; no model or tool names
   in code, comments or commit bodies.
+- Fixtures, examples, screenshots and docs are public. They use invented
+  names (the example system is `bookstore`) and reserved domains such as
+  `bookstore.example`, never the name or hostname of a real system.
 - Memory of decisions lives in this file. When a principle changes, change
   it here in the same commit.
