@@ -394,7 +394,25 @@ func (c *ctx) failingReason(comp model.Component, j *bind.Joined, th model.Thres
 		}
 	case "db":
 		if cnd, ok := has(model.CondReplicationBroken); ok {
-			return replicationPhrase(now, j, cnd)
+			return replicationPhrase(now, j, cnd, false)
+		}
+	case "sync":
+		if cnd, ok := has(model.CondReplicationBroken); ok {
+			return replicationPhrase(now, j, cnd, true)
+		}
+		if cnd, ok := has(model.CondNotReady); ok {
+			s := "not ready"
+			if cnd.Detail != "" {
+				s += ", " + cnd.Detail
+			}
+			return s
+		}
+		if cnd, ok := has(model.CondConnectionRefused); ok {
+			s := "not reachable"
+			if cnd.Detail != "" {
+				s += ", " + cnd.Detail
+			}
+			return s
 		}
 	case "lb":
 		if _, ok := has(model.CondTargetUnhealthy); ok {
@@ -457,8 +475,13 @@ func (c *ctx) restartPhrase(j *bind.Joined, cnd model.Condition) string {
 	return fmt.Sprintf(", %s %s in %s", Num(r), Plural(r, "restart", "restarts"), Dur(time.Duration(win*float64(time.Second))))
 }
 
-func replicationPhrase(now time.Time, j *bind.Joined, cnd model.Condition) string {
+// replicationPhrase reads "replica not streaming for 3 h, 40 GB WAL retained",
+// or, for a sync engine, "sync slot inactive for 2 h, 12 GB WAL retained".
+func replicationPhrase(now time.Time, j *bind.Joined, cnd model.Condition, sync bool) string {
 	s := "replica not streaming"
+	if sync {
+		s = "sync slot inactive"
+	}
 	if !cnd.Since.IsZero() {
 		s += " for " + Ago(now, cnd.Since)
 	}
@@ -513,14 +536,15 @@ func (c *ctx) waitingReason(comp model.Component, j *bind.Joined, th model.Thres
 	}
 	used, ok1 := metric(j, "pool_used")
 	max, ok2 := metric(j, "pool_max")
-	if ok1 && ok2 && max > 0 && used >= max {
-		if w := metricOr(j, "waiters", 0); w > 0 {
+	_, exhausted := model.HasCondition(j.Conditions, model.CondPoolExhausted)
+	if (ok1 && ok2 && max > 0 && used >= max) || exhausted {
+		if w := metricOr(j, "waiters", 0); w > 0 || exhausted {
+			if comp.Type == "workload" {
+				// a worker pool: every slot busy, work piling up behind it
+				return fmt.Sprintf("all %s slots busy, %s queued", Num(max), Num(w))
+			}
 			return fmt.Sprintf("%s queued, at the pool", Num(w))
 		}
-	}
-	if _, ok := model.HasCondition(j.Conditions, model.CondPoolExhausted); ok {
-		w := metricOr(j, "waiters", 0)
-		return fmt.Sprintf("%s queued, at the pool", Num(w))
 	}
 	if lag, ok := metric(j, "lag_bytes"); ok && lag > th.LagBytes {
 		return Bytes(lag) + " behind the primary"
@@ -686,7 +710,7 @@ func (c *ctx) evalEdge(e model.Edge) model.ElementState {
 		// Rule 3: failing.
 		if cnd, ok := model.HasCondition(es.Conditions, model.CondReplicationBroken); ok {
 			es.State = model.Failing
-			es.Label = "failing, " + replicationPhrase(c.in.Now, j, cnd)
+			es.Label = "failing, " + replicationPhrase(c.in.Now, j, cnd, dstComp.Type == "sync")
 			return es
 		}
 		if v, ok := es.Metrics["error_rate"]; ok && v > th.ErrorRatePct {
@@ -828,7 +852,7 @@ func (c *ctx) gauges(comp model.Component, es model.ElementState) []model.Gauge 
 				gauge.Value = fmt.Sprintf("%s/%s", Num(u), Num(m))
 				if m > 0 {
 					gauge.Pct = 100 * u / m
-					if g.Name == "targets" || g.Name == "ready" {
+					if g.Name == "targets" || g.Name == "ready" || g.Name == "workers" {
 						// fewer healthy is worse: invert the level logic
 						gauge.Level = "ok"
 						if u < m {
@@ -852,7 +876,7 @@ func (c *ctx) gauges(comp model.Component, es model.ElementState) []model.Gauge 
 				continue
 			}
 			gauge.Value = Num(v) + g.Unit
-			if g.Metric == "lag_bytes" {
+			if strings.HasSuffix(g.Metric, "_bytes") {
 				gauge.Value = Bytes(v)
 			}
 			gauge.Level = "ok"

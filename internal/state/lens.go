@@ -241,7 +241,19 @@ func (c *ctx) issues() []model.Issue {
 			p = append(p, e.To)
 			paths[i] = c.withEdges(p)
 		} else {
-			paths[i] = c.withEdges(c.pathTo(a.id, depth))
+			p := c.pathTo(a.id, depth)
+			// An affected entry point (a failing cron job or workflow) is a
+			// symptom of whatever it feeds: walk one hop forward to an
+			// affected consumer so the two light up as one issue.
+			if depth[a.id] == 0 {
+				for _, e := range c.t.Outgoing(a.id) {
+					if to := c.snap.Components[e.To]; to.Severity >= model.Warn {
+						p = append(p, e.To)
+						break
+					}
+				}
+			}
+			paths[i] = c.withEdges(p)
 		}
 	}
 	// Merge overlapping paths (union-find).
@@ -360,6 +372,15 @@ func (c *ctx) issues() []model.Issue {
 			}
 			if better {
 				cause, causeD, causeSev, causeGauge, causeMarker = id, d, es.Severity, redGauge, marker
+			}
+		}
+		// An edge is never blamed over the affected element it feeds: the
+		// engineer acts on the destination, the line only carries the symptom.
+		if cause != "" {
+			if e, isEdge := c.t.Edge(cause); isEdge {
+				if to := c.snap.Components[e.To]; lit[e.To] && to.Severity >= c.sevOf(cause) {
+					cause = e.To
+				}
 			}
 		}
 		// The affected element with the worst severity names the issue.
@@ -739,6 +760,11 @@ func (c *ctx) componentSentence(id string, es model.ElementState, path []string,
 			return "observability stopped receiving data; traffic rates on this diagram are unknown since then"
 		}
 		return ""
+	case "sync":
+		if es.State == model.Failing || es.State == model.Waiting {
+			return fmt.Sprintf("%s is %s, so clients stop receiving changes", label, es.Label)
+		}
+		return ""
 	case "external":
 		if es.State == model.Failing {
 			// Find a failing job upstream on the path.
@@ -888,9 +914,16 @@ func (c *ctx) edgeSentence(id string, es model.ElementState, path []string, i in
 		}
 		return fmt.Sprintf("%s is %s", from, es.Label)
 	case model.Failing:
-		if _, ok := model.HasCondition(es.Conditions, model.CondReplicationBroken); ok {
+		if cnd, ok := model.HasCondition(es.Conditions, model.CondReplicationBroken); ok {
 			s := fmt.Sprintf("%s has not been streaming", to)
-			if cnd, ok := model.HasCondition(es.Conditions, model.CondReplicationBroken); ok && !cnd.Since.IsZero() {
+			if toComp, ok := c.t.Component(e.To); ok && toComp.Type == "sync" {
+				slot := "the replication slot"
+				if cnd.Ref != "" {
+					slot = "the replication slot " + strings.TrimPrefix(cnd.Ref, "slot/")
+				}
+				s = fmt.Sprintf("%s of %s is inactive", slot, to)
+			}
+			if !cnd.Since.IsZero() {
 				s += " for " + Ago(c.in.Now, cnd.Since)
 			}
 			if wal, ok := es.Metrics["wal_retained_bytes"]; ok && wal > 0 {

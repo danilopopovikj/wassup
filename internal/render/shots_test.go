@@ -45,6 +45,8 @@ func TestShots(t *testing.T) {
 			m.panelMode = panelDetail
 			m.follow()
 		}},
+		{"11-hatchet-backlog", "11-hatchet-backlog", func(m *Model) { m.lensOn = true; m.selected = "hatchet-workers"; m.follow() }},
+		{"12-electric-slot", "12-electric-slot-inactive", func(m *Model) { m.lensOn = true; m.selected = "electric"; m.follow() }},
 		{"06-celery-findings", "06-celery-backlog-stuck-worker", func(m *Model) {
 			m.lensOn = true
 			m.selected = "worker-3"

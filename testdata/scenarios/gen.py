@@ -13,7 +13,7 @@ import json, os, copy
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # ---------------------------------------------------------------- topology
-def topology(workers=("worker",)):
+def topology(workers=("worker",), extras=False):
     comps = [
         {"id": "dns", "type": "dns", "label": "bookstore.example", "group": "hetzner"},
         {"id": "fw", "type": "firewall", "label": "Firewall", "group": "hetzner"},
@@ -40,6 +40,15 @@ def topology(workers=("worker",)):
         {"id": "signoz", "type": "observability", "label": "SigNoz", "group": "k3s"},
         {"id": "github", "type": "external", "label": "GitHub"},
     ]
+    if extras:
+        comps += [
+            {"id": "hatchet", "type": "workload", "label": "Hatchet engine", "group": "bookstore", "runs_on": ["node-1", "node-2"]},
+            {"id": "hatchet-queue", "type": "queue", "label": "Hatchet tasks", "group": "bookstore"},
+            {"id": "hatchet-workers", "type": "workload", "label": "Hatchet workers", "group": "bookstore", "runs_on": ["node-2", "node-3"]},
+            {"id": "billing", "type": "job", "label": "Billing workflow", "group": "bookstore"},
+            {"id": "hatchet-db", "type": "db", "label": "Hatchet DB", "group": "bookstore", "engine": "postgres"},
+            {"id": "electric", "type": "sync", "label": "Electric", "group": "bookstore", "runs_on": ["node-1"]},
+        ]
     edges = [
         {"from": "dns", "to": "lb", "kind": "tcp"},
         {"from": "lb", "to": "ingress", "kind": "http", "label": "requests"},
@@ -65,6 +74,16 @@ def topology(workers=("worker",)):
         {"from": "db-primary", "to": "db-r2", "kind": "replication"},
         {"from": "fw", "to": "signoz", "kind": "tcp", "label": "OTLP"},
     ]
+    if extras:
+        edges += [
+            {"from": "api", "to": "hatchet-queue", "kind": "queue", "label": "tasks"},
+            {"from": "hatchet-queue", "to": "hatchet-workers", "kind": "queue"},
+            {"from": "hatchet", "to": "hatchet-db", "kind": "sql"},
+            {"from": "hatchet-workers", "to": "db", "kind": "sql"},
+            {"from": "billing", "to": "hatchet-workers", "kind": "queue"},
+            {"from": "db-primary", "to": "electric", "kind": "replication", "label": "slot"},
+            {"from": "ingress", "to": "electric", "kind": "http", "label": "shapes"},
+        ]
     return {
         "version": 1,
         "name": "bookstore",
@@ -78,7 +97,7 @@ def topology(workers=("worker",)):
         "edges": edges,
     }
 
-def bindings(workers=("worker",)):
+def bindings(workers=("worker",), extras=False):
     comps = {
         "dns": [{"probe": "dns.record", "host": "bookstore.example"}],
         "fw": [{"probe": "hcloud.firewall", "name": "bookstore"}],
@@ -102,6 +121,19 @@ def bindings(workers=("worker",)):
     }
     for w in workers:
         comps[w] = [{"probe": "k8s.workload", "namespace": "bookstore", "selector": "app=" + w}]
+    if extras:
+        HATCHET = {"url": "http://hatchet-api.bookstore:8080", "token_env": "HATCHET_CLIENT_TOKEN", "tenant": "707d0855-80ab-4e1f-a156-f1c4546cbf52"}
+        comps.update({
+            "hatchet": [{"probe": "k8s.workload", "namespace": "bookstore", "selector": "app=hatchet-engine"},
+                        {"probe": "hatchet.health", **HATCHET}],
+            "hatchet-queue": [{"probe": "hatchet.queue", **HATCHET}],
+            "hatchet-workers": [{"probe": "k8s.workload", "namespace": "bookstore", "selector": "app=hatchet-worker"},
+                                {"probe": "hatchet.workers", "long_task": "10m", **HATCHET}],
+            "billing": [{"probe": "hatchet.workflow", "workflow": "billing", **HATCHET}],
+            "hatchet-db": [{"probe": "pg.stats", "dsn_env": "HATCHET_PG_DSN"}],
+            "electric": [{"probe": "electric.sync", "url": "http://electric.bookstore:3000", "secret_env": "ELECTRIC_SECRET", "table": "public.issues"},
+                         {"probe": "pg.stats", "dsn_env": "BOOKSTORE_PG_DSN", "replica": "electric_slot_default"}],
+        })
     SIGNOZ = "http://signoz.signoz:8080"
     def edge(frm, to):
         return {"probe": "signoz.edge", "url": SIGNOZ, "token_env": "SIGNOZ_TOKEN", "from": frm, "to": to}
@@ -116,10 +148,14 @@ def bindings(workers=("worker",)):
     }
     for w in workers:
         edges[w + "->github"] = [edge(w, "api.github.com")]
+    if extras:
+        edges["db-primary->electric"] = [{"probe": "pg.stats", "dsn_env": "BOOKSTORE_PG_DSN", "via": "k8s.workload/api", "replica": "electric_slot_default"}]
+        edges["ingress->electric"] = [edge("ingress", "electric")]
+        edges["api->hatchet-queue"] = [edge("api", "hatchet")]
     return {"version": 1, "components": comps, "edges": edges}
 
 # ------------------------------------------------------------- baseline obs
-def baseline(workers=("worker",)):
+def baseline(workers=("worker",), extras=False):
     """A healthy system at t=0."""
     o = []
     def rec(target, probe, metrics=None, conditions=None, events=None, detail=None, at=0):
@@ -163,6 +199,22 @@ def baseline(workers=("worker",)):
     rec("signoz", "signoz.health", {"ingest_rate": 2100, "disk_pct": 38})
     rec("fw->signoz", "hcloud.firewall", {"rate": 500})
     rec("github", "http.ping", {"latency_ms": 120, "error_rate": 0, "timeout_rate": 0})
+    if extras:
+        rec("hatchet", "k8s.workload", {"replicas_ready": 2, "replicas_desired": 2, "cpu_pct": 22, "mem_pct": 48, "restarts": 0})
+        rec("hatchet", "hatchet.health", {"latency_ms": 9, "ready": 1}, detail={"version": "v0.62.1"})
+        rec("hatchet-queue", "hatchet.queue", {"depth": 4, "pending": 0, "running": 12, "consumers": 6, "oldest_age_s": 3})
+        rec("hatchet-workers", "k8s.workload", {"replicas_ready": 6, "replicas_desired": 6, "cpu_pct": 44, "mem_pct": 57, "restarts": 0})
+        rec("hatchet-workers", "hatchet.workers", {"workers_online": 6, "workers_total": 6, "pool_used": 12, "pool_max": 24, "active": 12, "waiters": 4})
+        rec("billing", "hatchet.workflow", {"active": 0, "succeeded": 23, "failed": 0, "queued": 0}, detail={"schedule": "cron 0 * * * *", "cron": "0 * * * *"})
+        rec("hatchet-db", "pg.stats", {"cpu_pct": 18, "mem_pct": 40, "disk_pct": 35, "connections_used": 30, "connections_max": 200})
+        rec("electric", "electric.sync", {"latency_ms": 6, "ready": 1, "shape_ms": 40, "up_to_date": 1, "columns": 9}, detail={"status": "active", "table": "public.issues"})
+        rec("electric", "pg.stats", {"lag_bytes": 1024, "streaming": 1})
+        rec("api->hatchet-queue", "signoz.edge", {"rate": 8})
+        rec("hatchet-queue->hatchet-workers", "hatchet.queue", {"rate": 8})
+        rec("hatchet->hatchet-db", "signoz.edge", {"rate": 120, "error_rate": 0})
+        rec("hatchet-workers->db", "signoz.edge", {"rate": 30, "error_rate": 0})
+        rec("db-primary->electric", "pg.stats", {"lag_bytes": 1024, "streaming": 1})
+        rec("ingress->electric", "signoz.edge", {"rate": 40, "error_rate": 0})
     return o
 
 def override(obs, target, probe=None, **fields):
@@ -183,9 +235,9 @@ def drop(obs, pred):
 # ---------------------------------------------------------------- scenarios
 SCENARIOS = []
 
-def scenario(num, slug, name, symptom, start, duration, obs, expected, workers=("worker",)):
+def scenario(num, slug, name, symptom, start, duration, obs, expected, workers=("worker",), extras=False):
     SCENARIOS.append(dict(num=num, slug=slug, name=name, symptom=symptom, start=start,
-                          duration=duration, obs=obs, expected=expected, workers=workers))
+                          duration=duration, obs=obs, expected=expected, workers=workers, extras=extras))
 
 # 9.1 Deploy crash loop --------------------------------------------------
 obs = baseline()
@@ -405,6 +457,57 @@ scenario(10, "external-dependency-down", "External dependency down", "docs sync 
     "lens_on": True,
 })
 
+# 11 Hatchet backlog, every worker slot busy ---------------------------------
+obs = baseline(extras=True)
+override(obs, "hatchet-queue", "hatchet.queue", metrics={"depth": 850, "pending": 120, "running": 24, "consumers": 6, "oldest_age_s": 14 * 60, "growth_per_min": 30})
+override(obs, "hatchet-workers", "hatchet.workers", metrics={"workers_online": 6, "workers_total": 6, "pool_used": 24, "pool_max": 24, "active": 24, "waiters": 850, "running_s": 1500, "p95_s": 90},
+         conditions=[{"kind": "PoolExhausted", "ref": "workers/hatchet-worker", "since_s": -600, "detail": "all 24 slots busy"},
+                     {"kind": "TaskRunning", "ref": "task/3f9a", "since_s": -1500 + 120, "detail": "generate-invoice"}],
+         detail={"long_tasks": ["generate-invoice 25 min (tenant acme)"]})
+override(obs, "billing", "hatchet.workflow", metrics={"active": 0, "succeeded": 20, "failed": 3, "queued": 40},
+         conditions=[{"kind": "JobFailed", "ref": "run/8c1d", "since_s": -480 + 120, "detail": "step generate-invoice timed out after 900 s"}],
+         detail={"schedule": "cron 0 * * * *", "cron": "0 * * * *", "last_failure": "8c1d"})
+scenario(11, "hatchet-backlog", "Hatchet backlog, every worker slot busy", "invoices are late", "2026-09-27T17:00:00Z", 120, obs, {
+    "components": {
+        "hatchet-queue": {"state": "waiting", "label": "waiting, 850 queued, oldest 14 min"},
+        "hatchet-workers": {"state": "waiting", "label": "waiting, all 24 slots busy, 850 queued"},
+        "billing": {"state": "failing", "contains": "last run failed"},
+        "hatchet": {"state": "flowing"},
+    },
+    "cause": "hatchet-workers",
+    "story_contains": ["jobs are queued and growing, 850 queued, oldest 14 min",
+                       "Hatchet workers is waiting, all 24 slots busy, 850 queued",
+                       "the billing workflow job is failing"],
+}, extras=True)
+
+# 12 Electric replication slot inactive, primary disk filling -------------------
+obs = baseline(extras=True)
+override(obs, "electric", "electric.sync", metrics={"latency_ms": 7, "ready": 0},
+         conditions=[{"kind": "NotReady", "ref": "http://electric.bookstore:3000/v1/health", "since_s": -2 * 3600 + 120, "detail": "waiting for Postgres"}],
+         detail={"status": "waiting", "table": "public.issues"})
+override(obs, "electric", "pg.stats", metrics={"wal_retained_bytes": 12 * 2**30, "streaming": 0},
+         conditions=[{"kind": "ReplicationBroken", "ref": "slot/electric_slot_default", "since_s": -2 * 3600 + 120, "detail": "replication slot electric_slot_default inactive"},
+                     {"kind": "SlotInactive", "ref": "slot/electric_slot_default", "since_s": -2 * 3600 + 120}])
+override(obs, "db-primary->electric", metrics={"wal_retained_bytes": 12 * 2**30, "streaming": 0},
+         conditions=[{"kind": "ReplicationBroken", "ref": "slot/electric_slot_default", "since_s": -2 * 3600 + 120, "detail": "replication slot electric_slot_default inactive"},
+                     {"kind": "SlotInactive", "ref": "slot/electric_slot_default", "since_s": -2 * 3600 + 120}])
+override(obs, "ingress->electric", metrics={"rate": 40, "error_rate": 100, "p95_ms": 5000})
+override(obs, "db-primary", metrics={"cpu_pct": 30, "mem_pct": 52, "disk_pct": 78, "connections_used": 42, "connections_max": 100, "wal_retained_bytes": 12 * 2**30})
+scenario(12, "electric-slot-inactive", "Electric replication slot inactive", "the app stopped updating live", "2026-09-27T18:00:00Z", 120, obs, {
+    "components": {
+        "electric": {"state": "failing", "contains": "sync slot inactive for 2 h, 12 GB WAL retained"},
+        "db-primary": {"state": "flowing"},
+    },
+    "edges": {
+        "db-primary->electric": {"state": "failing", "label": "failing, sync slot inactive for 2 h, 12 GB WAL retained"},
+        "ingress->electric": {"state": "failing", "label": "failing, 100 percent errors"},
+    },
+    "cause": "electric",
+    "story_contains": ["the replication slot electric_slot_default of Electric is inactive for 2 h, 12 GB of WAL is retained on db-primary",
+                       "so clients stop receiving changes"],
+    "lens_on": True,
+}, extras=True)
+
 # ------------------------------------------------------------------- write
 def dump_yaml(v, indent=0):
     """Tiny YAML emitter for the plain structures used here."""
@@ -454,9 +557,9 @@ DEMO = os.path.normpath(os.path.join(HERE, "..", "..", "internal", "demo", "data
 def write_scenario(sc, d):
     os.makedirs(d, exist_ok=True)
     with open(os.path.join(d, "topology.yaml"), "w") as f:
-        f.write("# generated by testdata/scenarios/gen.py\n" + dump_yaml(topology(sc["workers"])) + "\n")
+        f.write("# generated by testdata/scenarios/gen.py\n" + dump_yaml(topology(sc["workers"], sc["extras"])) + "\n")
     with open(os.path.join(d, "bindings.yaml"), "w") as f:
-        f.write("# generated by testdata/scenarios/gen.py\n" + dump_yaml(bindings(sc["workers"])) + "\n")
+        f.write("# generated by testdata/scenarios/gen.py\n" + dump_yaml(bindings(sc["workers"], sc["extras"])) + "\n")
     with open(os.path.join(d, "scenario.yaml"), "w") as f:
         f.write(dump_yaml({"name": sc["name"], "symptom": sc["symptom"], "start": sc["start"],
                            "duration_s": sc["duration"], "tick_s": 5}) + "\n")

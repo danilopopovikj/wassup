@@ -1,0 +1,18 @@
+components:
+  electric:
+    state: failing
+    contains: "sync slot inactive for 2 h, 12 GB WAL retained"
+  db-primary:
+    state: flowing
+edges:
+  db-primary->electric:
+    state: failing
+    label: "failing, sync slot inactive for 2 h, 12 GB WAL retained"
+  ingress->electric:
+    state: failing
+    label: "failing, 100 percent errors"
+cause: electric
+story_contains:
+  - "the replication slot electric_slot_default of Electric is inactive for 2 h, 12 GB of WAL is retained on db-primary"
+  - so clients stop receiving changes
+lens_on: true

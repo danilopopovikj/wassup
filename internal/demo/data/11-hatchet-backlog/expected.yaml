@@ -1,0 +1,17 @@
+components:
+  hatchet-queue:
+    state: waiting
+    label: "waiting, 850 queued, oldest 14 min"
+  hatchet-workers:
+    state: waiting
+    label: "waiting, all 24 slots busy, 850 queued"
+  billing:
+    state: failing
+    contains: last run failed
+  hatchet:
+    state: flowing
+cause: hatchet-workers
+story_contains:
+  - "jobs are queued and growing, 850 queued, oldest 14 min"
+  - "Hatchet workers is waiting, all 24 slots busy, 850 queued"
+  - the billing workflow job is failing

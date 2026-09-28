@@ -1,0 +1,5 @@
+name: "Hatchet backlog, every worker slot busy"
+symptom: invoices are late
+start: "2026-09-27T17:00:00Z"
+duration_s: 120
+tick_s: 5

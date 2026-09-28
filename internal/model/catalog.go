@@ -66,17 +66,19 @@ var Catalog = map[string]TypeSpec{
 		{Name: "cpu", Metric: "cpu_pct"},
 		{Name: "ram", Metric: "mem_pct"},
 		{Name: "restarts", Short: "rst", Metric: "restarts", RateOnly: true},
-	}, Probes: []string{"k8s.workload"}, Notes: "Deployment, StatefulSet or DaemonSet; one box per workload, not per pod"},
+		{Name: "slots", Short: "slot", Used: "pool_used", Max: "pool_max"},
+		{Name: "workers", Short: "wrkr", Used: "workers_online", Max: "workers_total"},
+	}, Probes: []string{"k8s.workload", "hatchet.workers", "celery.worker", "hatchet.health"}, Notes: "Deployment, StatefulSet or DaemonSet; one box per workload, not per pod. Worker pools (Hatchet, Celery) add slots and workers gauges"},
 	"job": {Type: "job", Lane: LaneCompute, Gauges: []GaugeSpec{
 		{Name: "running", Short: "run", Metric: "active", RateOnly: true},
 		{Name: "ok 24h", Short: "ok", Metric: "succeeded", RateOnly: true},
 		{Name: "failed", Short: "fail", Metric: "failed", RateOnly: true},
-	}, Probes: []string{"k8s.cronjob"}, Entry: true, Notes: "CronJobs and one-off jobs"},
+	}, Probes: []string{"k8s.cronjob", "hatchet.workflow"}, Entry: true, Notes: "CronJobs, one-off jobs and Hatchet workflows"},
 	"queue": {Type: "queue", Lane: LaneCompute, Gauges: []GaugeSpec{
 		{Name: "depth", Short: "dpth", Metric: "depth", RateOnly: true},
 		{Name: "oldest", Short: "old", Metric: "oldest_age_s", Unit: "s", RateOnly: true},
 		{Name: "consumers", Short: "cons", Metric: "consumers", RateOnly: true},
-	}, Probes: []string{"celery.queue", "redis.list", "amqp.queue"}, Notes: "Depth is drawn as a growing pile"},
+	}, Probes: []string{"celery.queue", "redis.list", "amqp.queue", "hatchet.queue"}, Notes: "Depth is drawn as a growing pile"},
 	"cache": {Type: "cache", Lane: LaneData, Gauges: []GaugeSpec{
 		{Name: "mem", Metric: "mem_pct"},
 		{Name: "hits", Metric: "hit_rate", Unit: "%"},
@@ -93,6 +95,11 @@ var Catalog = map[string]TypeSpec{
 		{Name: "used", Metric: "disk_pct"},
 		{Name: "iops", Metric: "iops", RateOnly: true},
 	}, Probes: []string{"k8s.pvc", "s3.bucket"}, Notes: "Volumes, buckets"},
+	"sync": {Type: "sync", Lane: LaneData, Gauges: []GaugeSpec{
+		{Name: "lag", Metric: "lag_bytes", Unit: "B", RateOnly: true},
+		{Name: "wal", Metric: "wal_retained_bytes", Unit: "B", RateOnly: true},
+		{Name: "latency", Short: "lat", Metric: "latency_ms", Unit: "ms", RateOnly: true},
+	}, Probes: []string{"electric.sync", "pg.stats"}, Notes: "A sync engine that follows the database's replication stream (Electric SQL); bind pg.stats with its slot name so an inactive slot shows on the replication edge"},
 	"observability": {Type: "observability", Lane: LaneSide, Gauges: []GaugeSpec{
 		{Name: "ingest", Short: "ing", Metric: "ingest_rate", RateOnly: true},
 		{Name: "disk", Metric: "disk_pct"},
@@ -106,7 +113,7 @@ var Catalog = map[string]TypeSpec{
 }
 
 // CatalogOrder is the documented order of types.
-var CatalogOrder = []string{"dns", "firewall", "lb", "ingress", "node", "workload", "job", "queue", "cache", "db", "storage", "observability", "external", "custom"}
+var CatalogOrder = []string{"dns", "firewall", "lb", "ingress", "node", "workload", "job", "queue", "cache", "db", "storage", "sync", "observability", "external", "custom"}
 
 // GroupKinds are the allowed group kinds.
 var GroupKinds = []string{"cloud", "region", "cluster", "namespace", "zone"}

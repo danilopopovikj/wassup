@@ -14,8 +14,8 @@ func TestScenarios(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(dirs) != 10 {
-		t.Fatalf("want 10 scenarios, found %d", len(dirs))
+	if len(dirs) < 12 {
+		t.Fatalf("want the ten spec scenarios plus the Hatchet and Electric ones, found %d", len(dirs))
 	}
 	for _, d := range dirs {
 		d := d

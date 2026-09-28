@@ -1,0 +1,5 @@
+name: Electric replication slot inactive
+symptom: the app stopped updating live
+start: "2026-09-27T18:00:00Z"
+duration_s: 120
+tick_s: 5

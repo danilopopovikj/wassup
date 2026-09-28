@@ -42,13 +42,4 @@ func init() {
 		SpecFields: []string{"node", "kubeconfig", "context"},
 		Needs:      "RBAC get on nodes/proxy for the kubeconfig's identity",
 	}, "node")
-
-	probe.Stub(probe.Access{
-		Kind:   "amqp.queue",
-		Source: "the RabbitMQ management API (/api/queues/<vhost>/<queue>)",
-		Delivers: "depth (messages ready), oldest_age_s when the queue exposes head message timestamps, consumers, " +
-			"growth_per_min and rate (publish and deliver rates); detail: vhost, durable, unacked messages, memory",
-		SpecFields: []string{"url", "queue", "vhost", "user_env", "password_env"},
-		Needs:      "a management user with the monitoring tag; credentials from user_env and password_env",
-	}, "url", "queue")
 }

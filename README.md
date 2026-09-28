@@ -122,6 +122,17 @@ collapses it.
 
 Every command accepts `--json`.
 
+## Background work and sync engines
+
+Hatchet, Celery and Electric SQL map onto the catalog without new
+renderer code: Hatchet queues and workflows (`hatchet.queue`,
+`hatchet.workflow`), worker pools with slots and stuck tasks
+(`hatchet.workers`, `celery.worker`), Celery queues on Redis or RabbitMQ
+(`celery.queue`, `amqp.queue`), and Electric as a `sync` component whose
+replication slot is watched through `pg.stats` (`electric.sync`). Scenarios
+11 and 12 record a Hatchet backlog with every slot busy and an Electric slot
+gone inactive. The mapping is spelled out in `skill/wassup/reference/catalog.md`.
+
 ## The ten scenarios
 
 The build is accepted against ten recorded scenarios in

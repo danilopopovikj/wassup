@@ -40,7 +40,7 @@
         "additionalProperties": false,
         "properties": {
           "id": { "$ref": "#/$defs/id" },
-          "type": { "enum": ["dns", "firewall", "lb", "ingress", "node", "workload", "job", "queue", "cache", "db", "storage", "observability", "external", "custom"] },
+          "type": { "enum": ["dns", "firewall", "lb", "ingress", "node", "workload", "job", "queue", "cache", "db", "storage", "sync", "observability", "external", "custom"] },
           "label": { "type": "string" },
           "group": { "$ref": "#/$defs/id" },
           "lane": { "enum": ["edge", "compute", "data", "side"] },

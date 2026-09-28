@@ -13,7 +13,6 @@ func TestStubsRegistered(t *testing.T) {
 		"signoz.health": {"url"},
 		"s3.bucket":     {"bucket", "endpoint", "region"},
 		"kubelet.stats": {"node"},
-		"amqp.queue":    {"url", "queue"},
 	}
 	for kind, fields := range required {
 		a, ok := probe.AccessFor(kind)

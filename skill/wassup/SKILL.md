@@ -56,6 +56,9 @@ not about now.
      components automatically, do not declare them. Anything outside your
      control is `external`. The traffic source (SigNoz, Prometheus) is
      `observability`.
+   - Background work: Hatchet queues and workflows, Celery queues and
+     workers, and Electric SQL have a documented mapping at the end of
+     `reference/catalog.md`; follow it rather than inventing types.
    - Edges: `from`, `to`, `kind` in http, grpc, tcp, sql, replication, queue,
      cache, external. Include the load balancer to node edges if the LB
      health checks nodes, and firewall edges for paths a firewall gates.
