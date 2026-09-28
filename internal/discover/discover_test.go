@@ -62,7 +62,7 @@ func TestScanFindsTheStack(t *testing.T) {
 		{"hatchet-engine", "hatchet-db", "sql"},             // engine DSN
 		{"ingress", "api", "http"},                          // Ingress backend
 		{"ingress", "electric", "http"},                     // Ingress backend
-		{"app-bookstore-example", "ingress", "tcp"},             // host
+		{"app-bookstore-example", "ingress", "tcp"},         // host
 		{"bookstore-lb", "node-1", "tcp"},                   // terraform lb target
 		{"api", "stripe", "external"},                       // code URL
 		{"api", "bookstore-media-bucket", "tcp"},            // S3_BUCKET in the env, Bucket= in code
