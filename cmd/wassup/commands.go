@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -232,7 +234,11 @@ func probeCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			ctx, cancel := context.WithTimeout(context.Background(), timeout+2*time.Second)
+			// An interrupt ends the run the same way its timeout does, so the
+			// probes still release their connections in order.
+			sctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+			defer stop()
+			ctx, cancel := context.WithTimeout(sctx, timeout+2*time.Second)
 			defer cancel()
 			snap, err := rt.RunOnce(ctx, timeout)
 			if err != nil {

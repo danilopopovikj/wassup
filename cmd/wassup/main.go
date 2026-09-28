@@ -111,6 +111,7 @@ func runProgram(rt *app.Runtime, opts render.Options) error {
 	if err := rt.Start(ctx); err != nil {
 		return err
 	}
+	defer rt.Stop()
 	m := render.New(rt, opts)
 	p := tea.NewProgram(m, tea.WithContext(ctx))
 	_, err := p.Run()

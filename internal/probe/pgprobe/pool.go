@@ -258,6 +258,7 @@ func init() {
 // pool (database, user or "database/user" filter), via, interval.
 type PoolProbe struct {
 	h probe.Health
+	lifetime
 }
 
 // Kind implements probe.Probe.
@@ -299,12 +300,10 @@ func (p *PoolProbe) Start(ctx context.Context, spec map[string]any, out chan<- p
 	since := map[string]time.Time{}
 	poll := func(ctx context.Context) probe.Observation {
 		o := probe.Observation{Target: tgt, Probe: p.Kind(), At: time.Now()}
-		rctx, cancel := context.WithTimeout(ctx, roundTimeout)
-		defer cancel()
-		conn, err := c.acquire(rctx)
+		conn, err := c.acquire(ctx)
 		if err == nil {
 			var in PoolInput
-			in, err = collectPools(rctx, conn)
+			in, err = collectPools(ctx, conn)
 			if err == nil {
 				o.Metrics, o.Conditions, o.Detail = ObservePools(in, filter)
 				if via != "" {
@@ -328,6 +327,6 @@ func (p *PoolProbe) Start(ctx context.Context, spec map[string]any, out chan<- p
 		}
 		return o
 	}
-	go run(ctx, out, every, interval, c, poll)
+	p.spawn(ctx, out, every, interval, c, poll)
 	return nil
 }

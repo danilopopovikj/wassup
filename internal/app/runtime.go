@@ -79,7 +79,13 @@ type Runtime struct {
 
 	cancelProbes context.CancelFunc
 	probeCtx     context.Context
+	// releasing holds the probes a reload replaced that have not released
+	// their connection yet; Stop waits for them too.
+	releasing []<-chan struct{}
 }
+
+// stopGrace is how long Stop waits for the probes to release what they hold.
+const stopGrace = 3 * time.Second
 
 // New loads the directory and prepares a runtime. A validation error is
 // returned as *model.ValidationError with the partially loaded config kept.
@@ -253,6 +259,7 @@ func (r *Runtime) startProbes(ctx context.Context) {
 	}
 	pctx, cancel := context.WithCancel(ctx)
 	r.probeCtx, r.cancelProbes = pctx, cancel
+	r.releasing = r.releasingLocked()
 	r.inst = nil
 	tick := r.cfg.Topology.Settings.TickDuration()
 	if r.opts.Replay != nil {
@@ -310,6 +317,52 @@ func (r *Runtime) startProbes(ctx context.Context) {
 	for _, id := range ids {
 		for _, spec := range r.cfg.Bindings.Edges[id] {
 			start(id, spec)
+		}
+	}
+}
+
+// releasingLocked lists the probes that still hold something they have to
+// release in order (probe.Closer): the running ones and the ones a reload
+// replaced.
+func (r *Runtime) releasingLocked() []<-chan struct{} {
+	var out []<-chan struct{}
+	for _, done := range r.releasing {
+		select {
+		case <-done:
+		default:
+			out = append(out, done)
+		}
+	}
+	for _, in := range r.inst {
+		c, ok := in.p.(probe.Closer)
+		if !ok || in.err != nil {
+			continue
+		}
+		if done := c.Done(); done != nil {
+			out = append(out, done)
+		}
+	}
+	return out
+}
+
+// Stop ends the probes and waits, up to stopGrace, until those that hold a
+// connection have released it. Call it before the process exits: a
+// connection the exit cuts reaches the server as a reset, and a port-forward
+// or a tunnel on the way goes down with it.
+func (r *Runtime) Stop() {
+	r.mu.Lock()
+	if r.cancelProbes != nil {
+		r.cancelProbes()
+	}
+	waiting := r.releasingLocked()
+	r.mu.Unlock()
+	limit := time.NewTimer(stopGrace)
+	defer limit.Stop()
+	for _, done := range waiting {
+		select {
+		case <-done:
+		case <-limit.C:
+			return
 		}
 	}
 }
@@ -566,13 +619,15 @@ func sameBindings(a, b model.Bindings) bool {
 }
 
 // RunOnce starts the probes, waits until every bound element has reported or
-// the timeout passes, evaluates once and returns the snapshot. It never
+// the timeout passes, evaluates once and returns the snapshot. The probes
+// have stopped and released their connections when it returns. It never
 // writes state.
 func (r *Runtime) RunOnce(ctx context.Context, timeout time.Duration) (*model.Snapshot, error) {
 	r.opts.ReadOnly = true
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	r.startProbes(cctx)
+	defer r.Stop()
 	want := map[string]bool{}
 	for id := range r.cfg.Bindings.Components {
 		want[id] = true

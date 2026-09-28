@@ -23,6 +23,12 @@ type Probe interface {
 * The runtime builds one probe instance per binding and calls `Start` once.
   `Start` must return promptly and push observations from a goroutine until
   `ctx` is done. The runtime closes nothing; stop when `ctx` ends.
+* A probe that holds a connection releases it in order when `ctx` ends (for
+  PostgreSQL: the terminate message, sent on a context of its own, never on
+  the cancelled `ctx`) and implements `probe.Closer`, so the runtime waits
+  for the goodbye before the process exits. A connection that is cut instead
+  takes a port-forward or a tunnel down with it. Do not run a query on
+  `ctx` itself: cancelling it halfway cuts the connection just the same.
 * The runtime injects the bound element id as `spec["_target"]` and the tick
   as `spec["_tick"]` (a `time.Duration`). Set `Observation.Target` to that id
   unless the probe deliberately reports for other ids too (a load balancer

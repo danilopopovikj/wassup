@@ -52,6 +52,14 @@ type Probe interface {
 	Health() ProbeHealth
 }
 
+// Closer is implemented by a probe that holds something it has to release in
+// order, such as a database connection. Done is closed once the probe has
+// stopped and released it; the runtime waits for that, within a limit,
+// before the process exits.
+type Closer interface {
+	Done() <-chan struct{}
+}
+
 // Factory builds a fresh probe instance for one binding.
 type Factory func() Probe
 
