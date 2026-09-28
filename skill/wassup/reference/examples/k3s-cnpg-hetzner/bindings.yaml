@@ -97,14 +97,16 @@ edges:
     - probe: signoz.edge
       url: "http://signoz.signoz:8080"
       token_env: SIGNOZ_TOKEN
-      from: lb
-      to: ingress
+      metric: signoz_calls_total
+      match: { service.name: ingress, span.kind: SPAN_KIND_SERVER }
+      errors: { status.code: STATUS_CODE_ERROR }
   ingress->api:
     - probe: signoz.edge
       url: "http://signoz.signoz:8080"
       token_env: SIGNOZ_TOKEN
-      from: ingress
-      to: api
+      metric: signoz_calls_total
+      match: { service.name: api, span.kind: SPAN_KIND_SERVER }
+      errors: { status.code: STATUS_CODE_ERROR }
   api->db:
     - probe: pg.pool
       dsn_env: BOOKSTORE_PGBOUNCER_DSN
@@ -112,14 +114,16 @@ edges:
     - probe: signoz.edge
       url: "http://signoz.signoz:8080"
       token_env: SIGNOZ_TOKEN
-      from: api
-      to: postgres
+      metric: signoz_db_latency_count
+      match: { service.name: api, db.system: postgresql }
+      errors: { status.code: STATUS_CODE_ERROR }
   api->cache:
     - probe: signoz.edge
       url: "http://signoz.signoz:8080"
       token_env: SIGNOZ_TOKEN
-      from: api
-      to: redis
+      metric: signoz_db_latency_count
+      match: { service.name: api, db.system: redis }
+      errors: { status.code: STATUS_CODE_ERROR }
   db-primary->db-r1:
     - probe: pg.stats
       dsn_env: BOOKSTORE_PG_DSN
@@ -139,5 +143,6 @@ edges:
     - probe: signoz.edge
       url: "http://signoz.signoz:8080"
       token_env: SIGNOZ_TOKEN
-      from: worker
-      to: api.github.com
+      metric: signoz_external_call_latency_count
+      match: { service.name: worker, address: 'api\.github\.com.*' }
+      errors: { status.code: STATUS_CODE_ERROR }

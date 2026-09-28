@@ -29,6 +29,8 @@ RBAC rule), say what is missing and let the user add it.
 Reference material in this skill:
 
 - `reference/catalog.md`: the component types, lanes, gauges and edge kinds.
+- `reference/picture.md`: where the boxes stand, how the wires run, and what to
+  write in the topology so that the diagram is easy to follow.
 - `reference/probes.md`: every probe, its spec fields, what it needs, how to test it.
 - `reference/style.md`: the label and story language rules.
 - `reference/schema/*.json`: JSON Schemas for topology, bindings, findings, annotations, thresholds, layout.
@@ -56,7 +58,7 @@ how far you go, with the result of the last tier in front of them.
 | Tier | Needs | Probes |
 | --- | --- | --- |
 | 0 | the kubeconfig and the network, nothing else | `k8s.*`, `cnpg.*`, `dns.record`, `cert.tls`, `http.ping` |
-| 1 | a token or a key for an API | `hatchet.*`, `electric.sync`, `hcloud.*`, `amqp.queue`, `s3.bucket` |
+| 1 | a token or a key for an API | `hatchet.*`, `electric.sync`, `hcloud.*`, `amqp.queue`, `s3.bucket`, `signoz.edge` |
 | 2 | a connection to a data store | `pg.stats`, `pg.pool`, `redis.*`, `celery.queue` |
 
 1. **Ask three questions before you run anything.** Do not find the
@@ -122,13 +124,31 @@ how far you go, with the result of the last tier in front of them.
    (`reference/catalog.md`); the mapping for Hatchet, Celery and Electric is
    at the end of that file. One `workload` per Deployment, never per pod.
    A Postgres cluster is one `database` with `roles`; the instances come free.
-5. **Stop and show the picture to the user.** Run `wassup validate`, then
-   `wassup export`. It prints the paths of the rendered diagram (`.svg`,
-   `.png` when a converter is installed, `.txt`). Show the diagram itself:
-   print the `.txt` file in your reply and name the `.svg` so the user can
-   open it. A description of the diagram is not the diagram. Every box is
-   drawn unbound at this point; that is expected. Wait for the user's
-   answer before you write bindings.
+   **Write it for the picture** (`reference/picture.md`, read it now): the
+   diagram is drawn from this file, and what makes it hard to follow is
+   decided here.
+   - `runs_on` names every machine of the pool a component may run on, not
+     only where the proposal saw its pods. wassup shows where they are and
+     leaves the other places empty.
+   - No `lane:` unless something is outside the system and its type does
+     not say so. Queues and scheduled jobs are part of the system.
+   - The services of others go into one group of their own without a
+     parent (`kind: zone`, `label: Third parties`), the buckets of a cloud
+     account into another. Both are framed in the column on the right.
+   - Components in the order of the flow, the way in first, the data last.
+   - One edge per relation that carries work. No edge for a health check,
+     none from every workload to the log collector.
+   - Labels of 30 characters or less.
+5. **Stop and show the picture to the user.** Run `wassup validate` and
+   clear its warnings about the picture, then `wassup export`. It prints
+   the paths of the rendered diagram (`.svg`, `.png` when a converter is
+   installed, `.txt`). Look at it yourself first and go through the list
+   at the end of `reference/picture.md`; change the topology until every
+   line of it is true. Never write `layout.json` to tidy a picture. Then
+   show the diagram itself: print the `.txt` file in your reply and name
+   the `.svg` so the user can open it. A description of the diagram is not
+   the diagram. Every box is drawn unbound at this point; that is
+   expected. Wait for the user's answer before you write bindings.
 6. Bind one tier at a time. Take the bindings of the tier from
    `proposed/bindings.yaml` into `.wassup/bindings.yaml`, then run
    `wassup validate` and `wassup probe --tier <n> --json`, fix what is
@@ -168,12 +188,28 @@ how far you go, with the result of the last tier in front of them.
    - `k8s.ingress` does not read TLS secrets unless `read_tls_secret: true`
      is set; leave it off unless there is no cert-manager Certificate and
      the ingress host cannot be reached for a handshake.
-   - **Say what is not there yet.** `signoz.edge`, `signoz.health` and
-     `kubelet.stats` are documented and not implemented (`wassup probes`
-     says `spec only`). `signoz.edge` is where traffic rates come from, so
-     until it ships most edges read `no rate measured`. Tell the user this
-     before they take it for a fault; `wassup validate` warns about every
-     binding of such a probe.
+   - **Rates.** A box without a rate reads `no rate measured`, which is
+     not a fault and not idle: nothing counts what goes through it. Bind
+     what counts: `k8s.scrape` on the router or ingress controller and on
+     its edges (tier 0, the counters the pods keep themselves),
+     `signoz.edge` on the edges of every service that sends traces
+     (tier 1), `pg.stats` on a database. `reference/probes.md` has both
+     shapes. Write a `match`, run `wassup probe <id>`, and read `series`
+     in the detail. A `match` that finds nothing reports no rate, and
+     `label_values` lists the values there are.
+   - **Every service of others gets a rate.** Bind `signoz.edge` on the
+     edge from each component that calls it, and run `wassup probe <id>`
+     on every one of them: a binding that was not run is not known to
+     work. One that is called a few times an hour takes `window: 1h` and
+     reads `12 req/h`; one nobody called within the window reads `idle`,
+     because its series was counted within the last day. What stays at
+     `no rate measured` has a reason, and you say it: the caller sends no
+     traces, or the address was never called.
+   - **A service inside the cluster** that a tier 1 or 2 probe reads
+     (Hatchet, Redis, Electric, Flower) takes `via` as a database does.
+   - **Say what is not there yet.** `signoz.health` and `kubelet.stats` are
+     documented and not implemented (`wassup probes` says `spec only`);
+     `wassup validate` warns about every binding of such a probe.
 7. A read-only account, whenever the user asks whether wassup can harm the
    system or has only an admin kubeconfig: `wassup access` prints the
    smallest ServiceAccount and roles for the probes that are bound (get,

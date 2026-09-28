@@ -85,9 +85,19 @@ Source and docs: https://github.com/danilopopovikj/wassup
    entry in the unresolved hosts list.
 
 5. Write .wassup/topology.yaml, with labels in words someone who has never
-   used Kubernetes would say. Then run `wassup export` and show me the
-   rendered diagram, not a description of it, and wait for my answer
-   before you write bindings.
+   used Kubernetes would say, and write it for the picture: read
+   reference/picture.md of the skill first. The machines that run the
+   application stand in the middle with what runs on them inside, what
+   holds data at the bottom, the services of others in a group of their
+   own on the right. `runs_on` names every machine a component may run on.
+   No `lane:` on anything that is part of the system. Components in the
+   order of the flow, short labels, one edge per relation that carries
+   work. Then run `wassup validate` and `wassup export`, look at the
+   picture yourself, go through the list at the end of
+   reference/picture.md and change the topology until the diagram is easy
+   to follow. Never write layout.json to tidy it. Show me the rendered
+   diagram, not a description of it, and wait for my answer before you
+   write bindings.
 
 6. Write .wassup/bindings.yaml one tier at a time. After each tier run
    `wassup validate` and `wassup probe --tier <n>`, fix every unbound
@@ -100,12 +110,14 @@ Rules:
 - Bindings name the environment variables that hold credentials. The
   values go into .wassup/local.env, which git ignores, and I put them
   there: tell me the names, never read, print or copy a value.
-- A database inside the cluster is reached with
+- A database or a service inside the cluster is reached with
   `via: k8s.service/<namespace>/<service>:<port>`. Never ask me to run
   `kubectl port-forward`.
-- Tell me what is not implemented yet. Traffic rates come from a probe
-  that has not shipped, so edges read "no rate measured"; that is not a
-  fault.
+- A box that nothing counts reads "no rate measured"; that is not a fault.
+  Tell me which probe would count it (k8s.scrape, signoz.edge, pg.stats)
+  and what that probe needs. Every service of others should say a rate:
+  bind the edge from each component that calls it, run `wassup probe <id>`
+  on each, and name the reason for every one that still has none.
 - Never guess. A connection you cannot back with evidence is left out and
   reported, not drawn.
 - Commit .wassup/ only after I approve the result (its state/ directory is
