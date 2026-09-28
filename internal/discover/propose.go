@@ -369,8 +369,18 @@ func bindingsFor(c Candidate, opts ProposeOptions) []model.ProbeSpec {
 			out = append(out, model.ProbeSpec{"probe": "dns.record", "host": c.Addresses[0]})
 		}
 	case "storage":
-		if c.Kind == "PersistentVolumeClaim" {
+		switch {
+		case c.Kind == "PersistentVolumeClaim":
 			out = append(out, k8s("k8s.pvc", map[string]any{"name": c.Name}))
+		case c.Extra["bucket"] != "":
+			spec := model.ProbeSpec{"probe": "s3.bucket", "bucket": c.Extra["bucket"], "access_key_env": "AWS_ACCESS_KEY_ID", "secret_key_env": "AWS_SECRET_ACCESS_KEY"}
+			if ep := c.Extra["endpoint"]; ep != "" {
+				spec["endpoint"] = ep
+			}
+			if reg := c.Extra["region"]; reg != "" {
+				spec["region"] = reg
+			}
+			out = append(out, spec)
 		}
 	case "observability":
 		lower := strings.ToLower(c.Image + " " + c.Name)

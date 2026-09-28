@@ -67,7 +67,7 @@ var primaryGauges = map[string][]string{
 	"queue":            {"depth", "oldest"},
 	"cache":            {"mem", "hits"},
 	"database":         {"conns", "cpu", "disk"},
-	"storage":          {"used"},
+	"storage":          {"used", "size"},
 	"observability":    {"ingest", "disk"},
 	"external":         {"latency", "errors"},
 	"firewall":         {},

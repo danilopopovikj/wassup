@@ -37,7 +37,7 @@ var tfTypeMap = map[string]string{
 	"hcloud_load_balancer": "loadbalancer", "aws_lb": "loadbalancer", "aws_alb": "loadbalancer", "aws_elb": "loadbalancer", "google_compute_forwarding_rule": "loadbalancer", "google_compute_global_forwarding_rule": "loadbalancer", "digitalocean_loadbalancer": "loadbalancer", "azurerm_lb": "loadbalancer",
 	"hcloud_firewall": "firewall", "aws_security_group": "firewall", "google_compute_firewall": "firewall", "digitalocean_firewall": "firewall", "azurerm_network_security_group": "firewall",
 	"hcloud_server": "node", "aws_instance": "node", "google_compute_instance": "node", "digitalocean_droplet": "node", "azurerm_linux_virtual_machine": "node",
-	"hcloud_volume": "storage", "aws_ebs_volume": "storage", "aws_s3_bucket": "storage", "google_storage_bucket": "storage", "digitalocean_spaces_bucket": "storage", "azurerm_storage_account": "storage", "aws_efs_file_system": "storage",
+	"hcloud_volume": "storage", "aws_ebs_volume": "storage", "aws_s3_bucket": "storage", "minio_s3_bucket": "storage", "google_storage_bucket": "storage", "digitalocean_spaces_bucket": "storage", "azurerm_storage_account": "storage", "aws_efs_file_system": "storage",
 	"aws_db_instance": "database", "aws_rds_cluster": "database", "google_sql_database_instance": "database", "digitalocean_database_cluster": "database", "azurerm_postgresql_flexible_server": "database", "postgresql_database": "database",
 	"aws_elasticache_cluster": "cache", "aws_elasticache_replication_group": "cache", "google_redis_instance": "cache", "azurerm_redis_cache": "cache",
 	"aws_sqs_queue": "queue", "google_pubsub_topic": "queue", "aws_mq_broker": "queue",
@@ -293,6 +293,19 @@ func terraformResource(a *accumulator, r *tfResource, addr map[string]string) {
 	case "loadbalancer":
 		if r.Attrs["location"] != "" {
 			c.Extra["location"] = r.Attrs["location"]
+		}
+	case "storage":
+		// Buckets: the bucket name is what the probe needs; the resource
+		// type says which store it lives in.
+		switch {
+		case strings.HasSuffix(r.Type, "_s3_bucket") || r.Type == "digitalocean_spaces_bucket" || r.Type == "google_storage_bucket":
+			c.Extra["bucket"] = firstNonEmpty(r.Attrs["bucket"], r.Attrs["name"], r.Name)
+			if reg := r.Attrs["region"]; reg != "" {
+				c.Extra["region"] = reg
+			}
+			if r.Type == "digitalocean_spaces_bucket" && r.Attrs["region"] != "" {
+				c.Extra["endpoint"] = "https://" + r.Attrs["region"] + ".digitaloceanspaces.com"
+			}
 		}
 	}
 	added := a.add(c)

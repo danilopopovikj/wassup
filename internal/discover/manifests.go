@@ -330,6 +330,52 @@ var envHints = []struct {
 	{"GITHUB", "external", "external", "github"},
 	{"S3_ENDPOINT", "tcp", "storage", "object storage"},
 	{"AWS_S3", "tcp", "storage", "object storage"},
+	{"S3_BUCKET", "tcp", "storage", "object storage"},
+	{"BUCKET_NAME", "tcp", "storage", "object storage"},
+	{"MINIO", "tcp", "storage", "object storage"},
+	{"AWS_ENDPOINT_URL", "tcp", "storage", "object storage"},
+}
+
+// bucketEndpointEnv lists the env vars that name an S3-compatible endpoint,
+// in the order they are tried.
+var bucketEndpointEnv = []string{"S3_ENDPOINT", "S3_ENDPOINT_URL", "AWS_S3_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3", "AWS_ENDPOINT_URL", "MINIO_ENDPOINT"}
+
+// bucketRegionEnv lists the env vars that name the bucket's region.
+var bucketRegionEnv = []string{"S3_REGION", "AWS_S3_REGION_NAME", "AWS_REGION", "AWS_DEFAULT_REGION"}
+
+// literalEnv reports whether an env value is a plain literal, not a secret
+// or configmap reference.
+func literalEnv(val string) bool {
+	return val != "" && !strings.HasPrefix(val, "secret:") && !strings.HasPrefix(val, "configmap:")
+}
+
+// bucketLinks turns a literal bucket name in the environment (S3_BUCKET,
+// AWS_STORAGE_BUCKET_NAME, MEDIA_BUCKET) into a storage candidate the
+// workload writes to, carrying the endpoint and region when the same
+// environment names them.
+func bucketLinks(a *accumulator, c *Candidate, rel string, line int) {
+	for name, val := range c.Env {
+		upper := strings.ToUpper(name)
+		if !strings.Contains(upper, "BUCKET") || !literalEnv(val) || strings.ContainsAny(val, "/:$") {
+			continue
+		}
+		bc := Candidate{ID: model.SlugifyID(val + "-bucket"), Type: "storage", Label: val + " bucket", Name: val, Extra: map[string]string{"bucket": val},
+			Evidence: []Evidence{{Source: "manifest", File: rel, Line: line, Note: name + "=" + val + " in " + c.Kind + " " + c.Name}}}
+		for _, k := range bucketEndpointEnv {
+			if v := c.Env[k]; literalEnv(v) {
+				bc.Extra["endpoint"] = v
+				break
+			}
+		}
+		for _, k := range bucketRegionEnv {
+			if v := c.Env[k]; literalEnv(v) {
+				bc.Extra["region"] = v
+				break
+			}
+		}
+		a.add(bc)
+		a.link(Link{From: c.ID, To: bc.ID, Kind: "tcp", Label: "objects", Evidence: []Evidence{{Source: "manifest", File: rel, Line: line, Note: c.Name + " uses bucket " + val}}})
+	}
 }
 
 // envLinks derives links from a candidate's environment.
@@ -372,6 +418,7 @@ func envLinks(a *accumulator, c *Candidate, rel string, line int) {
 			}
 		}
 	}
+	bucketLinks(a, c, rel, line)
 	// Electric: the sync service's source database is a replication edge.
 	if c.Type == "syncengine" {
 		c.Extra["replication_slot"] = firstNonEmpty(c.Env["ELECTRIC_REPLICATION_SLOT"], "electric_slot_default")

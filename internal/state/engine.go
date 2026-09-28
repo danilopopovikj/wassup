@@ -420,6 +420,17 @@ func (c *ctx) failingReason(comp model.Component, j *bind.Joined, th model.Thres
 				return "no healthy targets"
 			}
 		}
+	case "storage":
+		if cnd, ok := has(model.CondNotReady); ok {
+			s := "not ready"
+			if cnd.Detail != "" {
+				s += ", " + cnd.Detail
+			}
+			return s
+		}
+		if _, ok := has(model.CondConnectionRefused); ok {
+			return "not reachable"
+		}
 	}
 	// Type-independent failing rules.
 	if _, ok := has(model.CondTargetUnhealthy); ok && comp.Type == "node" {

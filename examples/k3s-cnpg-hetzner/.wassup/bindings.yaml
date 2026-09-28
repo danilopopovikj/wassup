@@ -46,6 +46,14 @@ components:
   cache:
     - probe: redis.info
       addr: "redis.bookstore:6379"
+  media:
+    - probe: s3.bucket
+      bucket: bookstore-media
+      endpoint: "https://fsn1.your-objectstorage.com"
+      region: fsn1
+      access_key_env: HETZNER_S3_ACCESS_KEY
+      secret_key_env: HETZNER_S3_SECRET_KEY
+      quota_bytes: 1000000000000
   db:
     - probe: cnpg.cluster
       namespace: bookstore

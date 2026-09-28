@@ -90,6 +90,12 @@ workers (`queue`), workers → your database (`sql`), engine → hatchet db (`sq
 (`k8s.workload` plus `celery.worker` through Flower for online workers,
 concurrency and stuck tasks).
 
+**Object storage** (AWS S3, Hetzner Object Storage, MinIO, Spaces, R2): each
+bucket the system writes to is a `storage` component on `s3.bucket` (`bucket`,
+`endpoint` for anything but AWS, `region`, `access_key_env`, `secret_key_env`;
+`quota_bytes` when a fill gauge is wanted, `prefix` to size one folder of a
+big bucket). Edges: the workload or worker that writes to it (`tcp`).
+
 **Electric SQL**: one `syncengine` component (`electric.sync` for health and the
 shape handshake, `pg.stats` with `replica: electric_slot_default` for the
 slot), a `replication` edge from the primary to it bound with the same

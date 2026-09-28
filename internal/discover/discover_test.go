@@ -38,7 +38,7 @@ func TestScanFindsTheStack(t *testing.T) {
 		"api": "workload", "worker": "backgroundworker", "hatchet-worker": "backgroundworker", "hatchet-engine": "workload",
 		"redis": "cache", "electric": "syncengine", "bookstore-db": "database", "hatchet-db": "database",
 		"exports-queue": "queue", "default-queue": "queue", "billing": "scheduledjob", "ingress": "ingress",
-		"app-bookstore-example": "dns", "stripe": "external",
+		"app-bookstore-example": "dns", "stripe": "external", "bookstore-media-bucket": "storage",
 	}
 	for id, typ := range want {
 		if !hasComp(p, id, typ) {
@@ -65,6 +65,7 @@ func TestScanFindsTheStack(t *testing.T) {
 		{"app-bookstore-example", "ingress", "tcp"},             // host
 		{"bookstore-lb", "node-1", "tcp"},                   // terraform lb target
 		{"api", "stripe", "external"},                       // code URL
+		{"api", "bookstore-media-bucket", "tcp"},            // S3_BUCKET in the env, Bucket= in code
 	}
 	for _, e := range edges {
 		if !hasEdge(p, e[0], e[1], e[2]) {
@@ -77,6 +78,10 @@ func TestScanFindsTheStack(t *testing.T) {
 	}
 	if specs := p.Bindings.Components["electric"]; len(specs) == 0 || specs[0].Kind() != "electric.sync" || specs[0].String("table") != "issues" {
 		t.Errorf("electric binding %v", specs)
+	}
+	if specs := p.Bindings.Components["bookstore-media-bucket"]; len(specs) == 0 || specs[0].Kind() != "s3.bucket" ||
+		specs[0].String("bucket") != "bookstore-media" || specs[0].String("endpoint") != "https://fsn1.your-objectstorage.com" {
+		t.Errorf("bucket binding %v", specs)
 	}
 	if specs := p.Bindings.Edges["bookstore-db-primary->electric"]; len(specs) == 0 || specs[0].Kind() != "pg.stats" || specs[0].String("replica") != "electric_slot_default" {
 		t.Errorf("replication edge binding %v", specs)

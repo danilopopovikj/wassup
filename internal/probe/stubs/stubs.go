@@ -31,16 +31,6 @@ func init() {
 	}, "url")
 
 	probe.Stub(probe.Access{
-		Kind:   "s3.bucket",
-		Source: "an S3-compatible object store (Hetzner Object Storage, MinIO, AWS) via ListObjectsV2 and bucket metrics",
-		Delivers: "used_bytes, total_bytes when the endpoint exposes a quota, rate of PUT/GET requests when metrics exist; " +
-			"a failing HeadBucket marks the storage failing; detail: object count, last write, region",
-		SpecFields: []string{"bucket", "endpoint", "region", "access_key_env", "secret_key_env"},
-		Needs:      "read-only credentials (s3:ListBucket, s3:GetBucketLocation) in the environment variables named by access_key_env and secret_key_env",
-		Facets:     []string{facet.NameStorage},
-	}, "bucket", "endpoint", "region")
-
-	probe.Stub(probe.Access{
 		Kind:   "kubelet.stats",
 		Source: "the kubelet summary API (/stats/summary) of one node, through the API server proxy",
 		Delivers: "cpu_pct, mem_pct, disk_pct of the node root and image filesystems, iops and used_bytes per volume, " +

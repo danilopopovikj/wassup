@@ -21,6 +21,8 @@ var (
 	hatchetOnCronRe   = regexp.MustCompile(`on_crons\s*=\s*\[\s*["']([^"']+)["']`)
 	electricShapeRe   = regexp.MustCompile(`(?:/v1/shape\?[^"'` + "`" + `\s]*table=|useShape\([^)]*table:\s*|ShapeStream\([^)]*table:\s*|params:\s*\{\s*table:\s*)["']?([A-Za-z0-9_."]+)`)
 	externalURLRe     = regexp.MustCompile(`https?://([a-z0-9.-]+\.(?:com|io|net|org|dev|app|ai|co|cloud|run|sh))(?:[/:]|\b)`)
+	bucketNameRe      = regexp.MustCompile(`(?i)\b(?:bucket|bucket_name|bucketName)\s*[=:]\s*["']([a-z0-9][a-z0-9.-]{1,61}[a-z0-9])["']`)
+	objectClientRe    = regexp.MustCompile(`boto3\.(?:client|resource)\(\s*["']s3["']|new S3Client\(|\bMinio\(|from ["']@aws-sdk/client-s3["']|s3fs\.S3FileSystem\(|minio\.New\(`)
 	envRefRe          = regexp.MustCompile(`(?:os\.environ(?:\.get)?\(|os\.getenv\(|process\.env\.|env\(|ENV\[|System\.getenv\()\s*["']?([A-Z][A-Z0-9_]{3,})`)
 )
 
@@ -95,6 +97,17 @@ func scanCode(a *accumulator, path, rel string) {
 			}
 			if owner != "" {
 				a.link(Link{From: owner, To: "electric", Kind: "http", Label: "shapes", Evidence: []Evidence{ev(owner + " reads shape " + table)}})
+			}
+		}
+		if objectClientRe.MatchString(text) {
+			a.note("object storage client in %s:%d", rel, line)
+		}
+		for _, m := range bucketNameRe.FindAllStringSubmatch(text, -1) {
+			name := strings.ToLower(m[1])
+			bc := Candidate{ID: model.SlugifyID(name + "-bucket"), Type: "storage", Label: name + " bucket", Name: name, Extra: map[string]string{"bucket": name}, Evidence: []Evidence{ev("bucket " + name)}}
+			a.add(bc)
+			if owner != "" {
+				a.link(Link{From: owner, To: bc.ID, Kind: "tcp", Label: "objects", Evidence: []Evidence{ev(owner + " uses bucket " + name)}})
 			}
 		}
 		for _, m := range externalURLRe.FindAllStringSubmatch(text, -1) {

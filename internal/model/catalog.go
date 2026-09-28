@@ -102,8 +102,10 @@ var Catalog = map[string]TypeSpec{
 	}, Probes: []string{"cnpg.cluster", "cnpg.instance", "pg.stats"}, Notes: "Has roles: one primary, replicas; replication edges drawn between them"},
 	"storage": {Type: "storage", Lane: LaneData, Facets: []string{"StorageFacet"}, Gauges: []GaugeSpec{
 		{Name: "used", Metric: "disk_pct"},
+		{Name: "size", Metric: "used_bytes", Unit: "B", RateOnly: true},
+		{Name: "objects", Short: "objs", Metric: "objects", RateOnly: true},
 		{Name: "iops", Metric: "iops", RateOnly: true},
-	}, Probes: []string{"k8s.pvc", "s3.bucket"}, Notes: "Volumes, buckets"},
+	}, Probes: []string{"k8s.pvc", "s3.bucket"}, Notes: "Volumes (k8s.pvc) and buckets (s3.bucket); a bucket shows its size and object count, and a fill gauge only when quota_bytes is set"},
 	"syncengine": {Type: "syncengine", Lane: LaneData, Facets: []string{"SyncEngineFacet", "ReplicationFacet"}, Gauges: []GaugeSpec{
 		{Name: "lag", Metric: "lag_bytes", Unit: "B", RateOnly: true},
 		{Name: "wal", Metric: "wal_retained_bytes", Unit: "B", RateOnly: true},

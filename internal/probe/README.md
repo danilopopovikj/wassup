@@ -66,7 +66,7 @@ type accepts (`model.Catalog[type].Facets`), or an edge facet for edges.
 | `database` | `DatabaseFacet` | cpu/mem/disk, connections, lock waiters, size, lag, WAL retained, backup/vacuum | `pg.stats`, `cnpg.cluster` |
 | `syncengine` | `SyncEngineFacet` (+ `ReplicationFacet`) | ready, latency, shape handshake; slot, streaming, lag, WAL | `electric.sync`, `pg.stats` |
 | `cache` | `CacheFacet` | memory, hit rate, evictions, clients, full | `redis.info` |
-| `storage` | `StorageFacet` | used/total, iops | `k8s.pvc` |
+| `storage` | `StorageFacet` | used/total, iops, objects, last write | `k8s.pvc`, `s3.bucket` |
 | `observability` | `ObservabilityFacet` | ingest rate, disk, no data since | `signoz.health` |
 | `external` | `ExternalFacet` | latency, error and timeout rates, timing out since | `http.ping` |
 | edge | `TrafficFacet` | rate, errors, latency, queued work, pool use, blocked or refused path | `signoz.edge`, `pg.pool`, `hcloud.firewall`, `terraform.state` |
@@ -104,7 +104,7 @@ are 0–100, rates are per second unless the key says otherwise.
 | `cpu_pct`, `mem_pct`, `disk_pct` | utilisation | node, workload, db, cache, storage, observability |
 | `rate` | requests, transactions, jobs or operations per second | edges, lb, ingress |
 | `error_rate`, `timeout_rate` | percent of requests | edges, ingress, external |
-| `p95_ms`, `latency_ms` | latency | edges, external |
+| `p95_ms`, `latency_ms` | latency | edges, external, storage, syncengine |
 | `queued`, `waiters`, `pending` | units of work waiting at the destination | edges |
 | `depth`, `oldest_age_s`, `consumers`, `growth_per_min` | queue shape | queue |
 | `replicas_ready`, `replicas_desired`, `restarts`, `restart_window_s`, `killed`, `evicted` | pods | workload |
@@ -119,7 +119,7 @@ are 0–100, rates are per second unless the key says otherwise.
 | `ingest_rate` | observability intake | observability |
 | `rules` | firewall rules | firewall |
 | `rate_baseline` | the usual rate, when the source knows it | edges |
-| `used_bytes`, `total_bytes`, `iops` | volumes | storage |
+| `used_bytes`, `total_bytes`, `iops`, `objects` | volumes and buckets | storage |
 | `resolves` | 1 when DNS resolves to the expected target | dns |
 
 ## Conditions

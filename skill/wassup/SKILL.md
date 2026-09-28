@@ -74,7 +74,7 @@ not about now.
 5. **Stop and show the topology to the user** before finishing bindings.
 6. Move `proposed/bindings.yaml` to `.wassup/bindings.yaml` and complete
    it: the proposal names the env vars secrets must come from (`dsn_env`,
-   `token_env`, `secret_env`); confirm they exist where wassup runs. Run
+   `token_env`, `secret_env`, `access_key_env`); confirm they exist where wassup runs. Run
    `wassup validate`, then `wassup probe --once`, and fix every unbound
    element (wrong namespace, selector, RBAC, env var). Report what stays
    unbound and why.

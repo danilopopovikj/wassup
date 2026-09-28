@@ -11,7 +11,6 @@ func TestStubsRegistered(t *testing.T) {
 	required := map[string][]string{
 		"signoz.edge":   {"from", "to", "url"},
 		"signoz.health": {"url"},
-		"s3.bucket":     {"bucket", "endpoint", "region"},
 		"kubelet.stats": {"node"},
 	}
 	for kind, fields := range required {

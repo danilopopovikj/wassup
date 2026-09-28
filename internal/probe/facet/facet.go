@@ -707,19 +707,47 @@ func EmitCache(o *probe.Observation, c CacheFacet, now time.Time) {
 
 // ---------------------------------------------------------------- storage
 
-// StorageFacet is a volume or a bucket.
+// StorageFacet is a volume or a bucket. A volume knows its capacity; a
+// bucket usually does not (TotalBytes then comes from a configured quota, or
+// stays unset) but knows how many objects it holds and when it was last
+// written. NotReadyDetail is set when the store answers but cannot serve the
+// volume or bucket (it does not exist, is still provisioning); Unreachable
+// when nothing answers at all.
 type StorageFacet struct {
 	UsedBytes, TotalBytes Num
 	IOPS                  Num
+	Objects               Num
+	Latency               Num // ms, the store's answer time
+	LastWrite             time.Time
+
+	NotReadyDetail string
+	Unreachable    bool
+	UnreachDetail  string
+	Since          SinceFunc
 }
 
-// EmitStorage writes the volume into an observation.
+// EmitStorage writes the volume or bucket into an observation.
 func EmitStorage(o *probe.Observation, s StorageFacet, now time.Time) {
 	put(o, "used_bytes", s.UsedBytes)
 	put(o, "total_bytes", s.TotalBytes)
 	put(o, "iops", s.IOPS)
+	put(o, "objects", s.Objects)
+	put(o, "latency_ms", s.Latency)
 	if s.UsedBytes.Set && s.TotalBytes.Set && s.TotalBytes.V > 0 {
 		metrics(o)["disk_pct"] = 100 * s.UsedBytes.V / s.TotalBytes.V
+	}
+	if !s.LastWrite.IsZero() {
+		if o.Detail == nil {
+			o.Detail = map[string]any{}
+		}
+		o.Detail["last_write"] = s.LastWrite.UTC().Format(time.RFC3339)
+	}
+	if s.Unreachable {
+		cond(o, model.CondConnectionRefused, o.Target, sinceOf(s.Since, KeyTimeout, now), s.UnreachDetail)
+		return
+	}
+	if s.NotReadyDetail != "" {
+		cond(o, model.CondNotReady, o.Target, sinceOf(s.Since, KeyNotReady, now), s.NotReadyDetail)
 	}
 }
 

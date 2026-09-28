@@ -37,6 +37,15 @@ spec:
                   key: token
             - name: ELECTRIC_URL
               value: http://electric.bookstore:3000
+            - name: S3_ENDPOINT
+              value: https://fsn1.your-objectstorage.com
+            - name: S3_BUCKET
+              value: bookstore-media
+            - name: S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: object-storage
+                  key: access-key
 ---
 apiVersion: v1
 kind: Service

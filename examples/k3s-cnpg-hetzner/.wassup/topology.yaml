@@ -78,6 +78,11 @@ components:
     type: cache
     label: Redis
     group: bookstore
+  - id: media
+    type: storage
+    label: Media bucket
+    group: hetzner
+    notes: Hetzner Object Storage; uploads and exports
   - id: db
     type: database
     label: Database
@@ -152,3 +157,11 @@ edges:
     to: signoz
     kind: tcp
     label: OTLP
+  - from: api
+    to: media
+    kind: tcp
+    label: uploads
+  - from: worker
+    to: media
+    kind: tcp
+    label: exports
