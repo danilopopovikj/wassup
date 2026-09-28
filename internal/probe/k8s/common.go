@@ -197,6 +197,12 @@ func podReady(p *corev1.Pod) bool {
 	return false
 }
 
+// podEnded reports whether the pod ran to its end, well or badly, and does
+// not start again.
+func podEnded(p *corev1.Pod) bool {
+	return p.Status.Phase == corev1.PodSucceeded || p.Status.Phase == corev1.PodFailed
+}
+
 // podStart returns the pod's start time, or its creation time.
 func podStart(p *corev1.Pod) time.Time {
 	if p.Status.StartTime != nil && !p.Status.StartTime.IsZero() {

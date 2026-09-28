@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -157,10 +158,43 @@ func (t *Topology) Incoming(id string) []Edge {
 	return out
 }
 
-// Hosted returns the workloads that run on node id.
+// RoleNodes says which node holds each instance of a database with roles.
+// A database whose runs_on names one node per instance holds the primary on
+// the first and each replica on the next, in the order the topology lists
+// them. With any other count nothing says which node holds which instance,
+// and the database has no entry.
+func (t *Topology) RoleNodes() map[string]string {
+	out := map[string]string{}
+	for _, c := range t.Components {
+		if c.Type != "database" || c.Roles == nil || c.Roles.Primary == "" {
+			continue
+		}
+		ids := append([]string{c.Roles.Primary}, c.Roles.Replicas...)
+		if len(ids) != len(c.RunsOn) {
+			continue
+		}
+		for i, id := range ids {
+			out[id] = c.RunsOn[i]
+		}
+	}
+	return out
+}
+
+// Hosted returns the workloads that run on node id. A database whose
+// instances each have their node (see RoleNodes) is there as the instance
+// that node holds, not as the database.
 func (t *Topology) Hosted(nodeID string) []Component {
 	var out []Component
+	roleNode := t.RoleNodes()
 	for _, c := range t.Components {
+		if c.Roles != nil && roleNode[c.Roles.Primary] != "" {
+			for _, id := range append([]string{c.Roles.Primary}, c.Roles.Replicas...) {
+				if inst, ok := t.Component(id); ok && roleNode[id] == nodeID {
+					out = append(out, inst)
+				}
+			}
+			continue
+		}
 		for _, n := range c.RunsOn {
 			if n == nodeID {
 				out = append(out, c)
@@ -272,4 +306,39 @@ func SlugifyID(s string) string {
 		return out
 	}
 	return "x"
+}
+
+// longLabel is where a label begins to cost: a box is as wide as its label,
+// and the boxes of a machine are as wide as the widest of them.
+const longLabel = 32
+
+// PictureHints says what in a topology keeps the diagram from drawing
+// clean. None of it is an error: the diagram draws either way.
+func (t *Topology) PictureHints() []string {
+	var out []string
+	machines := false
+	for _, c := range t.Components {
+		if c.Type == "node" {
+			machines = true
+		}
+	}
+	for _, c := range t.Components {
+		spec, known := Catalog[c.Type]
+		if !known {
+			continue
+		}
+		if Lane(c.Lane) == LaneSide && spec.Lane != LaneSide && c.Type != "storage" {
+			out = append(out, fmt.Sprintf("%s stands in the side column (lane: side), among what is outside the system; without lane a %s stands with the system", c.ID, c.Type))
+		}
+		switch c.Type {
+		case "workload", "backgroundworker", "ingress":
+			if machines && len(c.RunsOn) == 0 && Lane(c.Lane) != LaneSide {
+				out = append(out, fmt.Sprintf("%s runs on no machine: with runs_on naming the machines it may run on, it is drawn inside them", c.ID))
+			}
+		}
+		if n := len([]rune(c.DisplayLabel())); n > longLabel {
+			out = append(out, fmt.Sprintf("%s has a label of %d characters, and a box is as wide as its label; what does not name it belongs in notes", c.ID, n))
+		}
+	}
+	return out
 }

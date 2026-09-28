@@ -204,6 +204,17 @@ func failed(stopping context.Context, h *probe.Health, o *probe.Observation, err
 	}
 }
 
+// server names the database the connection reaches, the same for every
+// binding that reaches it: the tunnel or the host and port, and the
+// database.
+func (c *connector) server() string {
+	at := c.via
+	if at == "" && c.cfg != nil {
+		at = net.JoinHostPort(c.cfg.Host, strconv.Itoa(int(c.cfg.Port)))
+	}
+	return at + "/" + c.database()
+}
+
 // database returns the database name of the connection, for messages and
 // validation.
 func (c *connector) database() string { return c.cfg.Database }

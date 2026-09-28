@@ -3,14 +3,20 @@ package state
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 )
 
 // Num formats a count the way the diagram speaks: 38, 1.2k, 2.4k, 3.1M.
+// What is less than one keeps two digits that say something and never
+// reads 0; a rate is said with Rate, which changes the unit instead.
 func Num(v float64) string {
 	av := math.Abs(v)
 	switch {
+	case av > 0 && av < 0.95:
+		digits := 1 - int(math.Floor(math.Log10(av)))
+		return strings.TrimRight(strings.TrimRight(strconv.FormatFloat(v, 'f', min(digits, 9), 64), "0"), ".")
 	case av >= 1e9:
 		return trim(fmt.Sprintf("%.1fG", v/1e9))
 	case av >= 1e6:
@@ -21,6 +27,21 @@ func Num(v float64) string {
 		return fmt.Sprintf("%.0f", v)
 	}
 	return trim(fmt.Sprintf("%.1f", v))
+}
+
+// Rate says how much goes through in a unit of time, in the unit a person
+// would count in: what happens less than once a second is said by the
+// minute, and less than once a minute by the hour. A text message every
+// four minutes reads "15 req/h", which says more than "0.0042 req/s".
+func Rate(v float64, unit string) string {
+	base, ok := strings.CutSuffix(unit, "/s")
+	if av := math.Abs(v); ok && av > 0 && av < 0.95 {
+		if av*60 >= 0.95 {
+			return Num(v*60) + " " + base + "/min"
+		}
+		return Num(v*3600) + " " + base + "/h"
+	}
+	return Num(v) + " " + unit
 }
 
 func trim(s string) string {

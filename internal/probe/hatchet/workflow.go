@@ -27,9 +27,9 @@ var workflowAccess = probe.Access{
 	Kind:   KindWorkflow,
 	Source: "the Hatchet REST API: the workflow list, per-workflow task metrics, the latest workflow runs and the cron triggers",
 	Delivers: "succeeded, failed, active, queued, cancelled over the window, running_s; JobFailed when the latest finished run failed, " +
-		"JobRunning while a run is running; a job event per failed run; detail: schedule, cron, last_success, last_failure, workflow_id",
+		"JobRunning while a run is running; a job event per failed run; detail: schedule, cron, last_success, last_failure, workflow_id, url, via",
 	SpecFields:  withFields("workflow", "window"),
-	Needs:       "a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token",
+	Needs:       "a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token" + viaNeeds,
 	Implemented: true,
 	Tier:        probe.TierToken,
 	Facets:      []string{facet.NameScheduledJob},
@@ -39,11 +39,12 @@ func init() {
 	probe.Register(workflowAccess, func() probe.Probe { return &WorkflowProbe{} })
 }
 
-// WorkflowProbe is hatchet.workflow, bound to a job component. Spec: url and
-// workflow (required), token_env, tenant, interval, timeout, window (default
-// 24h).
+// WorkflowProbe is hatchet.workflow, bound to a job component. Spec:
+// workflow and url (required, url unless via names a tunnel), token_env,
+// tenant, interval, timeout, via, window (default 24h).
 type WorkflowProbe struct {
 	h probe.Health
+	probe.Lifetime
 }
 
 // workflowState is what one WorkflowProbe carries between polls.
@@ -102,8 +103,10 @@ func (p *WorkflowProbe) Start(ctx context.Context, spec map[string]any, out chan
 		p.h.Set(probe.HealthFailed, err.Error())
 		return err
 	}
-	go run(ctx, out, st.cfg.tick, st.cfg.interval, func(ctx context.Context) probe.Observation {
-		return p.poll(ctx, st)
+	p.Go(func() {
+		run(ctx, out, st.cfg.tick, st.cfg.interval, st.c, &p.h, func(ctx context.Context) probe.Observation {
+			return p.poll(ctx, st)
+		})
 	})
 	return nil
 }
@@ -147,6 +150,7 @@ func (p *WorkflowProbe) poll(ctx context.Context, st *workflowState) probe.Obser
 			"window":      st.window.String(),
 		},
 	}
+	st.cfg.noteVia(o.Detail)
 
 	var problems []string
 	runs, err := st.c.runs(ctx, runQuery{

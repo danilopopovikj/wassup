@@ -9,7 +9,6 @@ import (
 
 func TestStubsRegistered(t *testing.T) {
 	required := map[string][]string{
-		"signoz.edge":   {"from", "to", "url"},
 		"signoz.health": {"url"},
 		"kubelet.stats": {"node"},
 	}

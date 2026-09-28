@@ -7,7 +7,7 @@ import (
 )
 
 func TestRegistered(t *testing.T) {
-	for _, kind := range []string{kindWorkload, kindNode, kindCronJob, kindPVC, kindIngress, kindCNPGCluster, kindCNPGInstance} {
+	for _, kind := range []string{kindWorkload, kindNode, kindCronJob, kindPVC, kindIngress, kindCNPGCluster, kindCNPGInstance, kindScrape} {
 		a, ok := probe.AccessFor(kind)
 		if !ok || !a.Implemented || len(a.SpecFields) == 0 || a.Needs == "" {
 			t.Errorf("%s: access = %+v (ok %v)", kind, a, ok)

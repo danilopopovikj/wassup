@@ -11,17 +11,6 @@ import (
 
 func init() {
 	probe.Stub(probe.Access{
-		Kind:   "signoz.edge",
-		Source: "SigNoz's ClickHouse-backed query API over the traces between two services",
-		Delivers: "for the edge from->to: rate (calls per second), error_rate, timeout_rate, p95_ms and rate_baseline " +
-			"from the service map spans of the last minute; detail: the top failing operations",
-		SpecFields: []string{"from", "to", "url", "token_env", "window"},
-		Needs:      "a SigNoz API key in the environment variable named by token_env with read access to the query service",
-		Facets:     []string{facet.NameTraffic},
-		Tier:       probe.TierToken,
-	}, "from", "to", "url")
-
-	probe.Stub(probe.Access{
 		Kind:   "signoz.health",
 		Source: "SigNoz's own health and ingestion metrics (otel-collector, query-service, ClickHouse)",
 		Delivers: "ingest_rate (spans and metrics per second), disk_pct of the ClickHouse volume; " +

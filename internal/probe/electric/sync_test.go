@@ -19,8 +19,8 @@ func newSync() (*Sync, time.Time) {
 	clock := time.Date(2026, 9, 28, 12, 0, 0, 0, time.UTC)
 	p := &Sync{
 		now:    func() time.Time { return clock },
-		client: newClient(2 * time.Second),
-		live:   newClient(300 * time.Millisecond),
+		client: newClient(2*time.Second, nil),
+		live:   newClient(300*time.Millisecond, nil),
 	}
 	return p, clock
 }

@@ -453,10 +453,13 @@ func clusterInfoFor(context string) k8s.ClusterInfo {
 
 func TestValidateNamesTheProbesThatAreNotImplemented(t *testing.T) {
 	got := strings.Join(notImplemented(model.Bindings{
-		Components: map[string][]model.ProbeSpec{"api": {{"probe": "k8s.workload"}}},
+		Components: map[string][]model.ProbeSpec{"api": {{"probe": "k8s.workload"}}, "signoz": {{"probe": "signoz.health"}}},
 		Edges:      map[string][]model.ProbeSpec{"api->db": {{"probe": "signoz.edge"}}},
 	}), "\n")
-	for _, want := range []string{"api->db: probe signoz.edge is not implemented", "no rate measured", "not a fault"} {
+	if strings.Contains(got, "signoz.edge") {
+		t.Errorf("a probe that ships is not named:\n%s", got)
+	}
+	for _, want := range []string{"signoz: probe signoz.health is not implemented", "not a fault"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("warnings lack %q:\n%s", want, got)
 		}
@@ -567,5 +570,27 @@ func TestDiscoverReadsOneEnvironment(t *testing.T) {
 	}
 	if _, _, err := scanRepo(t.Context(), scanOptions{Repo: repo, NoCluster: true, Environment: "qa"}); err == nil || !strings.Contains(err.Error(), "production") {
 		t.Errorf("an unknown environment lists the known ones: %v", err)
+	}
+}
+
+func TestAccessGrantsTheMetricsPagesWhereTheyAreRead(t *testing.T) {
+	b := model.Bindings{Edges: map[string][]model.ProbeSpec{"router->api": {{
+		"probe": "k8s.scrape", "namespace": "edge", "selector": "app=router", "port": 9100, "metric": "router_requests_total",
+	}}}}
+	p := buildAccess(b, "wassup", "default", "8h", false)
+	if got := strings.Join(p.ScrapeNamespaces, ","); got != "edge" {
+		t.Errorf("metrics pages in %q, want the namespace the binding names", got)
+	}
+	for _, r := range p.Rules {
+		for _, res := range r.Resources {
+			if res == "pods/proxy" {
+				t.Errorf("the whole cluster is given pods/proxy: %+v", r)
+			}
+		}
+	}
+	for _, want := range []string{"name: wassup-scrape\n  namespace: edge", `resources: ["pods/proxy"]` + "\n    verbs: [\"get\"]"} {
+		if !strings.Contains(p.Manifest, want) {
+			t.Errorf("the manifest lacks %q:\n%s", want, p.Manifest)
+		}
 	}
 }

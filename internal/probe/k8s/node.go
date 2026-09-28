@@ -232,6 +232,9 @@ func (n *nodeProbe) observe(ctx context.Context, c *Clients, nodes corelisters.N
 	}
 	facet.EmitNode(&o, nf, now)
 
+	// The name the cluster knows the machine by, which is what the placement
+	// of a workload is keyed by; the id on the diagram may be another.
+	o.Detail["name"] = node.Name
 	o.Detail["kubelet_version"] = node.Status.NodeInfo.KubeletVersion
 	o.Detail["os_image"] = node.Status.NodeInfo.OSImage
 	o.Detail["kernel"] = node.Status.NodeInfo.KernelVersion

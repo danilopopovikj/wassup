@@ -214,10 +214,10 @@ var infoAccess = probe.Access{
 	Source: "the Redis INFO command",
 	Delivers: "mem_pct, hit_rate (per tick), evictions (per minute), clients; " +
 		"CacheFull when memory is at the limit and the policy is noeviction or the hit rate collapsed; " +
-		"detail: maxmemory, maxmemory_policy, used_memory_human, keys, keys_without_ttl, redis_version",
-	SpecFields: []string{"addr", "url", "host", "port", "user", "password_env", "db", "tls"},
+		"detail: maxmemory, maxmemory_policy, used_memory_human, keys, keys_without_ttl, redis_version, via",
+	SpecFields: []string{"addr", "url", "host", "port", "user", "password_env", "db", "tls", "via", "kubeconfig", "context"},
 	Needs: "network access to the Redis port, named by url, by addr (host:port) or by host and port; " +
-		"a password in the environment variable named by password_env when AUTH is on (taken as it is, nothing to encode), and user for an ACL user",
+		"a password in the environment variable named by password_env when AUTH is on (taken as it is, nothing to encode), and user for an ACL user" + viaNeeds,
 	Implemented: true,
 	Facets:      []string{facet.NameCache},
 	Tier:        probe.TierData,
@@ -228,7 +228,7 @@ func init() {
 }
 
 // InfoProbe is redis.info. Spec: url (redis://…), addr (host:port) or host
-// and port; user, password_env, db, tls.
+// and port, or none of them with via; user, password_env, db, tls, via.
 type InfoProbe struct {
 	h probe.Health
 	probe.Lifetime
@@ -245,17 +245,16 @@ func (p *InfoProbe) Health() probe.ProbeHealth { return p.h.Get() }
 
 // Start implements probe.Probe.
 func (p *InfoProbe) Start(ctx context.Context, spec map[string]any, out chan<- probe.Observation) error {
-	opt, err := options(spec, "url")
+	l, err := connect(spec, "url")
 	if err != nil {
 		p.h.Set(probe.HealthFailed, err.Error())
 		return err
 	}
-	client := newClient(opt)
-	srv := serverOf(opt, spec)
+	srv := serverOf(l.opt, spec)
 	tgt := target(spec)
 	every := tick(spec)
 	p.Go(func() {
-		defer client.Close()
+		defer l.close()
 		var prev *Sample
 		seen := firstSeen{}
 		t := time.NewTicker(every)
@@ -265,12 +264,13 @@ func (p *InfoProbe) Start(ctx context.Context, spec map[string]any, out chan<- p
 			// A command in flight when the probe stops may finish: cutting it
 			// closes the connection with the answer unread.
 			rctx, cancel := probe.RoundContext(ctx, roundTimeout)
-			text, err := client.Info(rctx).Result()
+			text, err := l.get().Info(rctx).Result()
 			cancel()
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
+				l.failed(err)
 				o.Err = srv.explain("INFO", err)
 				p.h.Set(probe.HealthDegraded, o.Err)
 			} else {
@@ -283,6 +283,7 @@ func (p *InfoProbe) Start(ctx context.Context, spec map[string]any, out chan<- p
 					conds[i].Since = seen.mark(conds[i].Kind, o.At)
 				}
 				seen.keep(live)
+				noteVia(detail, spec)
 				o.Metrics, o.Conditions, o.Detail = m, conds, detail
 				p.h.Set(probe.HealthOK, "")
 			}

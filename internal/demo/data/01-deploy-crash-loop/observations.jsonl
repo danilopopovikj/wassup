@@ -13,18 +13,18 @@
 {"at":0,"target":"api","probe":"k8s.workload","metrics":{"replicas_ready":2,"replicas_desired":3,"cpu_pct":40,"mem_pct":55,"restarts":6,"restart_window_s":300},"detail":{"image":"ghcr.io/bookstore/api:b7e9f21","kind":"Deployment","placement":{"node-1":{"pods":1,"ready":1},"node-2":{"pods":1,"ready":0,"restarts":6},"node-3":{"pods":1,"ready":1}},"last_logs":["django.db.utils.ProgrammingError: relation \"invoices\" does not exist","  File \"manage.py\", line 22, in <module>","Error: migration failed, exiting"]},"conditions":[{"kind":"CrashLoopBackOff","ref":"pod/api-7d9f4b-x2k9","since_s":-120,"detail":"migration 0042_add_invoice_index failed: relation \"invoices\" does not exist"}],"events":[{"at_s":-120,"kind":"deploy","summary":"deploy of api b7e9f21","author":"danilo","ref":"b7e9f21"}]}
 {"at":0,"target":"worker","probe":"k8s.workload","metrics":{"replicas_ready":4,"replicas_desired":4,"cpu_pct":35,"mem_pct":60,"restarts":0},"detail":{"image":"ghcr.io/bookstore/worker:a1b2c3d","kind":"Deployment","placement":{"node-1":{"pods":2,"ready":2},"node-2":{"pods":2,"ready":2}}}}
 {"at":0,"target":"default-queue->worker","probe":"celery.queue","metrics":{"rate":12.0}}
-{"at":0,"target":"exports-queue->worker","probe":"celery.queue","metrics":{"rate":0.2}}
+{"at":0,"target":"exports-queue->worker","probe":"celery.queue","metrics":{"rate":0.017}}
 {"at":0,"target":"worker->db","probe":"signoz.edge","metrics":{"rate":50,"error_rate":0}}
 {"at":0,"target":"worker->github","probe":"signoz.edge","metrics":{"rate":2,"error_rate":0,"p95_ms":210}}
 {"at":0,"target":"default-queue","probe":"celery.queue","metrics":{"depth":3,"oldest_age_s":2,"consumers":4}}
 {"at":0,"target":"exports-queue","probe":"celery.queue","metrics":{"depth":0,"oldest_age_s":0,"consumers":2}}
 {"at":0,"target":"api->default-queue","probe":"signoz.edge","metrics":{"rate":12}}
-{"at":0,"target":"api->exports-queue","probe":"signoz.edge","metrics":{"rate":0.2}}
+{"at":0,"target":"api->exports-queue","probe":"signoz.edge","metrics":{"rate":0}}
 {"at":0,"target":"docs-sync","probe":"k8s.cronjob","metrics":{"active":0,"succeeded":24,"failed":0},"detail":{"schedule":"every 15 min"}}
 {"at":0,"target":"cache","probe":"redis.info","metrics":{"mem_pct":41,"hit_rate":96,"evictions":0,"clients":12}}
 {"at":0,"target":"api->cache","probe":"signoz.edge","metrics":{"rate":5000,"hit_rate":96}}
 {"at":0,"target":"api->db","probe":"pg.pool","metrics":{"pool_used":40,"pool_max":100,"waiters":0,"rate":800,"p95_ms":9}}
-{"at":0,"target":"db-primary","probe":"pg.stats","metrics":{"cpu_pct":30,"mem_pct":52,"disk_pct":61,"connections_used":42,"connections_max":100}}
+{"at":0,"target":"db-primary","probe":"pg.stats","metrics":{"cpu_pct":30,"mem_pct":52,"disk_pct":61,"connections_used":42,"connections_max":100,"rate":850}}
 {"at":0,"target":"db-r1","probe":"cnpg.instance","metrics":{"cpu_pct":8,"mem_pct":40,"disk_pct":61,"lag_bytes":2048}}
 {"at":0,"target":"db-r2","probe":"cnpg.instance","metrics":{"cpu_pct":8,"mem_pct":40,"disk_pct":61,"lag_bytes":4096}}
 {"at":0,"target":"db-primary->db-r1","probe":"pg.stats","metrics":{"lag_bytes":2048,"streaming":1}}

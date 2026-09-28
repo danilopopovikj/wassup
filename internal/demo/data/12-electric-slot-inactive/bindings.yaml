@@ -107,6 +107,9 @@ components:
       url: "http://hatchet-api.bookstore:8080"
       token_env: HATCHET_CLIENT_TOKEN
       tenant: 707d0855-80ab-4e1f-a156-f1c4546cbf52
+  node-4:
+    - probe: k8s.node
+      name: node-4
   hatchet-db:
     - probe: pg.stats
       dsn_env: HATCHET_PG_DSN
@@ -126,14 +129,22 @@ edges:
     - probe: signoz.edge
       url: "http://signoz.signoz:8080"
       token_env: SIGNOZ_TOKEN
-      from: lb
-      to: ingress
+      metric: signoz_calls_total
+      match:
+        service.name: ingress
+        span.kind: SPAN_KIND_SERVER
+      errors:
+        status.code: STATUS_CODE_ERROR
   ingress->api:
     - probe: signoz.edge
       url: "http://signoz.signoz:8080"
       token_env: SIGNOZ_TOKEN
-      from: ingress
-      to: api
+      metric: signoz_calls_total
+      match:
+        service.name: api
+        span.kind: SPAN_KIND_SERVER
+      errors:
+        status.code: STATUS_CODE_ERROR
   api->db:
     - probe: pg.pool
       dsn_env: BOOKSTORE_PGBOUNCER_DSN
@@ -141,14 +152,22 @@ edges:
     - probe: signoz.edge
       url: "http://signoz.signoz:8080"
       token_env: SIGNOZ_TOKEN
-      from: api
-      to: postgres
+      metric: signoz_db_latency_count
+      match:
+        service.name: api
+        db.system: postgresql
+      errors:
+        status.code: STATUS_CODE_ERROR
   api->cache:
     - probe: signoz.edge
       url: "http://signoz.signoz:8080"
       token_env: SIGNOZ_TOKEN
-      from: api
-      to: redis
+      metric: signoz_db_latency_count
+      match:
+        service.name: api
+        db.system: redis
+      errors:
+        status.code: STATUS_CODE_ERROR
   db-primary->db-r1:
     - probe: pg.stats
       dsn_env: BOOKSTORE_PG_DSN
@@ -167,8 +186,12 @@ edges:
     - probe: signoz.edge
       url: "http://signoz.signoz:8080"
       token_env: SIGNOZ_TOKEN
-      from: worker
-      to: api.github.com
+      metric: signoz_external_call_latency_count
+      match:
+        service.name: worker
+        address: "api\\.github\\.com.*"
+      errors:
+        status.code: STATUS_CODE_ERROR
   db-primary->electric:
     - probe: pg.stats
       dsn_env: BOOKSTORE_PG_DSN
@@ -178,11 +201,19 @@ edges:
     - probe: signoz.edge
       url: "http://signoz.signoz:8080"
       token_env: SIGNOZ_TOKEN
-      from: ingress
-      to: electric
+      metric: signoz_calls_total
+      match:
+        service.name: electric
+        span.kind: SPAN_KIND_SERVER
+      errors:
+        status.code: STATUS_CODE_ERROR
   api->hatchet-queue:
     - probe: signoz.edge
       url: "http://signoz.signoz:8080"
       token_env: SIGNOZ_TOKEN
-      from: api
-      to: hatchet
+      metric: signoz_external_call_latency_count
+      match:
+        service.name: api
+        address: "hatchet-api\\.bookstore.*"
+      errors:
+        status.code: STATUS_CODE_ERROR

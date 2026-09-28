@@ -33,7 +33,7 @@
 {"at":0,"target":"cache","probe":"redis.info","metrics":{"mem_pct":41,"hit_rate":96,"evictions":0,"clients":12}}
 {"at":0,"target":"api->cache","probe":"signoz.edge","metrics":{"rate":5000,"hit_rate":96}}
 {"at":0,"target":"api->db","probe":"pg.pool","metrics":{"pool_used":40,"pool_max":100,"waiters":0,"rate":800,"p95_ms":9}}
-{"at":0,"target":"db-primary","probe":"pg.stats","metrics":{"cpu_pct":30,"mem_pct":52,"disk_pct":61,"connections_used":42,"connections_max":100}}
+{"at":0,"target":"db-primary","probe":"pg.stats","metrics":{"cpu_pct":30,"mem_pct":52,"disk_pct":61,"connections_used":42,"connections_max":100,"rate":850}}
 {"at":0,"target":"db-r1","probe":"cnpg.instance","metrics":{"cpu_pct":8,"mem_pct":40,"disk_pct":61,"lag_bytes":2048}}
 {"at":0,"target":"db-r2","probe":"cnpg.instance","metrics":{"cpu_pct":8,"mem_pct":40,"disk_pct":61,"lag_bytes":4096}}
 {"at":0,"target":"db-primary->db-r1","probe":"pg.stats","metrics":{"lag_bytes":2048,"streaming":1}}

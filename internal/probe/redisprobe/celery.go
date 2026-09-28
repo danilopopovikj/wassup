@@ -12,8 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
 	"github.com/danilopopovikj/wassup/internal/probe/facet"
@@ -210,6 +208,17 @@ func P95Runtime(tasks []FlowerFinished, queue string) (float64, bool) {
 type flowerClient struct {
 	base string
 	http *http.Client
+	// unanswered, when set, is called after a request that got no answer:
+	// through a tunnel it may be the tunnel that broke.
+	unanswered func()
+}
+
+// gaveUp records a request that got no answer.
+func (f *flowerClient) gaveUp(err error) error {
+	if f.unanswered != nil {
+		f.unanswered()
+	}
+	return err
 }
 
 func (f *flowerClient) get(ctx context.Context, path string, query url.Values, into any) error {
@@ -223,7 +232,7 @@ func (f *flowerClient) get(ctx context.Context, path string, query url.Values, i
 	}
 	resp, err := f.http.Do(req)
 	if err != nil {
-		return err
+		return f.gaveUp(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -231,7 +240,7 @@ func (f *flowerClient) get(ctx context.Context, path string, query url.Values, i
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 8<<20))
 	if err != nil {
-		return err
+		return f.gaveUp(err)
 	}
 	return json.Unmarshal(body, into)
 }
@@ -259,10 +268,11 @@ var celeryAccess = probe.Access{
 	Kind:   "celery.queue",
 	Source: "the Celery queue list on a Redis broker (LLEN, LINDEX) and, when flower_url is set, Flower's REST API",
 	Delivers: "depth, oldest_age_s (when the oldest envelope carries published_at or eta), growth_per_min; " +
-		"with Flower: consumers, running_s, p95_s and TaskRunning for tasks older than long_task",
-	SpecFields: []string{"broker", "host", "port", "queue", "user", "password_env", "db", "tls", "flower_url", "oldest", "long_task"},
+		"with Flower: consumers, running_s, p95_s and TaskRunning for tasks older than long_task; detail: queue, oldest_task, via",
+	SpecFields: []string{"broker", "host", "port", "queue", "user", "password_env", "db", "tls", "flower_url", "oldest", "long_task", "via", "kubeconfig", "context"},
 	Needs: "network access to the broker, named by broker (a redis:// URL) or by host and port with db and tls; " +
-		"its password in the environment variable named by password_env (taken as it is, nothing to encode); optionally, access to Flower",
+		"its password in the environment variable named by password_env (taken as it is, nothing to encode); optionally, access to Flower" + viaNeeds +
+		". via leads to the broker; Flower is read at flower_url as it is",
 	Implemented: true,
 	Facets:      []string{facet.NameQueue},
 	Tier:        probe.TierData,
@@ -273,13 +283,16 @@ func init() {
 }
 
 // CeleryProbe is celery.queue. Spec: broker (redis URL) or host and port with
-// db and tls; queue (required), user, password_env, flower_url, oldest
-// (default true), long_task (default 10m).
+// db and tls, or neither with via; queue (required), user, password_env,
+// flower_url, oldest (default true), long_task (default 10m), via (to the
+// broker).
 type CeleryProbe struct {
 	h probe.Health
 	probe.Lifetime
 	// srv is the broker as the messages name it.
 	srv server
+	// via is the `via` of the binding, a tunnel or a label, for the detail.
+	via string
 }
 
 // Kind implements probe.Probe.
@@ -312,7 +325,7 @@ func (p *CeleryProbe) Health() probe.ProbeHealth { return p.h.Get() }
 
 // Start implements probe.Probe.
 func (p *CeleryProbe) Start(ctx context.Context, spec map[string]any, out chan<- probe.Observation) error {
-	opt, err := options(spec, "broker")
+	l, err := connect(spec, "broker")
 	if err != nil {
 		p.h.Set(probe.HealthFailed, err.Error())
 		return err
@@ -327,18 +340,18 @@ func (p *CeleryProbe) Start(ctx context.Context, spec map[string]any, out chan<-
 	if fu := probe.Str(spec, "flower_url", ""); fu != "" {
 		flower = &flowerClient{base: fu, http: &http.Client{Timeout: roundTimeout, Transport: probe.ReadOnly(nil)}}
 	}
-	client := newClient(opt)
-	p.srv = serverOf(opt, spec)
+	p.srv = serverOf(l.opt, spec)
+	p.via = probe.Str(spec, "via", "")
 	tgt := target(spec)
 	every := tick(spec)
 	p.Go(func() {
-		defer client.Close()
+		defer l.close()
 		ring := &depthRing{}
 		seen := firstSeen{}
 		t := time.NewTicker(every)
 		defer t.Stop()
 		for {
-			o := p.round(ctx, client, flower, queue, oldest, longTask, ring, seen, tgt)
+			o := p.round(ctx, l, flower, queue, oldest, longTask, ring, seen, tgt)
 			if ctx.Err() != nil {
 				return
 			}
@@ -356,13 +369,18 @@ func (p *CeleryProbe) Start(ctx context.Context, spec map[string]any, out chan<-
 }
 
 // round does one tick of work and returns the observation.
-func (p *CeleryProbe) round(ctx context.Context, client *redis.Client, flower *flowerClient, queue string, oldest bool, longTask time.Duration, ring *depthRing, seen firstSeen, tgt string) probe.Observation {
+func (p *CeleryProbe) round(ctx context.Context, l *link, flower *flowerClient, queue string, oldest bool, longTask time.Duration, ring *depthRing, seen firstSeen, tgt string) probe.Observation {
 	o := probe.Observation{Target: tgt, Probe: p.Kind(), At: time.Now(), Metrics: map[string]float64{}, Detail: map[string]any{"queue": queue}}
+	if p.via != "" {
+		o.Detail["via"] = p.via
+	}
 	rctx, cancel := probe.RoundContext(ctx, roundTimeout)
 	defer cancel()
 
+	client := l.get()
 	depth, err := client.LLen(rctx, queue).Result()
 	if err != nil {
+		l.failed(err)
 		o.Err = p.srv.explain("LLEN "+queue, err)
 		o.Metrics, o.Detail = nil, nil
 		// A round cut short by the stop says nothing about the broker.

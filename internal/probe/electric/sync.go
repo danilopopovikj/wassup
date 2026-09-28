@@ -6,6 +6,11 @@
 // table no client syncs yet, Electric runs a snapshot query and adds the
 // table to its publication in the database. That is why table is never set
 // by default.
+//
+// A service that is only reachable inside the cluster is read through a
+// tunnel the probe opens itself (via: k8s.service/<namespace>/<name>:<port>),
+// shared with the bindings that name the same one and released when the
+// probe stops.
 package electric
 
 import (
@@ -19,7 +24,6 @@ import (
 	"net/url"
 	"os"
 	"sort"
-	"strings"
 	"time"
 
 	"github.com/danilopopovikj/wassup/internal/probe"
@@ -53,9 +57,14 @@ func init() {
 		Kind:   KindSync,
 		Source: "the Electric SQL HTTP API: GET /v1/health and, when table is set, a /v1/shape handshake plus one short live poll",
 		Delivers: "latency_ms of the health request, ready 1/0; with table: shape_ms, up_to_date 1/0, columns, busy on 429; " +
-			"NotReady while Electric waits for Postgres or the shape is unavailable, ConnectionRefused when the service cannot be reached",
-		SpecFields:  []string{"url", "secret_env", "table", "interval", "timeout"},
-		Needs:       "HTTP access to Electric; the ELECTRIC_SECRET in the environment variable named by secret_env when the service requires one",
+			"NotReady while Electric waits for Postgres or the shape is unavailable, ConnectionRefused when the service cannot be reached; " +
+			"detail: url, via, status, table",
+		SpecFields: []string{"url", "secret_env", "table", "interval", "timeout", "via", "kubeconfig", "context"},
+		Needs: "HTTP access to Electric; the ELECTRIC_SECRET in the environment variable named by secret_env when the service requires one. " +
+			"With via set to k8s.service/<namespace>/<name>:<port> (or k8s.pod/...) wassup opens its own port-forward to Electric, " +
+			"which the identity of the kubeconfig has to be allowed to do in that namespace (get on services, get and list on pods, create on pods/portforward); " +
+			"bindings with the same via share one. url may then be left out and reads http://<name>.<namespace>.svc:<port>; " +
+			"a url that is set keeps its scheme and its path, and its host is the Host header and the name of the certificate, not the address that is dialled",
 		Implemented: true,
 		Tier:        probe.TierToken,
 		Facets:      []string{facet.NameSyncEngine},
@@ -71,11 +80,15 @@ type config struct {
 	tick     time.Duration
 	interval time.Duration
 	timeout  time.Duration
+	// via is the `via` of the binding, a tunnel or a label, for the detail.
+	via string
 }
 
-// Sync is the electric.sync probe.
+// Sync is the electric.sync probe. Spec: url (required, unless via names a
+// tunnel), secret_env, table, interval, timeout, via.
 type Sync struct {
 	h probe.Health
+	probe.Lifetime
 
 	// now, client and live are overridable for tests. client carries the spec
 	// timeout; live carries the short live-poll timeout.
@@ -85,6 +98,11 @@ type Sync struct {
 
 	// since remembers when each condition was first seen so Since is stable.
 	since map[string]time.Time
+
+	// tunnel is set when the binding names a tunnel wassup opens itself:
+	// the connections of client and live then go through it, and the url
+	// only says what to ask for.
+	tunnel *probe.Via
 }
 
 // Kind implements probe.Probe.
@@ -92,10 +110,10 @@ func (p *Sync) Kind() string { return KindSync }
 
 // Validate implements probe.Probe.
 func (p *Sync) Validate(spec map[string]any) error {
-	if err := probe.RequireString(spec, "url"); err != nil {
+	if err := probe.ValidateVia(probe.Str(spec, "via", "")); err != nil {
 		return err
 	}
-	if err := checkURL(probe.Str(spec, "url", "")); err != nil {
+	if _, err := urlOf(spec, probe.NewVia(spec)); err != nil {
 		return err
 	}
 	for _, k := range []string{"interval", "timeout"} {
@@ -115,16 +133,9 @@ func (p *Sync) Validate(spec map[string]any) error {
 	return nil
 }
 
-// checkURL requires an absolute http(s) URL.
-func checkURL(raw string) error {
-	u, err := url.Parse(raw)
-	if err != nil {
-		return fmt.Errorf("url: %w", err)
-	}
-	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		return fmt.Errorf("url %q must be an absolute http(s) URL", raw)
-	}
-	return nil
+// urlOf returns the URL of Electric in a spec.
+func urlOf(spec map[string]any, via *probe.Via) (string, error) {
+	return via.URLOf(spec, "url")
 }
 
 // Health implements probe.Probe.
@@ -142,11 +153,12 @@ func (p *Sync) clock() time.Time {
 func parse(spec map[string]any) (config, error) {
 	c := config{
 		target:  probe.Str(spec, "_target", ""),
-		url:     strings.TrimRight(probe.Str(spec, "url", ""), "/"),
 		table:   probe.Str(spec, "table", ""),
 		tick:    defaultTick,
 		timeout: probe.Dur(spec, "timeout", defaultTimeout),
+		via:     probe.Str(spec, "via", ""),
 	}
+	c.url, _ = urlOf(spec, probe.NewVia(spec))
 	if d, ok := spec["_tick"].(time.Duration); ok && d > 0 {
 		c.tick = d
 	}
@@ -172,35 +184,64 @@ func (p *Sync) Start(ctx context.Context, spec map[string]any, out chan<- probe.
 		p.h.Set(probe.HealthFailed, err.Error())
 		return err
 	}
+	p.tunnel = probe.NewVia(spec)
 	if p.client == nil {
-		p.client = newClient(c.timeout)
+		p.client = newClient(c.timeout, p.tunnel)
 	}
 	if p.live == nil {
-		p.live = newClient(liveTimeout)
+		p.live = newClient(liveTimeout, p.tunnel)
 	}
 	p.h.Set(probe.HealthOK, "polling "+c.url)
-	go loop(ctx, c.tick, c.interval, out, func(ctx context.Context) probe.Observation {
-		return p.poll(ctx, c)
+	p.Go(func() {
+		// No connection outlives its request, so the tunnel is the last
+		// thing the probe holds.
+		defer p.tunnel.Close()
+		loop(ctx, c.tick, c.interval, out, func(ctx context.Context) probe.Observation {
+			return p.round(ctx, c)
+		})
 	})
 	return nil
 }
 
 // newClient builds an HTTP client with a per-request timeout and no
-// keep-alive, so a stuck long poll never pins a connection.
-func newClient(timeout time.Duration) *http.Client {
+// keep-alive, so a stuck long poll never pins a connection. With via its
+// connections go through the tunnel.
+func newClient(timeout time.Duration, via *probe.Via) *http.Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.DisableKeepAlives = true
+	if via != nil {
+		tr = via.Through(tr)
+	}
 	return &http.Client{Timeout: timeout, Transport: probe.ReadOnly(tr)}
 }
 
+// round runs one poll. Through a tunnel it does not end with the probe's
+// context: a request that is cut halfway reaches the server as a reset, and
+// the port-forward goes down with it (probe.RoundContext). A round that the
+// stop cut short says nothing about Electric: the health stays what it was.
+func (p *Sync) round(ctx context.Context, c config) probe.Observation {
+	before := p.h.Get()
+	rctx, cancel := ctx, context.CancelFunc(func() {})
+	if p.tunnel != nil {
+		rctx, cancel = probe.RoundContext(ctx, 2*c.timeout+liveTimeout)
+	}
+	defer cancel()
+	o := p.poll(rctx, c)
+	if ctx.Err() != nil {
+		p.h.Set(before.State, before.Message)
+	}
+	return o
+}
+
 // loop runs check once, then every interval, re-emitting the last
-// observation every tick in between with a fresh At.
+// observation every tick in between with a fresh At. A round that was cut
+// short by the stop is not reported.
 func loop(ctx context.Context, tick, interval time.Duration, out chan<- probe.Observation, check func(context.Context) probe.Observation) {
 	if interval < tick {
 		interval = tick
 	}
 	last := check(ctx)
-	if !probe.Send(ctx, out, last) {
+	if ctx.Err() != nil || !probe.Send(ctx, out, last) {
 		return
 	}
 	checkT := time.NewTicker(interval)
@@ -217,7 +258,7 @@ func loop(ctx context.Context, tick, interval time.Duration, out chan<- probe.Ob
 			return
 		case <-checkT.C:
 			last = check(ctx)
-			if !probe.Send(ctx, out, last) {
+			if ctx.Err() != nil || !probe.Send(ctx, out, last) {
 				return
 			}
 		case <-tickC:
@@ -305,6 +346,9 @@ func (p *Sync) poll(ctx context.Context, c config) probe.Observation {
 		Metrics: map[string]float64{},
 		Detail:  map[string]any{"url": c.url},
 	}
+	if c.via != "" {
+		o.Detail["via"] = c.via
+	}
 	if c.table != "" {
 		o.Detail["table"] = c.table
 	}
@@ -312,6 +356,7 @@ func (p *Sync) poll(ctx context.Context, c config) probe.Observation {
 
 	hr := p.get(ctx, p.client, c.url+"/v1/health")
 	if hr.err != nil {
+		p.tunnel.Drop()
 		if hr.timeout {
 			o.Err = fmt.Sprintf("GET /v1/health timed out after %s", c.timeout.Round(time.Millisecond))
 			p.clear(facet.KeyTimeout)
@@ -402,6 +447,7 @@ func shapeURL(c config, params url.Values) string {
 func (p *Sync) shape(ctx context.Context, c config, o *probe.Observation, s *facet.SyncEngineFacet) (probe.HealthState, string) {
 	sr := p.get(ctx, p.client, shapeURL(c, url.Values{"offset": {"-1"}}))
 	if sr.err != nil {
+		p.tunnel.Drop()
 		msg := "GET /v1/shape: " + sr.err.Error()
 		if sr.timeout {
 			msg = fmt.Sprintf("GET /v1/shape timed out after %s", c.timeout.Round(time.Millisecond))
@@ -472,6 +518,7 @@ func (p *Sync) shape(ctx context.Context, c config, o *probe.Observation, s *fac
 		s.UpToDate = facet.N(1)
 		o.Detail["live"] = fmt.Sprintf("no change within %s", liveTimeout)
 	case lr.err != nil:
+		p.tunnel.Drop()
 		o.Detail["live"] = "error: " + lr.err.Error()
 	case lr.status == http.StatusNoContent || lr.header.Get(electricUpToDte) != "":
 		s.UpToDate = facet.N(1)

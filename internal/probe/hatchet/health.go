@@ -16,9 +16,9 @@ const KindHealth = "hatchet.health"
 var healthAccess = probe.Access{
 	Kind:        KindHealth,
 	Source:      "the Hatchet API's /api/ready and /api/live endpoints and /api/v1/meta",
-	Delivers:    "latency_ms, ready (1/0), live (1/0); NotReady while /api/ready is not 200; detail: version, url",
+	Delivers:    "latency_ms, ready (1/0), live (1/0); NotReady while /api/ready is not 200; detail: version, url, via",
 	SpecFields:  withFields(),
-	Needs:       "HTTP access to the Hatchet API; the token named by token_env is sent when present but not required",
+	Needs:       "HTTP access to the Hatchet API; the token named by token_env is sent when present but not required" + viaNeeds,
 	Implemented: true,
 	Tier:        probe.TierToken,
 	Facets:      []string{facet.NameWorkload},
@@ -29,9 +29,11 @@ func init() {
 }
 
 // HealthProbe is hatchet.health, bound to the engine workload. Spec: url
-// (required), token_env, interval, timeout. tenant is accepted and ignored.
+// (required, unless via names a tunnel), token_env, interval, timeout, via.
+// tenant is accepted and ignored.
 type HealthProbe struct {
 	h probe.Health
+	probe.Lifetime
 }
 
 // healthState is what one HealthProbe carries between polls.
@@ -66,8 +68,10 @@ func (p *HealthProbe) Start(ctx context.Context, spec map[string]any, out chan<-
 		p.h.Set(probe.HealthFailed, err.Error())
 		return err
 	}
-	go run(ctx, out, st.cfg.tick, st.cfg.interval, func(ctx context.Context) probe.Observation {
-		return p.poll(ctx, st)
+	p.Go(func() {
+		run(ctx, out, st.cfg.tick, st.cfg.interval, st.c, &p.h, func(ctx context.Context) probe.Observation {
+			return p.poll(ctx, st)
+		})
 	})
 	return nil
 }
@@ -92,6 +96,7 @@ func (p *HealthProbe) poll(ctx context.Context, st *healthState) probe.Observati
 		},
 		Detail: map[string]any{"url": st.cfg.base, "ready_status": status},
 	}
+	st.cfg.noteVia(o.Detail)
 	live := map[string]bool{}
 	w := facet.WorkloadFacet{Ready: status == http.StatusOK}
 	if w.Ready {

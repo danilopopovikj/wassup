@@ -130,8 +130,12 @@ var calls = []struct {
 var httpWrites = set("MethodPost", "MethodPut", "MethodPatch", "MethodDelete",
 	"Post", "PostForm", "Get", "Head", "DefaultClient")
 
-// opensStream are the two files that name the POST of a port-forward.
-var opensStream = set("internal/probe/k8s/portforward.go", "internal/probe/k8s/clients.go")
+// readsWithPost are the files that name a POST: the two that open a
+// port-forward, and the client of SigNoz, which signs in and asks with one.
+// Each builds its client on ReadOnlyExcept and lets through the requests it
+// names and no other.
+var readsWithPost = set("internal/probe/k8s/portforward.go", "internal/probe/k8s/clients.go",
+	"internal/probe/signoz/client.go")
 
 func set(names ...string) map[string]bool {
 	m := map[string]bool{}
@@ -229,6 +233,13 @@ func f() { http.DefaultClient.Do(req) }`, "http.DefaultClient"},
 		{"a program", "cmd/wassup/commands.go",
 			`package main
 func f() { exec.Command("kubectl", "apply", "-f", path) }`, "calls Command"},
+		{"a post beside the client that guards it", "internal/probe/signoz/edge.go",
+			`package signoz
+func f() { http.NewRequest(http.MethodPost, u, nil) }`, "http.MethodPost"},
+		{"the query of a source that answers to a post", "internal/probe/signoz/client.go",
+			`package signoz
+var c = &http.Client{Timeout: t, Transport: probe.ReadOnlyExcept(nil, reads)}
+func f() { http.NewRequest(http.MethodPost, u, body) }`, ""},
 		{"a probe that reads", "internal/probe/amqp/queue.go",
 			`package amqp
 var c = &http.Client{Timeout: t, Transport: probe.ReadOnly(tr)}
@@ -286,7 +297,7 @@ func violations(fset *token.FileSet, rel string, f *ast.File) []string {
 			}
 		case *ast.SelectorExpr:
 			if pkg, ok := x.X.(*ast.Ident); ok && pkg.Name == "http" && httpWrites[x.Sel.Name] {
-				if x.Sel.Name == "MethodPost" && opensStream[rel] {
+				if x.Sel.Name == "MethodPost" && readsWithPost[rel] {
 					return true
 				}
 				t.Errorf("%s uses http.%s: a probe sends GET and HEAD, through a client built on probe.ReadOnly", at(x), x.Sel.Name)

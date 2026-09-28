@@ -3,11 +3,17 @@
 // redis.list for a plain list used as a queue. Every probe is read only: it
 // runs INFO, LLEN and LINDEX and never writes a key. The client refuses any
 // other command before it is sent (readOnlyHook).
+//
+// A server that is only reachable inside the cluster is read through a
+// tunnel the probe opens itself (via: k8s.service/<namespace>/<name>:<port>),
+// shared with the bindings that name the same one. The probe closes its
+// connections before it lets go of the tunnel (link).
 package redisprobe
 
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -56,10 +62,28 @@ func specPort(spec map[string]any) (port int, ok bool, err error) {
 	return port, true, nil
 }
 
+// viaNeeds is the part of Needs that says what via takes and what it
+// changes about the address.
+const viaNeeds = ". With via set to k8s.service/<namespace>/<name>:<port> (or k8s.pod/...) wassup opens its own port-forward to the server, " +
+	"which the identity of the kubeconfig has to be allowed to do in that namespace (get on services, get and list on pods, create on pods/portforward); " +
+	"bindings with the same via share one. The address may then be left out; one that is set is the name in the messages and in the certificate, not what is dialled"
+
+// viaAddress is the address a server behind a tunnel goes by when the spec
+// names none: the name it has in the cluster and the port of via. It is for
+// the messages and the certificate; the tunnel is what is dialled.
+func viaAddress(via string) string {
+	host, port := probe.ViaName(via)
+	if port == "" {
+		port = strconv.Itoa(defaultPort)
+	}
+	return net.JoinHostPort(host, port)
+}
+
 // address checks how a spec names its server and returns the address of the
 // forms that are one: a url in spec[urlKey], "addr" (host:port), or "host"
 // with an optional "port". One of the three, so that two of them can never
-// disagree.
+// disagree, or none of them when via names a tunnel, which gives the
+// address.
 func address(spec map[string]any, urlKey string) (url, addr string, err error) {
 	url = probe.Str(spec, urlKey, "")
 	addr = probe.Str(spec, "addr", "")
@@ -71,9 +95,15 @@ func address(spec map[string]any, urlKey string) (url, addr string, err error) {
 		}
 	}
 	sort.Strings(given)
+	via := probe.Str(spec, "via", "")
 	switch {
+	case len(given) == 0 && probe.NewVia(spec) != nil:
+		if _, hasPort, _ := specPort(spec); hasPort {
+			return "", "", fmt.Errorf("port goes with host; via already names the port")
+		}
+		return "", viaAddress(via), nil
 	case len(given) == 0:
-		return "", "", fmt.Errorf("%q, %q or %q is required", urlKey, "addr", "host")
+		return "", "", fmt.Errorf("%q, %q or %q is required, unless via names a tunnel (k8s.service/<namespace>/<service>:<port>), which gives the address", urlKey, "addr", "host")
 	case len(given) > 1:
 		return "", "", fmt.Errorf("%s are both set; pick one: %s for a whole URL, addr for host:port, or host and port", strings.Join(given, " and "), urlKey)
 	}
@@ -145,6 +175,100 @@ func newClient(opt *redis.Options) *redis.Client {
 	return c
 }
 
+// link is the client of one probe and, when the binding names a tunnel
+// wassup opens itself, the way through it. Without a tunnel it is one
+// client for the life of the probe. With one, the options only say who
+// connects to which database: the address to dial is the tunnel's, and a
+// command that got no answer gives up the client and the tunnel, so the
+// next round starts with a new one of each.
+type link struct {
+	opt    *redis.Options
+	via    *probe.Via
+	client *redis.Client
+}
+
+// connect reads the connection of a spec. Nothing is opened yet.
+func connect(spec map[string]any, urlKey string) (*link, error) {
+	opt, err := options(spec, urlKey)
+	if err != nil {
+		return nil, err
+	}
+	l := &link{opt: opt, via: probe.NewVia(spec)}
+	if l.via != nil {
+		opt.Dialer = l.dial
+	}
+	return l, nil
+}
+
+// get returns the client, a new one after the last was given up.
+func (l *link) get() *redis.Client {
+	if l.client == nil {
+		l.client = newClient(l.opt)
+	}
+	return l.client
+}
+
+// dial connects through the tunnel, with TLS on top when the spec asks for
+// it. The certificate is checked against the name of the spec, the one the
+// server goes by, not against the local end of the tunnel.
+func (l *link) dial(ctx context.Context, network, addr string) (net.Conn, error) {
+	conn, err := l.via.Dial(ctx, network, addr)
+	if err != nil || l.opt.TLSConfig == nil {
+		return conn, err
+	}
+	cfg := l.opt.TLSConfig.Clone()
+	if cfg.ServerName == "" {
+		cfg.ServerName, _, _ = net.SplitHostPort(l.opt.Addr)
+	}
+	secure := tls.Client(conn, cfg)
+	if err := secure.HandshakeContext(ctx); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	return secure, nil
+}
+
+// failed is called with the error of a command. Through a tunnel an error
+// that is not the answer of the server may be the tunnel that broke: the
+// connections are closed and the tunnel is dropped, in that order.
+func (l *link) failed(err error) {
+	if l.via == nil || answered(err) {
+		return
+	}
+	l.hangUp()
+	l.via.Drop()
+}
+
+// answered reports whether an error is what the server said, or what the
+// guard refused to send: neither says anything about the way to the server.
+func answered(err error) bool {
+	var said redis.Error
+	return errors.As(err, &said) || errors.Is(err, probe.ErrReadOnly)
+}
+
+// hangUp closes the client and its connections.
+func (l *link) hangUp() {
+	if l.client != nil {
+		_ = l.client.Close()
+		l.client = nil
+	}
+}
+
+// close releases what the probe holds when it stops: the connections
+// first, the tunnel after them.
+func (l *link) close() {
+	l.hangUp()
+	l.via.Close()
+}
+
+// noteVia adds the way to the server to the detail of an observation, when
+// the binding names one.
+func noteVia(detail map[string]any, spec map[string]any) {
+	if via := probe.Str(spec, "via", ""); via != "" {
+		detail["via"] = via
+	}
+}
+
 // readOnlyHook refuses every command that is not on the list of reads
 // before it is sent. The probes only call reads; the hook is what keeps a
 // command added later from reaching the server.
@@ -206,6 +330,9 @@ func refuse(cmd redis.Cmder) error {
 // validateOptions checks the spec shape without touching the environment or
 // the network, so `wassup validate` works offline.
 func validateOptions(spec map[string]any, urlKey string) error {
+	if err := probe.ValidateVia(probe.Str(spec, "via", "")); err != nil {
+		return err
+	}
 	u, _, err := address(spec, urlKey)
 	if err != nil {
 		return err

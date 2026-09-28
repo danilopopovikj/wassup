@@ -5,7 +5,16 @@ components:
     severity: crit
   lb:
     state: flowing
+    label: "flowing, 1.1k req/s"
   db:
+    state: flowing
+  db-primary:
+    state: flowing
+    label: "flowing, 850 tx/s"
+  docs-sync:
+    state: idle
+    label: idle
+  node-1:
     state: flowing
 edges:
   ingress->api:
@@ -14,6 +23,15 @@ edges:
   lb->ingress:
     state: flowing
     label: "flowing, 1.1k req/s"
+  api->exports-queue:
+    state: idle
+    label: idle
+  exports-queue->worker:
+    state: flowing
+    label: "flowing, 1 jobs/min"
+  docs-sync->worker:
+    state: idle
+    label: no rate measured
 cause: api
 story_contains:
   - "requests arrive, 1.1k/s"

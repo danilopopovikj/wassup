@@ -71,7 +71,13 @@ func (c *ctx) depthMap() map[string]float64 {
 		}
 		best := -1.0
 		for _, w := range c.t.Hosted(comp.ID) {
-			if d, ok := depth[w.ID]; ok && d+1 > best {
+			// an instance of a database stands for the database here: its
+			// own depth is set from the database's below
+			id := w.ID
+			if _, ok := depth[w.Parent]; ok && w.Parent != "" {
+				id = w.Parent
+			}
+			if d, ok := depth[id]; ok && d+1 > best {
 				best = d + 1
 			}
 		}

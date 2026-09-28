@@ -24,10 +24,10 @@ import (
 	"github.com/danilopopovikj/wassup/internal/layout"
 	"github.com/danilopopovikj/wassup/internal/model"
 	"github.com/danilopopovikj/wassup/internal/probe"
-	"github.com/danilopopovikj/wassup/internal/probe/facet"
 	"github.com/danilopopovikj/wassup/internal/probe/fixture"
 	"github.com/danilopopovikj/wassup/internal/render"
 	"github.com/danilopopovikj/wassup/internal/scenario"
+	"github.com/danilopopovikj/wassup/internal/state"
 	"github.com/danilopopovikj/wassup/prompts"
 	"github.com/danilopopovikj/wassup/skill"
 )
@@ -193,6 +193,7 @@ func validateCmd() *cobra.Command {
 				}
 			}
 			warnings = append(warnings, notImplemented(cfg.Bindings)...)
+			warnings = append(warnings, cfg.Topology.PictureHints()...)
 			unbound := 0
 			for _, c := range cfg.Topology.AllComponents() {
 				if len(cfg.Bindings.Components[c.ID]) == 0 && !cfg.Topology.HasRoles(c.ID) {
@@ -232,7 +233,6 @@ func validateCmd() *cobra.Command {
 // the system or of the setup.
 func notImplemented(b model.Bindings) []string {
 	var out []string
-	rates := false
 	each := func(what string, m map[string][]model.ProbeSpec) {
 		for id, specs := range m {
 			for _, s := range specs {
@@ -240,18 +240,13 @@ func notImplemented(b model.Bindings) []string {
 				if !ok || acc.Implemented {
 					continue
 				}
-				out = append(out, fmt.Sprintf("%s: probe %s is not implemented in this build, so it reads no data for this %s", id, s.Kind(), what))
-				for _, f := range acc.Facets {
-					rates = rates || f == facet.NameTraffic
-				}
+				out = append(out, fmt.Sprintf("%s: probe %s is not implemented in this build, so it reads no data for this %s, which is not a fault", id, s.Kind(), what))
 			}
 		}
 	}
 	each("component", b.Components)
 	each("edge", b.Edges)
-	if rates {
-		out = append(out, "traffic rates come from a probe that is not implemented yet: edges read `no rate measured` until it ships, which is not a fault")
-	}
+	sort.Strings(out)
 	return out
 }
 
@@ -301,10 +296,6 @@ func (r probeRow) failed() []probeResult {
 	return out
 }
 
-// noRate is the label of an element that reads idle because nothing
-// measured its traffic.
-const noRate = "no rate measured"
-
 // probeRows reports every component and edge as bound or unbound. An element
 // with probes of its own is bound only when one of them delivered data. The
 // snapshot alone does not say so: an edge whose probe failed has no data of
@@ -328,8 +319,7 @@ func probeRows(cfg *model.Config, snap *model.Snapshot, joined map[string]*bind.
 	var rows []probeRow
 	for _, comp := range cfg.Topology.AllComponents() {
 		r := row(comp.ID, comp.Type, snap.Components[comp.ID], cfg.Bindings.Components[comp.ID])
-		if r.Bound && snap.Components[comp.ID].Marker == "" && r.State == string(model.Idle) && !rateMeasured(cfg, snap, comp.ID) {
-			r.Label = noRate
+		if r.Bound && r.Label == state.NoRate {
 			r.Note = "no probe on " + comp.ID + " or its edges reports a rate, so idle is not known; bind a traffic source to tell idle from busy"
 		}
 		rows = append(rows, r)
@@ -337,37 +327,12 @@ func probeRows(cfg *model.Config, snap *model.Snapshot, joined map[string]*bind.
 	for _, e := range cfg.Topology.Edges {
 		es := snap.Edges[e.ID()]
 		r := row(e.ID(), "edge", es, cfg.Bindings.Edges[e.ID()])
-		if r.Bound && es.Marker == "" && r.State == string(model.Idle) && !hasRate(es) {
-			r.Label = noRate
+		if r.Bound && r.Label == state.NoRate {
 			r.Note = "no probe reports a rate for this edge, so idle is not known; bind a traffic source to tell idle from busy"
 		}
 		rows = append(rows, r)
 	}
 	return rows
-}
-
-// hasRate reports whether a rate was read for an element, even a rate of 0.
-func hasRate(es model.ElementState) bool {
-	for _, k := range []string{"rate", "lag_bytes", "ingest_rate"} {
-		if _, ok := es.Metrics[k]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-// rateMeasured reports whether a rate was read for a component or for one
-// of the edges that touch it, which is what its flowing or idle comes from.
-func rateMeasured(cfg *model.Config, snap *model.Snapshot, id string) bool {
-	if hasRate(snap.Components[id]) {
-		return true
-	}
-	for _, e := range cfg.Topology.Edges {
-		if (e.From == id || e.To == id) && hasRate(snap.Edges[e.ID()]) {
-			return true
-		}
-	}
-	return false
 }
 
 // probeResults says, per bound probe of an element, what it delivered in

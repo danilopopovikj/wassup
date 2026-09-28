@@ -373,3 +373,98 @@ func TestRowsKeepNullApartFromZero(t *testing.T) {
 		t.Errorf("a slot at the current position: %+v", r)
 	}
 }
+
+func TestTransactionsBecomeARateBetweenTwoRounds(t *testing.T) {
+	at := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	var tx txCounter
+	if _, ok := tx.rate(1000, 0, at); ok {
+		t.Error("one reading of a counter is no rate")
+	}
+	if r, ok := tx.rate(1500, 0, at.Add(10*time.Second)); !ok || r != 50 {
+		t.Errorf("500 more in 10 s: %v %v", r, ok)
+	}
+	if r, ok := tx.rate(1501, 0, at.Add(70*time.Second)); !ok || r != 0 {
+		t.Errorf("one more in a minute rounds to none, and is known: %v %v", r, ok)
+	}
+	if r, ok := tx.rate(1501, 0, at.Add(80*time.Second)); !ok || r != 0 {
+		t.Errorf("nothing more: %v %v", r, ok)
+	}
+	// the statistics were reset, or the connection reached another server
+	if _, ok := tx.rate(12, 0, at.Add(90*time.Second)); ok {
+		t.Error("a counter that went down is no basis for a rate")
+	}
+	if r, ok := tx.rate(112, 0, at.Add(100*time.Second)); !ok || r != 10 {
+		t.Errorf("the round after the reset counts from the reset: %v %v", r, ok)
+	}
+	// two readings of the same moment
+	if _, ok := tx.rate(200, 0, at.Add(100*time.Second)); ok {
+		t.Error("no time went by")
+	}
+}
+
+// Every round of wassup ends with a commit the database counts. A database
+// nobody else uses reads nothing, whatever the number of bindings on it.
+func TestTheRateLeavesOutTheRoundsOfWassupItself(t *testing.T) {
+	at := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	var tx txCounter
+	tx.rate(1000, 0, at)
+	// four bindings, a round each every 5 s, and nobody else
+	if r, ok := tx.rate(1004, 4, at.Add(5*time.Second)); !ok || r != 0 {
+		t.Errorf("4 more, all of them wassup's: %v %v", r, ok)
+	}
+	if r, ok := tx.rate(1058, 8, at.Add(10*time.Second)); !ok || r != 10 {
+		t.Errorf("54 more, 4 of them wassup's: %v %v", r, ok)
+	}
+	// a round of another binding that the database has not counted yet
+	if r, ok := tx.rate(1061, 12, at.Add(15*time.Second)); !ok || r != 0 {
+		t.Errorf("fewer than wassup's own is none, not less than none: %v %v", r, ok)
+	}
+
+	led := &ownRounds{n: map[string]float64{}}
+	led.add("k8s.service/shop/db-rw:5432/bookstore")
+	led.add("k8s.service/shop/db-rw:5432/bookstore")
+	led.add("k8s.service/shop/db-rw:5432/audit")
+	if n := led.rounds("k8s.service/shop/db-rw:5432/bookstore"); n != 2 {
+		t.Errorf("rounds = %v, want 2: a database counts its own", n)
+	}
+}
+
+func TestObserveReportsTheRateOnlyWhenItIsKnown(t *testing.T) {
+	s := primary
+	if m, _, _ := Observe(s, StatsOptions{}); len(m) == 0 {
+		t.Fatal("no metrics")
+	} else if _, ok := m["rate"]; ok {
+		t.Errorf("rate = %v before a second round", m["rate"])
+	}
+	s.TxPerSecond, s.TxRateKnown = 0, true
+	if m, _, _ := Observe(s, StatsOptions{}); m["rate"] != 0 {
+		t.Errorf("rate = %v", m["rate"])
+	} else if _, ok := m["rate"]; !ok {
+		t.Error("a database that finished nothing reads 0, which is known")
+	}
+	s.TxPerSecond = 56.5
+	if m, _, _ := Observe(s, StatsOptions{}); m["rate"] != 56.5 {
+		t.Errorf("rate = %v", m["rate"])
+	}
+	// a replication edge reports the stream and not the database's rate
+	if m, _, _ := Observe(s, StatsOptions{Replica: "bookstore-db-2"}); m["lag_bytes"] != 2048 {
+		t.Errorf("lag = %v", m["lag_bytes"])
+	} else if _, ok := m["rate"]; ok {
+		t.Errorf("rate = %v on a replication edge", m["rate"])
+	}
+}
+
+func TestAConsumerAheadOfThePositionIsNotBehind(t *testing.T) {
+	pid := int64(9)
+	ahead, behind := -1.0, 4096.0
+	state := "streaming"
+	if r := slotRow("s", "logical", true, &pid, &ahead, &ahead); r.LagBytes != 0 || r.RetainedBytes != 0 || !r.LagKnown {
+		t.Errorf("slot = %+v", r)
+	}
+	if r := slotRow("s", "logical", true, &pid, &behind, &behind); r.LagBytes != 4096 || r.RetainedBytes != 4096 {
+		t.Errorf("slot = %+v", r)
+	}
+	if r := replicationRow(&pid, "a", &state, &ahead); r.LagBytes != 0 || r.LagHidden {
+		t.Errorf("replica = %+v", r)
+	}
+}
