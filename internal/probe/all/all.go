@@ -2,8 +2,11 @@
 package all
 
 import (
+	_ "github.com/danilopopovikj/wassup/internal/probe/amqp"
+	_ "github.com/danilopopovikj/wassup/internal/probe/electric"
 	_ "github.com/danilopopovikj/wassup/internal/probe/fixture"
 	_ "github.com/danilopopovikj/wassup/internal/probe/gitevents"
+	_ "github.com/danilopopovikj/wassup/internal/probe/hatchet"
 	_ "github.com/danilopopovikj/wassup/internal/probe/hcloudprobe"
 	_ "github.com/danilopopovikj/wassup/internal/probe/k8s"
 	_ "github.com/danilopopovikj/wassup/internal/probe/netprobe"

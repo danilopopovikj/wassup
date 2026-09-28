@@ -68,9 +68,13 @@ wassup                 # first run: prints the setup prompt and copies it to the
 ```
 
 Paste the prompt into Claude Code. It installs the skill (`wassup skill
-install`), discovers the cluster (`wassup discover --json`), writes
-`.wassup/topology.yaml` and `.wassup/bindings.yaml`, and checks them with
-`wassup validate` and `wassup probe --once`. Then run `wassup`.
+install`), runs `wassup discover --propose --write`, which reads Terraform,
+Kubernetes manifests, Helm values, `.env` files, application code and the
+live cluster and drafts `topology.yaml` and `bindings.yaml` with every
+component and edge cited to a file and line, verifies each data flow against
+that evidence, and checks the result with `wassup validate` and `wassup
+probe --once`. Then run `wassup`. Later, `wassup sync` shows what the repo
+or cluster gained since, and `--apply` merges it without touching your layout.
 
 The `.wassup/` directory is the only channel between you, Claude Code and the
 TUI:
@@ -104,7 +108,8 @@ collapses it.
 | --- | --- |
 | `wassup` | runs the TUI; first run prints the setup prompt |
 | `wassup init [--print-prompt]` | creates `.wassup/` or prints the prompt |
-| `wassup discover` | raw inventory from the kubeconfig |
+| `wassup discover [--propose --write]` | evidence from Terraform, manifests, Helm values, code and the cluster; `--propose` drafts topology and bindings with every edge cited |
+| `wassup sync [--apply] [--prune] [--check]` | re-discovers and diffs against `.wassup/`; merges additions, prunes what vanished, or fails CI on drift |
 | `wassup validate` | schemas plus id cross-checks |
 | `wassup probe --once` | runs every binding once, reports bound/unbound |
 | `wassup snapshot [--watch <ref> --until <state> --timeout <d>]` | prints or waits |

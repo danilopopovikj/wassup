@@ -1,0 +1,6 @@
+image:
+  repository: electricsql/electric
+  tag: 1.0.0
+env:
+  DATABASE_URL: postgresql://electric:pw@bookstore-db-rw.bookstore:5432/app
+  ELECTRIC_REPLICATION_SLOT: electric_slot_default

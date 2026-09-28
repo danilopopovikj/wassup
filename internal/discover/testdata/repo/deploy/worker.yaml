@@ -1,0 +1,107 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker
+  namespace: bookstore
+spec:
+  selector:
+    matchLabels:
+      app: worker
+  template:
+    spec:
+      containers:
+        - name: worker
+          image: ghcr.io/bookstore/api:1.2.3
+          command: ["celery", "-A", "app", "worker", "-Q", "default,exports", "-c", "4"]
+          env:
+            - name: CELERY_BROKER_URL
+              value: redis://redis.bookstore:6379/1
+            - name: DATABASE_URL
+              value: postgresql://app:pw@bookstore-db-rw.bookstore:5432/app
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hatchet-worker
+  namespace: bookstore
+spec:
+  selector:
+    matchLabels:
+      app: hatchet-worker
+  template:
+    spec:
+      containers:
+        - name: worker
+          image: ghcr.io/bookstore/hatchet-worker:1.0
+          env:
+            - name: HATCHET_CLIENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: hatchet
+                  key: token
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hatchet-engine
+  namespace: bookstore
+spec:
+  selector:
+    matchLabels:
+      app: hatchet-engine
+  template:
+    spec:
+      containers:
+        - name: engine
+          image: ghcr.io/hatchet-dev/hatchet-engine:v0.62.1
+          env:
+            - name: DATABASE_URL
+              value: postgresql://hatchet:pw@hatchet-db-rw.bookstore:5432/hatchet
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hatchet-engine
+  namespace: bookstore
+spec:
+  selector:
+    app: hatchet-engine
+  ports:
+    - port: 7070
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: bookstore
+spec:
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    spec:
+      containers:
+        - name: redis
+          image: redis:7
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: bookstore
+spec:
+  selector:
+    app: redis
+  ports:
+    - port: 6379
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: electric
+  namespace: bookstore
+spec:
+  selector:
+    app: electric
+  ports:
+    - port: 3000

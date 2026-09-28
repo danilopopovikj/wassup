@@ -43,35 +43,62 @@ not about now.
 
 1. Ask for the kubeconfig path and context only if they are not obvious from
    the repo or env (`KUBECONFIG`, `WASSUP_KUBECONFIG`, `WASSUP_CONTEXT`).
-2. Run `wassup discover --kubeconfig ... --context ... --json` for the raw
-   inventory. Read terraform (`*.tf`, `terraform show -json`), kustomize and
-   helm sources for load balancers, firewalls, DNS, queues, external APIs.
-3. Write `.wassup/topology.yaml`:
-   - `version: 1`, a short `name`.
-   - Groups: `cloud`, `region`, `cluster`, `namespace`, `zone`; nest with `parent`.
-   - Components: only catalog types (`reference/catalog.md`). One `workload`
-     per Deployment/StatefulSet/DaemonSet, never per pod. Nodes are `node`;
-     put `runs_on: [node ids]` on workloads. A Postgres cluster is one `db`
-     with `roles: {primary: ..., replicas: [...]}`; the role instances become
-     components automatically, do not declare them. Anything outside your
-     control is `external`. The traffic source (SigNoz, Prometheus) is
-     `observability`.
-   - Background work: Hatchet queues and workflows, Celery queues and
-     workers, and Electric SQL have a documented mapping at the end of
-     `reference/catalog.md`; follow it rather than inventing types.
-   - Edges: `from`, `to`, `kind` in http, grpc, tcp, sql, replication, queue,
-     cache, external. Include the load balancer to node edges if the LB
-     health checks nodes, and firewall edges for paths a firewall gates.
-   - Ids are stable lowercase slugs. Labels are what a CS person would say.
-4. **Stop and show the topology to the user** before writing bindings.
-5. Write `.wassup/bindings.yaml`: one entry per component or edge id, each a
-   list of probes (`reference/probes.md`). Bind every component; an unbound
-   component is drawn hatched and never as healthy.
-6. Run `wassup validate`, then `wassup probe --once`. Fix every unbound
-   element: wrong namespace, wrong selector, missing RBAC, missing env var.
-   Report what stays unbound and why.
-7. Optionally write `thresholds.yaml` overrides and run the Scan workflow.
-8. Commit `.wassup/` (`state/` is gitignored).
+2. Run `wassup discover --propose --write` (add `--kubeconfig`/`--context`
+   when needed). It reads Terraform, Kubernetes manifests, Helm values,
+   `.env` files and application code, merges the live cluster's inventory
+   (workloads with their env vars and commands, services, ingresses, CNPG
+   clusters, cron jobs), and writes `.wassup/proposed/topology.yaml`,
+   `bindings.yaml` and `evidence.json`. Every component and edge in the
+   proposal cites the file and line it came from.
+3. **Verify the data flows, do not trust the proposal blindly.** For each
+   proposed edge, open the evidence and confirm the mechanism:
+   - `sql`: a `DATABASE_URL`/`PGHOST` or DSN pointing at the database (for
+     CNPG, `<cluster>-rw` is the primary, `-ro`/`-r` are replicas).
+   - `replication`: a logical replication consumer such as Electric SQL
+     (`ELECTRIC_DATABASE_URL`, a `postgresql_replication_slot` or
+     publication in Terraform, `ELECTRIC_REPLICATION_SLOT`). The edge goes
+     from the primary instance to the consumer.
+   - `queue`: a broker URL (`CELERY_BROKER_URL`, `amqp://`), a `celery
+     worker -Q ...` command, a Hatchet queue or workflow.
+   - `cache`: a `REDIS_URL` used for caching (a Redis used only as a broker
+     is a `queue`).
+   - `http`/`grpc`: an in-cluster URL or `HATCHET_CLIENT_HOST_PORT`.
+   - `external`: a public host in code or env (`api.stripe.com`).
+   Then read the `unresolved hosts` list: each is a connection the scanner
+   saw but could not place; add the component or fix the host.
+4. Move `proposed/topology.yaml` to `.wassup/topology.yaml`, editing ids and
+   labels into words a CS person would say, keeping only catalog types
+   (`reference/catalog.md`); the mapping for Hatchet, Celery and Electric is
+   at the end of that file. One `workload` per Deployment, never per pod.
+   A Postgres cluster is one `db` with `roles`; the instances come free.
+5. **Stop and show the topology to the user** before finishing bindings.
+6. Move `proposed/bindings.yaml` to `.wassup/bindings.yaml` and complete
+   it: the proposal names the env vars secrets must come from (`dsn_env`,
+   `token_env`, `secret_env`); confirm they exist where wassup runs. Run
+   `wassup validate`, then `wassup probe --once`, and fix every unbound
+   element (wrong namespace, selector, RBAC, env var). Report what stays
+   unbound and why.
+7. Delete `.wassup/proposed/`, optionally write `thresholds.yaml`, run the
+   Scan workflow, commit `.wassup/` (`state/` is gitignored).
+
+## Workflow: Update (keep the diagram true as the system changes)
+
+Run `wassup sync` whenever infrastructure or manifests change, or when the
+user says something is missing. It re-runs discovery and diffs the
+proposal against the committed files:
+
+- `+ component`/`+ edge` with evidence: something new in the repo or
+  cluster. Review the evidence as in Setup step 3.
+- `- component`: no longer found. Confirm it is really gone before pruning.
+- `+ binding`: an existing component is unbound and the scanner knows a
+  probe for it.
+- `~`: a type or edge kind that disagrees between the repo and the diagram.
+
+Then `wassup sync --apply` merges the additions (labels, groups, notes and
+`layout.json` are never touched; new boxes take auto positions), and
+`wassup sync --apply --prune` also removes what vanished. Finish with
+`wassup validate` and `wassup probe --once`. `wassup sync --check` exits 4
+on drift, so it can run in CI or a cron to flag a diagram that fell behind.
 
 ## Workflow: Explain
 
@@ -119,8 +146,9 @@ Findings show in the TUI panel (`f`) and in `explain`.
 ## Workflow: Remap
 
 When the user says the diagram is wrong ("replica-2 is on node-3, not
-node-1"): verify against `wassup discover --json`, edit `topology.yaml` and
-`bindings.yaml` minimally, run `wassup validate`, and report what moved.
+node-1"): verify against `wassup discover --json` (or `wassup sync`), edit
+`topology.yaml` and `bindings.yaml` minimally, run `wassup validate`, and
+report what moved.
 Renaming an id is `wassup remap <old> <new>`; it migrates layout, findings,
 thresholds and open annotations. The TUI picks changes up through fsnotify
 and keeps every saved position.

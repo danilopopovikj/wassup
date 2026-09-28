@@ -51,6 +51,21 @@ type WorkloadInfo struct {
 	Ready     int32    `json:"ready"`
 	Images    []string `json:"images"`
 	Nodes     []string `json:"nodes,omitempty"`
+	// Env lists container environment variables: literal values, or the
+	// secret/configmap key they come from (never the secret's value).
+	Env []EnvRef `json:"env,omitempty"`
+	// Command joins command and args per container.
+	Command []string          `json:"command,omitempty"`
+	Labels  map[string]string `json:"labels,omitempty"`
+}
+
+// EnvRef is one environment variable of a container.
+type EnvRef struct {
+	Container string `json:"container"`
+	Name      string `json:"name"`
+	Value     string `json:"value,omitempty"`
+	SecretRef string `json:"secret_ref,omitempty"` // "<secret>/<key>"
+	ConfigRef string `json:"config_ref,omitempty"` // "<configmap>/<key>"
 }
 
 // ServiceInfo is one Service.
@@ -208,7 +223,8 @@ func Discover(ctx context.Context, c *Clients, namespaces []string) (*Inventory,
 				replicas = *d.Spec.Replicas
 			}
 			inv.Workloads = append(inv.Workloads, WorkloadInfo{Namespace: d.Namespace, Kind: "Deployment", Name: d.Name, Selector: selectorString(d.Spec.Selector),
-				Replicas: replicas, Ready: d.Status.ReadyReplicas, Images: images(d.Spec.Template), Nodes: nodesOf(d.Namespace, d.Spec.Selector)})
+				Replicas: replicas, Ready: d.Status.ReadyReplicas, Images: images(d.Spec.Template), Nodes: nodesOf(d.Namespace, d.Spec.Selector),
+				Env: envRefs(d.Spec.Template), Command: commands(d.Spec.Template), Labels: d.Spec.Template.Labels})
 		}
 	} else {
 		warn("deployments", err)
@@ -223,7 +239,8 @@ func Discover(ctx context.Context, c *Clients, namespaces []string) (*Inventory,
 				replicas = *s.Spec.Replicas
 			}
 			inv.Workloads = append(inv.Workloads, WorkloadInfo{Namespace: s.Namespace, Kind: "StatefulSet", Name: s.Name, Selector: selectorString(s.Spec.Selector),
-				Replicas: replicas, Ready: s.Status.ReadyReplicas, Images: images(s.Spec.Template), Nodes: nodesOf(s.Namespace, s.Spec.Selector)})
+				Replicas: replicas, Ready: s.Status.ReadyReplicas, Images: images(s.Spec.Template), Nodes: nodesOf(s.Namespace, s.Spec.Selector),
+				Env: envRefs(s.Spec.Template), Command: commands(s.Spec.Template), Labels: s.Spec.Template.Labels})
 		}
 	} else {
 		warn("statefulsets", err)
@@ -234,7 +251,8 @@ func Discover(ctx context.Context, c *Clients, namespaces []string) (*Inventory,
 				continue
 			}
 			inv.Workloads = append(inv.Workloads, WorkloadInfo{Namespace: d.Namespace, Kind: "DaemonSet", Name: d.Name, Selector: selectorString(d.Spec.Selector),
-				Replicas: d.Status.DesiredNumberScheduled, Ready: d.Status.NumberReady, Images: images(d.Spec.Template), Nodes: nodesOf(d.Namespace, d.Spec.Selector)})
+				Replicas: d.Status.DesiredNumberScheduled, Ready: d.Status.NumberReady, Images: images(d.Spec.Template), Nodes: nodesOf(d.Namespace, d.Spec.Selector),
+				Env: envRefs(d.Spec.Template), Command: commands(d.Spec.Template), Labels: d.Spec.Template.Labels})
 		}
 	} else {
 		warn("daemonsets", err)
@@ -374,6 +392,46 @@ func images(t corev1.PodTemplateSpec) []string {
 		set[c.Image] = true
 	}
 	return sortedKeys(set)
+}
+
+// envRefs lists the environment of every container without secret values.
+func envRefs(t corev1.PodTemplateSpec) []EnvRef {
+	var out []EnvRef
+	for _, c := range t.Spec.Containers {
+		for _, e := range c.Env {
+			r := EnvRef{Container: c.Name, Name: e.Name, Value: e.Value}
+			if e.ValueFrom != nil {
+				if e.ValueFrom.SecretKeyRef != nil {
+					r.SecretRef = e.ValueFrom.SecretKeyRef.Name + "/" + e.ValueFrom.SecretKeyRef.Key
+				}
+				if e.ValueFrom.ConfigMapKeyRef != nil {
+					r.ConfigRef = e.ValueFrom.ConfigMapKeyRef.Name + "/" + e.ValueFrom.ConfigMapKeyRef.Key
+				}
+			}
+			out = append(out, r)
+		}
+		for _, ef := range c.EnvFrom {
+			if ef.SecretRef != nil {
+				out = append(out, EnvRef{Container: c.Name, Name: "*", SecretRef: ef.SecretRef.Name + "/*"})
+			}
+			if ef.ConfigMapRef != nil {
+				out = append(out, EnvRef{Container: c.Name, Name: "*", ConfigRef: ef.ConfigMapRef.Name + "/*"})
+			}
+		}
+	}
+	return out
+}
+
+// commands joins command and args per container.
+func commands(t corev1.PodTemplateSpec) []string {
+	var out []string
+	for _, c := range t.Spec.Containers {
+		parts := append(append([]string{}, c.Command...), c.Args...)
+		if len(parts) > 0 {
+			out = append(out, c.Name+": "+strings.Join(parts, " "))
+		}
+	}
+	return out
 }
 
 // selectorString renders a label selector.

@@ -106,46 +106,6 @@ func initCmd() *cobra.Command {
 	return c
 }
 
-func discoverCmd() *cobra.Command {
-	var namespaces []string
-	c := &cobra.Command{
-		Use:   "discover",
-		Short: "dump a raw inventory from the kubeconfig: nodes, workloads, services, ingresses, PVCs, CNPG clusters",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			if kubeDiscover == nil {
-				return fmt.Errorf("this build has no Kubernetes support")
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-			inv, err := kubeDiscover(ctx, flags.kubeconfig, flags.kcontext, namespaces)
-			if err != nil {
-				return err
-			}
-			out := map[string]any{"kubernetes": inv}
-			if tf := terraformInventory(); tf != nil {
-				out["terraform"] = tf
-			}
-			return printJSON(out)
-		},
-	}
-	c.Flags().StringSliceVarP(&namespaces, "namespace", "n", nil, "namespaces to inspect (default all but kube-system)")
-	return c
-}
-
-// terraformInventory lists resource addresses when a terraform directory
-// with state is found near the cwd.
-func terraformInventory() any {
-	for _, d := range []string{".", "terraform", "infra", "deploy/terraform"} {
-		if _, err := os.Stat(filepath.Join(d, "terraform.tfstate")); err != nil {
-			if _, err := os.Stat(filepath.Join(d, ".terraform")); err != nil {
-				continue
-			}
-		}
-		return map[string]any{"dir": d, "hint": "run `terraform show -json` here for the resource list; bind with terraform.state"}
-	}
-	return nil
-}
-
 func validateCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "validate",

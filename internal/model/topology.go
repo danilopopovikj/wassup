@@ -265,3 +265,11 @@ func Slugify(s string) string {
 	}
 	return strings.Trim(b.String(), "-")
 }
+
+// SlugifyID is Slugify for ids that must not be empty: it falls back to "x".
+func SlugifyID(s string) string {
+	if out := Slugify(s); out != "" {
+		return out
+	}
+	return "x"
+}

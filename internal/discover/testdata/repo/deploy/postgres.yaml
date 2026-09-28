@@ -1,0 +1,17 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: bookstore-db
+  namespace: bookstore
+spec:
+  instances: 3
+  storage:
+    size: 100Gi
+---
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: hatchet-db
+  namespace: bookstore
+spec:
+  instances: 1
