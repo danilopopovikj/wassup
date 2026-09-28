@@ -35,9 +35,9 @@ func TestScanFindsTheStack(t *testing.T) {
 	f, p := scanFixture(t)
 	want := map[string]string{
 		"node-1": "node", "node-2": "node", "bookstore-lb": "loadbalancer", "bookstore": "firewall",
-		"api": "workload", "worker": "worker", "hatchet-worker": "worker", "hatchet-engine": "workload",
-		"redis": "cache", "electric": "sync", "bookstore-db": "database", "hatchet-db": "database",
-		"exports-queue": "queue", "default-queue": "queue", "billing": "job", "ingress": "ingress",
+		"api": "workload", "worker": "backgroundworker", "hatchet-worker": "backgroundworker", "hatchet-engine": "workload",
+		"redis": "cache", "electric": "syncengine", "bookstore-db": "database", "hatchet-db": "database",
+		"exports-queue": "queue", "default-queue": "queue", "billing": "scheduledjob", "ingress": "ingress",
 		"app-bookstore-example": "dns", "stripe": "external",
 	}
 	for id, typ := range want {

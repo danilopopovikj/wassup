@@ -70,7 +70,7 @@ var Catalog = map[string]TypeSpec{
 		{Name: "ram", Metric: "mem_pct"},
 		{Name: "restarts", Short: "rst", Metric: "restarts", RateOnly: true},
 	}, Probes: []string{"k8s.workload", "hatchet.health", "http.ping"}, Notes: "Deployment, StatefulSet or DaemonSet; one box per workload, not per pod. Worker fleets are the worker type"},
-	"worker": {Type: "worker", Lane: LaneCompute, Facets: []string{"WorkerFacet", "WorkloadFacet"}, Gauges: []GaugeSpec{
+	"backgroundworker": {Type: "backgroundworker", Lane: LaneCompute, Facets: []string{"BackgroundWorkerFacet", "WorkloadFacet"}, Gauges: []GaugeSpec{
 		{Name: "workers", Short: "wrkr", Used: "workers_online", Max: "workers_total"},
 		{Name: "slots", Short: "slot", Used: "pool_used", Max: "pool_max"},
 		{Name: "ready", Short: "up", Used: "replicas_ready", Max: "replicas_desired"},
@@ -78,7 +78,7 @@ var Catalog = map[string]TypeSpec{
 		{Name: "ram", Metric: "mem_pct"},
 		{Name: "restarts", Short: "rst", Metric: "restarts", RateOnly: true},
 	}, Probes: []string{"hatchet.workers", "celery.worker", "k8s.workload"}, Notes: "A fleet of background workers (Celery, Hatchet); every slot busy with work queued reads as waiting"},
-	"job": {Type: "job", Lane: LaneCompute, Facets: []string{"JobFacet"}, Gauges: []GaugeSpec{
+	"scheduledjob": {Type: "scheduledjob", Lane: LaneCompute, Facets: []string{"ScheduledJobFacet"}, Gauges: []GaugeSpec{
 		{Name: "running", Short: "run", Metric: "active", RateOnly: true},
 		{Name: "ok 24h", Short: "ok", Metric: "succeeded", RateOnly: true},
 		{Name: "failed", Short: "fail", Metric: "failed", RateOnly: true},
@@ -104,7 +104,7 @@ var Catalog = map[string]TypeSpec{
 		{Name: "used", Metric: "disk_pct"},
 		{Name: "iops", Metric: "iops", RateOnly: true},
 	}, Probes: []string{"k8s.pvc", "s3.bucket"}, Notes: "Volumes, buckets"},
-	"sync": {Type: "sync", Lane: LaneData, Facets: []string{"SyncFacet", "ReplicationFacet"}, Gauges: []GaugeSpec{
+	"syncengine": {Type: "syncengine", Lane: LaneData, Facets: []string{"SyncEngineFacet", "ReplicationFacet"}, Gauges: []GaugeSpec{
 		{Name: "lag", Metric: "lag_bytes", Unit: "B", RateOnly: true},
 		{Name: "wal", Metric: "wal_retained_bytes", Unit: "B", RateOnly: true},
 		{Name: "latency", Short: "lat", Metric: "latency_ms", Unit: "ms", RateOnly: true},
@@ -122,11 +122,11 @@ var Catalog = map[string]TypeSpec{
 }
 
 // CatalogOrder is the documented order of types.
-var CatalogOrder = []string{"dns", "firewall", "loadbalancer", "ingress", "node", "workload", "worker", "job", "queue", "cache", "database", "storage", "sync", "observability", "external", "custom"}
+var CatalogOrder = []string{"dns", "firewall", "loadbalancer", "ingress", "node", "workload", "backgroundworker", "scheduledjob", "queue", "cache", "database", "storage", "syncengine", "observability", "external", "custom"}
 
 // TypeAliases are older spellings still accepted in topology.yaml and
 // normalized on load.
-var TypeAliases = map[string]string{"lb": "loadbalancer", "db": "database"}
+var TypeAliases = map[string]string{"lb": "loadbalancer", "db": "database", "job": "scheduledjob", "worker": "backgroundworker", "sync": "syncengine"}
 
 // EdgeFacets are the facets an edge binding may fill.
 var EdgeFacets = []string{"TrafficFacet", "ReplicationFacet", "FirewallFacet"}

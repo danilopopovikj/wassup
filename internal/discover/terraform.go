@@ -46,7 +46,7 @@ var tfTypeMap = map[string]string{
 
 // helmChartMap maps helm chart names to catalog types.
 var helmChartMap = map[string]string{
-	"electric": "sync", "electric-sql": "sync", "electricsql": "sync",
+	"electric": "syncengine", "electric-sql": "syncengine", "electricsql": "syncengine",
 	"hatchet": "workload", "hatchet-stack": "workload",
 	"redis": "cache", "valkey": "cache", "redis-cluster": "cache",
 	"rabbitmq": "queue", "nats": "queue", "kafka": "queue",
@@ -229,7 +229,7 @@ func terraformResource(a *accumulator, r *tfResource, addr map[string]string) {
 				for _, d := range dsnRe.FindAllString(m[1], -1) {
 					if h, ok := parseDSN(d); ok {
 						l := Link{From: c.ID, Host: h.Host, Kind: edgeKindFor(h.Scheme, ""), Evidence: []Evidence{{Source: "terraform", File: r.File, Line: r.Line + i + 1, Note: pendingName + " in helm_release " + r.Name}}}
-						if typ == "sync" && l.Kind == "sql" {
+						if typ == "syncengine" && l.Kind == "sql" {
 							l.Kind, l.Reverse = "replication", true
 						}
 						a.link(l)

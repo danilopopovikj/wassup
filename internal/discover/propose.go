@@ -120,7 +120,7 @@ func Propose(f *Findings, opts ProposeOptions) *Proposal {
 	if len(nodeIDs) > 0 {
 		sort.Strings(nodeIDs)
 		for i := range t.Components {
-			if t.Components[i].Type == "workload" || t.Components[i].Type == "ingress" || t.Components[i].Type == "sync" {
+			if t.Components[i].Type == "workload" || t.Components[i].Type == "ingress" || t.Components[i].Type == "syncengine" {
 				t.Components[i].RunsOn = append([]string(nil), nodeIDs...)
 			}
 		}
@@ -163,7 +163,7 @@ func Propose(f *Findings, opts ProposeOptions) *Proposal {
 		seenEdge[id] = true
 		t.Edges = append(t.Edges, model.Edge{From: fromID, To: toID, Kind: kind, Label: l.Label})
 		p.Evidence[id] = l.Evidence
-		if kind == "replication" && to.Type == "sync" {
+		if kind == "replication" && to.Type == "syncengine" {
 			slot := "electric_slot_default"
 			if c := f.candidate(l.To); c != nil && c.Extra["replication_slot"] != "" {
 				slot = c.Extra["replication_slot"]
@@ -174,7 +174,7 @@ func Propose(f *Findings, opts ProposeOptions) *Proposal {
 	// A sync engine without an explicit source database: link it to the
 	// only Postgres in sight, since that is what it replicates from.
 	for _, c := range t.Components {
-		if c.Type != "sync" {
+		if c.Type != "syncengine" {
 			continue
 		}
 		hasSource := false
@@ -254,7 +254,7 @@ func kindFor(from, to model.Component, hint string) string {
 		return "queue"
 	case "external":
 		return "external"
-	case "sync":
+	case "syncengine":
 		if from.Type == "database" {
 			return "replication"
 		}
@@ -299,7 +299,7 @@ func bindingsFor(c Candidate, opts ProposeOptions) []model.ProbeSpec {
 	}
 	svc := firstAddress(c.Addresses)
 	switch c.Type {
-	case "workload", "worker":
+	case "workload", "backgroundworker":
 		if c.Selector != "" {
 			out = append(out, k8s("k8s.workload", map[string]any{"selector": c.Selector}))
 		} else if c.Name != "" && c.Kind != "" {
@@ -316,7 +316,7 @@ func bindingsFor(c Candidate, opts ProposeOptions) []model.ProbeSpec {
 		case c.Extra["celery_worker"] == "true":
 			out = append(out, model.ProbeSpec{"probe": "celery.worker", "flower_url": "http://flower." + ns + ":5555"})
 		}
-	case "job":
+	case "scheduledjob":
 		if wf := c.Extra["hatchet_workflow"]; wf != "" {
 			out = append(out, model.ProbeSpec{"probe": "hatchet.workflow", "url": "http://hatchet-api." + orDefault(ns, "default") + ":8080", "token_env": "HATCHET_CLIENT_TOKEN", "workflow": wf})
 		} else if c.Name != "" {
@@ -344,7 +344,7 @@ func bindingsFor(c Candidate, opts ProposeOptions) []model.ProbeSpec {
 		default:
 			out = append(out, model.ProbeSpec{"probe": "hatchet.queue", "url": "http://hatchet-api." + orDefault(ns, "default") + ":8080", "token_env": "HATCHET_CLIENT_TOKEN"})
 		}
-	case "sync":
+	case "syncengine":
 		spec := model.ProbeSpec{"probe": "electric.sync", "url": "http://" + orDefault(svc, "electric."+orDefault(ns, "default")) + ":3000", "secret_env": "ELECTRIC_SECRET"}
 		if tables := strings.Fields(c.Extra["tables"]); len(tables) > 0 {
 			spec["table"] = tables[0]

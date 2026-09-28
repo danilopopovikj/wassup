@@ -56,21 +56,21 @@ components:
       - node-3
     owner: "@danilo"
   - id: worker-1
-    type: worker
+    type: backgroundworker
     label: worker-1
     group: bookstore
     runs_on:
       - node-1
       - node-2
   - id: worker-2
-    type: worker
+    type: backgroundworker
     label: worker-2
     group: bookstore
     runs_on:
       - node-1
       - node-2
   - id: worker-3
-    type: worker
+    type: backgroundworker
     label: worker-3
     group: bookstore
     runs_on:
@@ -85,7 +85,7 @@ components:
     label: Exports queue
     group: bookstore
   - id: docs-sync
-    type: job
+    type: scheduledjob
     label: Docs sync
     group: bookstore
   - id: cache

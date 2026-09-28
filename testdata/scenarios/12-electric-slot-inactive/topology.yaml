@@ -56,7 +56,7 @@ components:
       - node-3
     owner: "@danilo"
   - id: worker
-    type: worker
+    type: backgroundworker
     label: Workers
     group: bookstore
     runs_on:
@@ -71,7 +71,7 @@ components:
     label: Exports queue
     group: bookstore
   - id: docs-sync
-    type: job
+    type: scheduledjob
     label: Docs sync
     group: bookstore
   - id: cache
@@ -107,14 +107,14 @@ components:
     label: Hatchet tasks
     group: bookstore
   - id: hatchet-workers
-    type: worker
+    type: backgroundworker
     label: Hatchet workers
     group: bookstore
     runs_on:
       - node-2
       - node-3
   - id: billing
-    type: job
+    type: scheduledjob
     label: Billing workflow
     group: bookstore
   - id: hatchet-db
@@ -123,7 +123,7 @@ components:
     group: bookstore
     engine: postgres
   - id: electric
-    type: sync
+    type: syncengine
     label: Electric
     group: bookstore
     runs_on:

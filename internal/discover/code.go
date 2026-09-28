@@ -74,7 +74,7 @@ func scanCode(a *accumulator, path, rel string) {
 				name = m[1]
 			}
 			if name != "" {
-				jc := Candidate{ID: model.SlugifyID(name), Type: "job", Label: labelFor(name), Name: name, Extra: map[string]string{"hatchet_workflow": name}, Evidence: []Evidence{ev("hatchet workflow " + name)}}
+				jc := Candidate{ID: model.SlugifyID(name), Type: "scheduledjob", Label: labelFor(name), Name: name, Extra: map[string]string{"hatchet_workflow": name}, Evidence: []Evidence{ev("hatchet workflow " + name)}}
 				a.add(jc)
 			} else {
 				a.note("hatchet client or workflow in %s:%d (name not on this line)", rel, line)
@@ -86,7 +86,7 @@ func scanCode(a *accumulator, path, rel string) {
 		for _, m := range electricShapeRe.FindAllStringSubmatch(text, -1) {
 			table := strings.Trim(m[1], `"`)
 			a.note("electric shape on table %s in %s:%d", table, rel, line)
-			c := a.add(Candidate{ID: "electric", Type: "sync", Label: "Electric", Extra: map[string]string{}, Evidence: []Evidence{ev("shape on " + table)}})
+			c := a.add(Candidate{ID: "electric", Type: "syncengine", Label: "Electric", Extra: map[string]string{}, Evidence: []Evidence{ev("shape on " + table)}})
 			if c != nil {
 				if c.Extra == nil {
 					c.Extra = map[string]string{}

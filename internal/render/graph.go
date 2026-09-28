@@ -58,19 +58,19 @@ type DrawOptions struct {
 // primaryGauges lists, per type, the gauges an engineer wants at a glance.
 // Anything amber or red is promoted regardless; zero rate-only gauges hide.
 var primaryGauges = map[string][]string{
-	"node":          {"cpu", "ram", "disk"},
-	"workload":      {"ready", "cpu", "ram"},
-	"loadbalancer":  {"targets"},
-	"worker":        {"workers", "slots", "cpu"},
-	"ingress":       {"errors", "cert"},
-	"job":           {"running", "ok 24h", "failed"},
-	"queue":         {"depth", "oldest"},
-	"cache":         {"mem", "hits"},
-	"database":      {"conns", "cpu", "disk"},
-	"storage":       {"used"},
-	"observability": {"ingest", "disk"},
-	"external":      {"latency", "errors"},
-	"firewall":      {},
+	"node":             {"cpu", "ram", "disk"},
+	"workload":         {"ready", "cpu", "ram"},
+	"loadbalancer":     {"targets"},
+	"backgroundworker": {"workers", "slots", "cpu"},
+	"ingress":          {"errors", "cert"},
+	"scheduledjob":     {"running", "ok 24h", "failed"},
+	"queue":            {"depth", "oldest"},
+	"cache":            {"mem", "hits"},
+	"database":         {"conns", "cpu", "disk"},
+	"storage":          {"used"},
+	"observability":    {"ingest", "disk"},
+	"external":         {"latency", "errors"},
+	"firewall":         {},
 }
 
 // visibleGauges picks what a box shows at the given detail level.

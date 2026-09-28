@@ -21,7 +21,7 @@ func (c *ctx) depthMap() map[string]float64 {
 	// workers look shallow.
 	var queue, jobs []string
 	for _, e := range entries {
-		if comp, ok := c.t.Component(e); ok && comp.Type == "job" {
+		if comp, ok := c.t.Component(e); ok && comp.Type == "scheduledjob" {
 			jobs = append(jobs, e)
 			continue
 		}
@@ -624,7 +624,7 @@ func (c *ctx) componentSentence(id string, es model.ElementState, path []string,
 			return "the firewall blocks the path, " + strings.TrimPrefix(nextEdge.Label, "blocked at firewall ")
 		}
 		return ""
-	case "workload", "worker":
+	case "workload", "backgroundworker":
 		switch es.State {
 		case model.Failing:
 			// Failing on a failing node: blame the node in the same sentence.
@@ -760,7 +760,7 @@ func (c *ctx) componentSentence(id string, es model.ElementState, path []string,
 			return "observability stopped receiving data; traffic rates on this diagram are unknown since then"
 		}
 		return ""
-	case "sync":
+	case "syncengine":
 		if es.State == model.Failing || es.State == model.Waiting {
 			return fmt.Sprintf("%s is %s, so clients stop receiving changes", label, es.Label)
 		}
@@ -770,7 +770,7 @@ func (c *ctx) componentSentence(id string, es model.ElementState, path []string,
 			// Find a failing job upstream on the path.
 			for _, pid := range path {
 				pc, ok := c.t.Component(pid)
-				if ok && pc.Type == "job" && c.snap.Components[pid].State == model.Failing {
+				if ok && pc.Type == "scheduledjob" && c.snap.Components[pid].State == model.Failing {
 					s := fmt.Sprintf("the %s job failed because %s is not responding; nothing inside the system is at fault", Lower(pc.DisplayLabel()), label)
 					if sched := detailString(c.snap.Components[pid].Detail, "schedule"); sched != "" {
 						s += "; retries " + sched
@@ -781,7 +781,7 @@ func (c *ctx) componentSentence(id string, es model.ElementState, path []string,
 			return fmt.Sprintf("%s is not responding, %s; nothing inside the system is at fault", label, strings.TrimPrefix(es.Label, "failing, "))
 		}
 		return ""
-	case "job":
+	case "scheduledjob":
 		if es.State == model.Failing {
 			// If the cause is external the external sentence covers it.
 			for _, pid := range path {
@@ -916,7 +916,7 @@ func (c *ctx) edgeSentence(id string, es model.ElementState, path []string, i in
 	case model.Failing:
 		if cnd, ok := model.HasCondition(es.Conditions, model.CondReplicationBroken); ok {
 			s := fmt.Sprintf("%s has not been streaming", to)
-			if toComp, ok := c.t.Component(e.To); ok && toComp.Type == "sync" {
+			if toComp, ok := c.t.Component(e.To); ok && toComp.Type == "syncengine" {
 				slot := "the replication slot"
 				if cnd.Ref != "" {
 					slot = "the replication slot " + strings.TrimPrefix(cnd.Ref, "slot/")

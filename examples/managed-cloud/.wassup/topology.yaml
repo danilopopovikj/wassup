@@ -22,7 +22,7 @@ components:
     label: shop.example.com
     group: cloud
   - id: lb
-    type: lb
+    type: loadbalancer
     label: Cloud load balancer
     group: cloud
   - id: ingress
@@ -50,7 +50,7 @@ components:
     group: shop
     runs_on: [web-1, web-2]
   - id: worker
-    type: worker
+    type: backgroundworker
     label: Workers
     group: shop
     runs_on: [jobs-1]
@@ -59,7 +59,7 @@ components:
     label: Orders queue
     group: shop
   - id: nightly-report
-    type: job
+    type: scheduledjob
     label: Nightly report
     group: shop
   - id: cache
@@ -67,7 +67,7 @@ components:
     label: Redis
     group: cloud
   - id: db
-    type: db
+    type: database
     label: Postgres
     group: cloud
     engine: postgres

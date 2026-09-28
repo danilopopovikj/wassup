@@ -69,7 +69,7 @@ func AddCluster(f *Findings, inv *k8s.Inventory) {
 		}
 	}
 	for _, cj := range inv.CronJobs {
-		c := Candidate{ID: model.SlugifyID(cj.Name), Type: "job", Label: labelFor(cj.Name), Namespace: cj.Namespace, Kind: "CronJob", Name: cj.Name, Extra: map[string]string{"schedule": cj.Schedule}, Evidence: []Evidence{ev("CronJob " + cj.Namespace + "/" + cj.Name)}}
+		c := Candidate{ID: model.SlugifyID(cj.Name), Type: "scheduledjob", Label: labelFor(cj.Name), Namespace: cj.Namespace, Kind: "CronJob", Name: cj.Name, Extra: map[string]string{"schedule": cj.Schedule}, Evidence: []Evidence{ev("CronJob " + cj.Namespace + "/" + cj.Name)}}
 		a.add(c)
 	}
 	for _, ing := range inv.Ingresses {

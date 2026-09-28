@@ -292,7 +292,7 @@ func (c *ctx) failingReason(comp model.Component, j *bind.Joined, th model.Thres
 	has := func(k string) (model.Condition, bool) { return model.HasCondition(conds, k) }
 
 	switch comp.Type {
-	case "workload", "worker":
+	case "workload", "backgroundworker":
 		if cnd, ok := has(model.CondCrashLoopBackOff); ok {
 			return c.failingReplicaPhrase(j) + c.restartPhrase(j, cnd)
 		}
@@ -368,7 +368,7 @@ func (c *ctx) failingReason(comp model.Component, j *bind.Joined, th model.Thres
 		if v, ok := metric(j, "error_rate"); ok && v > th.ErrorRatePct {
 			return fmt.Sprintf("%s errors", Pct(v))
 		}
-	case "job":
+	case "scheduledjob":
 		if cnd, ok := has(model.CondJobFailed); ok {
 			s := "last run failed"
 			if !cnd.Since.IsZero() {
@@ -396,7 +396,7 @@ func (c *ctx) failingReason(comp model.Component, j *bind.Joined, th model.Thres
 		if cnd, ok := has(model.CondReplicationBroken); ok {
 			return replicationPhrase(now, j, cnd, false)
 		}
-	case "sync":
+	case "syncengine":
 		if cnd, ok := has(model.CondReplicationBroken); ok {
 			return replicationPhrase(now, j, cnd, true)
 		}
@@ -539,7 +539,7 @@ func (c *ctx) waitingReason(comp model.Component, j *bind.Joined, th model.Thres
 	_, exhausted := model.HasCondition(j.Conditions, model.CondPoolExhausted)
 	if (ok1 && ok2 && max > 0 && used >= max) || exhausted {
 		if w := metricOr(j, "waiters", 0); w > 0 || exhausted {
-			if comp.Type == "workload" || comp.Type == "worker" {
+			if comp.Type == "workload" || comp.Type == "backgroundworker" {
 				// a worker pool: every slot busy, work piling up behind it
 				return fmt.Sprintf("all %s slots busy, %s queued", Num(max), Num(w))
 			}
@@ -582,7 +582,7 @@ func (c *ctx) processingReason(comp model.Component, j *bind.Joined) string {
 			return name + el
 		}
 	}
-	if comp.Type == "job" {
+	if comp.Type == "scheduledjob" {
 		if a := metricOr(j, "active", 0); a > 0 {
 			name := detailStr(j, "task")
 			if name == "" {
@@ -665,7 +665,7 @@ func (c *ctx) evalEdge(e model.Edge) model.ElementState {
 	dst := c.snap.Components[e.To]
 	dstComp, _ := c.t.Component(e.To)
 	dstLabel := "the " + Lower(dstComp.DisplayLabel())
-	if dstComp.Type == "external" || dstComp.Type == "node" || dstComp.Type == "workload" || dstComp.Type == "worker" {
+	if dstComp.Type == "external" || dstComp.Type == "node" || dstComp.Type == "workload" || dstComp.Type == "backgroundworker" {
 		dstLabel = Lower(dstComp.DisplayLabel())
 	}
 
@@ -710,7 +710,7 @@ func (c *ctx) evalEdge(e model.Edge) model.ElementState {
 		// Rule 3: failing.
 		if cnd, ok := model.HasCondition(es.Conditions, model.CondReplicationBroken); ok {
 			es.State = model.Failing
-			es.Label = "failing, " + replicationPhrase(c.in.Now, j, cnd, dstComp.Type == "sync")
+			es.Label = "failing, " + replicationPhrase(c.in.Now, j, cnd, dstComp.Type == "syncengine")
 			return es
 		}
 		if v, ok := es.Metrics["error_rate"]; ok && v > th.ErrorRatePct {

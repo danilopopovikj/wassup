@@ -17,8 +17,8 @@ var imageTypes = []struct {
 	typ   string
 	label string
 }{
-	{"electricsql/electric", "sync", "Electric"},
-	{"electric-sql/electric", "sync", "Electric"},
+	{"electricsql/electric", "syncengine", "Electric"},
+	{"electric-sql/electric", "syncengine", "Electric"},
 	{"hatchet-dev/hatchet-engine", "workload", "Hatchet engine"},
 	{"hatchet-dev/hatchet-api", "workload", "Hatchet API"},
 	{"hatchet-dev/hatchet-lite", "workload", "Hatchet"},
@@ -162,7 +162,7 @@ func manifestObject(a *accumulator, rel string, line int, obj k8sObj, source str
 		}
 		typ := "workload"
 		if obj.Kind == "CronJob" || obj.Kind == "Job" {
-			typ = "job"
+			typ = "scheduledjob"
 		}
 		c := Candidate{ID: model.SlugifyID(name), Type: typ, Label: labelFor(name), Namespace: ns, Kind: obj.Kind, Name: name, Env: map[string]string{}, Extra: map[string]string{}, Evidence: []Evidence{ev}}
 		if sel := asMap(asMap(obj.Spec["selector"])["matchLabels"]); len(sel) > 0 {
@@ -319,7 +319,7 @@ var envHints = []struct {
 	{"AMQP", "queue", "queue", "amqp"},
 	{"HATCHET_CLIENT_HOST_PORT", "grpc", "workload", "hatchet engine"},
 	{"HATCHET_CLIENT_TOKEN", "grpc", "workload", "hatchet token"},
-	{"ELECTRIC_URL", "http", "sync", "electric shapes"},
+	{"ELECTRIC_URL", "http", "syncengine", "electric shapes"},
 	{"ELECTRIC_DATABASE_URL", "replication", "database", "electric source database"},
 	{"SIGNOZ", "tcp", "observability", "traces"},
 	{"OTEL_EXPORTER_OTLP_ENDPOINT", "tcp", "observability", "traces"},
@@ -341,7 +341,7 @@ func envLinks(a *accumulator, c *Candidate, rel string, line int) {
 			for _, d := range hs {
 				if h, ok := parseDSN(d); ok {
 					l := Link{From: c.ID, Host: h.Host, Kind: edgeKindFor(h.Scheme, ""), Evidence: []Evidence{{Source: "manifest", File: rel, Line: line, Note: name + " in " + c.Kind + " " + c.Name}}}
-					if l.Kind == "sql" && (upper == "ELECTRIC_DATABASE_URL" || c.Type == "sync") {
+					if l.Kind == "sql" && (upper == "ELECTRIC_DATABASE_URL" || c.Type == "syncengine") {
 						// a sync engine reads the database's replication stream
 						l.Kind, l.Reverse = "replication", true
 					}
@@ -373,7 +373,7 @@ func envLinks(a *accumulator, c *Candidate, rel string, line int) {
 		}
 	}
 	// Electric: the sync service's source database is a replication edge.
-	if c.Type == "sync" {
+	if c.Type == "syncengine" {
 		c.Extra["replication_slot"] = firstNonEmpty(c.Env["ELECTRIC_REPLICATION_SLOT"], "electric_slot_default")
 	}
 }
@@ -413,7 +413,7 @@ func commandLinks(a *accumulator, c *Candidate, cmds []string, rel string, line 
 		c.Extra["hatchet_worker"] = "true"
 	}
 	if c.Type == "workload" && (c.Extra["celery_worker"] == "true" || c.Extra["hatchet_worker"] == "true") {
-		c.Type = "worker"
+		c.Type = "backgroundworker"
 	}
 }
 

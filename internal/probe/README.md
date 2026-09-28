@@ -56,15 +56,15 @@ type accepts (`model.Catalog[type].Facets`), or an edge facet for edges.
 | --- | --- | --- | --- |
 | `node` | `NodeFacet` | cpu/mem/disk, pods, ready, pressure, boot time | `k8s.node` |
 | `workload` | `WorkloadFacet` | replicas, cpu/mem, restarts, crashing/OOM/image-pull instances | `k8s.workload`, `cnpg.instance` |
-| `worker` | `WorkerFacet` | workers online/total, slots, active, backlog, running tasks, typical duration | `hatchet.workers`, `celery.worker` |
+| `backgroundworker` | `BackgroundWorkerFacet` | workers online/total, slots, active, backlog, running tasks, typical duration | `hatchet.workers`, `celery.worker` |
 | `queue` | `QueueFacet` | depth, pending, running, consumers, oldest, rates, growth | `hatchet.queue`, `celery.queue`, `amqp.queue`, `redis.list` |
-| `job` | `JobFacet` | counts, last failure, current run, schedule | `k8s.cronjob`, `hatchet.workflow` |
+| `scheduledjob` | `ScheduledJobFacet` | counts, last failure, current run, schedule | `k8s.cronjob`, `hatchet.workflow` |
 | `loadbalancer` | `LoadBalancerFacet` | connections, rate, targets with health (per-target edges via `LoadBalancerEdges`) | `hcloud.lb` |
 | `ingress` | `IngressFacet` (+ `CertificateFacet`) | rate, errors, hosts, certificate expiry and renewal | `k8s.ingress`, `cert.tls` |
 | `firewall` | `FirewallFacet` | rules; on an edge, allowed or the denying rule | `hcloud.firewall`, `terraform.state` |
 | `dns` | `DNSFacet` | resolves, addresses, expected target | `dns.record` |
 | `database` | `DatabaseFacet` | cpu/mem/disk, connections, lock waiters, size, lag, WAL retained, backup/vacuum | `pg.stats`, `cnpg.cluster` |
-| `sync` | `SyncFacet` (+ `ReplicationFacet`) | ready, latency, shape handshake; slot, streaming, lag, WAL | `electric.sync`, `pg.stats` |
+| `syncengine` | `SyncEngineFacet` (+ `ReplicationFacet`) | ready, latency, shape handshake; slot, streaming, lag, WAL | `electric.sync`, `pg.stats` |
 | `cache` | `CacheFacet` | memory, hit rate, evictions, clients, full | `redis.info` |
 | `storage` | `StorageFacet` | used/total, iops | `k8s.pvc` |
 | `observability` | `ObservabilityFacet` | ingest rate, disk, no data since | `signoz.health` |

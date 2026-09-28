@@ -21,7 +21,7 @@ func has(conds []model.Condition, kind string) *model.Condition {
 
 func TestWorkerCanonicalForm(t *testing.T) {
 	o := &probe.Observation{Target: "workers"}
-	EmitWorker(o, WorkerFacet{Online: NI(6), Total: NI(6), SlotsUsed: NI(24), SlotsMax: NI(24), Active: NI(24), Backlog: NI(850),
+	EmitBackgroundWorker(o, BackgroundWorkerFacet{Online: NI(6), Total: NI(6), SlotsUsed: NI(24), SlotsMax: NI(24), Active: NI(24), Backlog: NI(850),
 		Running:         []Task{{ID: "a", Name: "generate-invoice", Started: now.Add(-25 * time.Minute)}, {ID: "b", Name: "quick", Started: now.Add(-10 * time.Second)}},
 		TypicalDuration: 90 * time.Second}, now)
 	for k, want := range map[string]float64{"workers_online": 6, "pool_used": 24, "pool_max": 24, "active": 24, "waiters": 850, "p95_s": 90, "running_s": 1500} {
@@ -36,7 +36,7 @@ func TestWorkerCanonicalForm(t *testing.T) {
 		t.Errorf("exhausted missing: %+v", o.Conditions)
 	}
 	o2 := &probe.Observation{Target: "w"}
-	EmitWorker(o2, WorkerFacet{Online: NI(0), Total: NI(3)}, now)
+	EmitBackgroundWorker(o2, BackgroundWorkerFacet{Online: NI(0), Total: NI(3)}, now)
 	if _, ok := o2.Metrics["pool_max"]; ok {
 		t.Error("pool_max must be omitted when unknown")
 	}
@@ -68,7 +68,7 @@ func TestQueueReplicationJob(t *testing.T) {
 		t.Errorf("streaming replica should carry no conditions: %+v", ok)
 	}
 	j := &probe.Observation{Target: "billing"}
-	EmitJob(j, JobFacet{Succeeded: NI(20), Failed: NI(3), LastFailure: &Failure{Ref: "run/8c1d", At: now.Add(-8 * time.Minute), Reason: "timed out"}, Schedule: "cron 0 * * * *"}, now)
+	EmitScheduledJob(j, ScheduledJobFacet{Succeeded: NI(20), Failed: NI(3), LastFailure: &Failure{Ref: "run/8c1d", At: now.Add(-8 * time.Minute), Reason: "timed out"}, Schedule: "cron 0 * * * *"}, now)
 	if c := has(j.Conditions, model.CondJobFailed); c == nil || c.Detail != "timed out" {
 		t.Errorf("job failed missing: %+v", j.Conditions)
 	}

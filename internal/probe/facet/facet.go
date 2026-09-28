@@ -1,6 +1,6 @@
 // Package facet is the typed contract between a data source and the rest of
 // wassup. Every node type on the diagram has one facet named after it
-// (node ↔ NodeFacet, worker ↔ WorkerFacet, loadbalancer ↔ LoadBalancerFacet)
+// (node ↔ NodeFacet, backgroundworker ↔ BackgroundWorkerFacet, syncengine ↔ SyncEngineFacet)
 // and every edge kind has one (TrafficFacet, ReplicationFacet). A probe
 // reads its provider (Kubernetes, Hetzner, Postgres, Hatchet, Flower, a
 // health endpoint) and fills the facet; the facet writes the canonical
@@ -36,24 +36,24 @@ func NI(v int) Num { return Num{V: float64(v), Set: true} }
 
 // Names of every facet, matching the catalog type they serve.
 const (
-	NameNode          = "NodeFacet"
-	NameWorkload      = "WorkloadFacet"
-	NameWorker        = "WorkerFacet"
-	NameQueue         = "QueueFacet"
-	NameJob           = "JobFacet"
-	NameLoadBalancer  = "LoadBalancerFacet"
-	NameIngress       = "IngressFacet"
-	NameCertificate   = "CertificateFacet"
-	NameFirewall      = "FirewallFacet"
-	NameDNS           = "DNSFacet"
-	NameDatabase      = "DatabaseFacet"
-	NameSync          = "SyncFacet"
-	NameCache         = "CacheFacet"
-	NameStorage       = "StorageFacet"
-	NameObservability = "ObservabilityFacet"
-	NameExternal      = "ExternalFacet"
-	NameTraffic       = "TrafficFacet"
-	NameReplication   = "ReplicationFacet"
+	NameNode             = "NodeFacet"
+	NameWorkload         = "WorkloadFacet"
+	NameBackgroundWorker = "BackgroundWorkerFacet"
+	NameQueue            = "QueueFacet"
+	NameScheduledJob     = "ScheduledJobFacet"
+	NameLoadBalancer     = "LoadBalancerFacet"
+	NameIngress          = "IngressFacet"
+	NameCertificate      = "CertificateFacet"
+	NameFirewall         = "FirewallFacet"
+	NameDNS              = "DNSFacet"
+	NameDatabase         = "DatabaseFacet"
+	NameSyncEngine       = "SyncEngineFacet"
+	NameCache            = "CacheFacet"
+	NameStorage          = "StorageFacet"
+	NameObservability    = "ObservabilityFacet"
+	NameExternal         = "ExternalFacet"
+	NameTraffic          = "TrafficFacet"
+	NameReplication      = "ReplicationFacet"
 )
 
 // DefaultLongTask is when a running task counts as stuck.
@@ -223,9 +223,9 @@ func EmitWorkload(o *probe.Observation, w WorkloadFacet, now time.Time) {
 
 // ---------------------------------------------------------------- worker
 
-// WorkerFacet is a fleet of background workers, whatever runs it: Celery,
-// Hatchet, Sidekiq, Temporal.
-type WorkerFacet struct {
+// BackgroundWorkerFacet is a fleet of background workers, whatever runs
+// it: Celery, Hatchet, Sidekiq, Temporal.
+type BackgroundWorkerFacet struct {
 	Online, Total       Num // workers
 	SlotsUsed, SlotsMax Num // concurrency
 	Active              Num // tasks running now
@@ -237,8 +237,8 @@ type WorkerFacet struct {
 	Since               SinceFunc
 }
 
-// EmitWorker writes the fleet into an observation.
-func EmitWorker(o *probe.Observation, w WorkerFacet, now time.Time) {
+// EmitBackgroundWorker writes the fleet into an observation.
+func EmitBackgroundWorker(o *probe.Observation, w BackgroundWorkerFacet, now time.Time) {
 	put(o, "workers_online", w.Online)
 	put(o, "workers_total", w.Total)
 	if w.SlotsMax.Set && w.SlotsMax.V > 0 {
@@ -332,16 +332,17 @@ func EmitQueue(o *probe.Observation, q QueueFacet, now time.Time) {
 
 // ---------------------------------------------------------------- job
 
-// JobFacet is a scheduled or one-off unit of work: a CronJob, a workflow.
-type JobFacet struct {
+// ScheduledJobFacet is a scheduled or one-off unit of work: a CronJob, a
+// workflow run on a schedule.
+type ScheduledJobFacet struct {
 	Active, Succeeded, Failed, Queued Num
 	LastFailure                       *Failure
 	Running                           *Task
 	Schedule                          string // plain words: "every 15 min", "cron 0 * * * *"
 }
 
-// EmitJob writes the job into an observation.
-func EmitJob(o *probe.Observation, j JobFacet, now time.Time) {
+// EmitScheduledJob writes the job into an observation.
+func EmitScheduledJob(o *probe.Observation, j ScheduledJobFacet, now time.Time) {
 	put(o, "active", j.Active)
 	put(o, "succeeded", j.Succeeded)
 	put(o, "failed", j.Failed)
@@ -643,9 +644,10 @@ func EmitReplication(o *probe.Observation, r ReplicationFacet, now time.Time) {
 
 // ---------------------------------------------------------------- sync
 
-// SyncFacet is a sync engine that serves clients from the replication
-// stream: Electric SQL. Its replication side is a ReplicationFacet.
-type SyncFacet struct {
+// SyncEngineFacet is a sync engine that serves clients from the
+// replication stream: Electric SQL. Its replication side is a
+// ReplicationFacet.
+type SyncEngineFacet struct {
 	Ready          bool
 	NotReadyDetail string
 	Latency        Num // ms
@@ -657,8 +659,8 @@ type SyncFacet struct {
 	Since          SinceFunc
 }
 
-// EmitSync writes the sync service into an observation.
-func EmitSync(o *probe.Observation, s SyncFacet, now time.Time) {
+// EmitSyncEngine writes the sync engine into an observation.
+func EmitSyncEngine(o *probe.Observation, s SyncEngineFacet, now time.Time) {
 	if s.Ready {
 		metrics(o)["ready"] = 1
 	} else {
@@ -826,3 +828,28 @@ func EmitTraffic(o *probe.Observation, t TrafficFacet, now time.Time) {
 		cond(o, model.CondConnectionRefused, o.Target, since, t.RefusedDetail)
 	}
 }
+
+// Transitional aliases for callers written against the first names of
+// these facets; remove once every probe uses the final names.
+type (
+	WorkerFacet = BackgroundWorkerFacet
+	JobFacet    = ScheduledJobFacet
+	SyncFacet   = SyncEngineFacet
+)
+
+const (
+	NameWorker = NameBackgroundWorker
+	NameJob    = NameScheduledJob
+	NameSync   = NameSyncEngine
+)
+
+// EmitWorker is EmitBackgroundWorker under its first name.
+func EmitWorker(o *probe.Observation, w BackgroundWorkerFacet, now time.Time) {
+	EmitBackgroundWorker(o, w, now)
+}
+
+// EmitJob is EmitScheduledJob under its first name.
+func EmitJob(o *probe.Observation, j ScheduledJobFacet, now time.Time) { EmitScheduledJob(o, j, now) }
+
+// EmitSync is EmitSyncEngine under its first name.
+func EmitSync(o *probe.Observation, s SyncEngineFacet, now time.Time) { EmitSyncEngine(o, s, now) }

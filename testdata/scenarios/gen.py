@@ -28,12 +28,12 @@ def topology(workers=("worker",), extras=False):
     ]
     for w in workers:
         label = "Workers" if w == "worker" else w
-        comps.append({"id": w, "type": "worker", "label": label, "group": "bookstore",
+        comps.append({"id": w, "type": "backgroundworker", "label": label, "group": "bookstore",
                       "runs_on": ["node-1", "node-2"]})
     comps += [
         {"id": "default-queue", "type": "queue", "label": "Default queue", "group": "bookstore"},
         {"id": "exports-queue", "type": "queue", "label": "Exports queue", "group": "bookstore"},
-        {"id": "docs-sync", "type": "job", "label": "Docs sync", "group": "bookstore"},
+        {"id": "docs-sync", "type": "scheduledjob", "label": "Docs sync", "group": "bookstore"},
         {"id": "cache", "type": "cache", "label": "Redis", "group": "bookstore"},
         {"id": "db", "type": "database", "label": "Database", "group": "bookstore", "engine": "postgres",
          "roles": {"primary": "db-primary", "replicas": ["db-r1", "db-r2"]}},
@@ -44,10 +44,10 @@ def topology(workers=("worker",), extras=False):
         comps += [
             {"id": "hatchet", "type": "workload", "label": "Hatchet engine", "group": "bookstore", "runs_on": ["node-1", "node-2"]},
             {"id": "hatchet-queue", "type": "queue", "label": "Hatchet tasks", "group": "bookstore"},
-            {"id": "hatchet-workers", "type": "worker", "label": "Hatchet workers", "group": "bookstore", "runs_on": ["node-2", "node-3"]},
-            {"id": "billing", "type": "job", "label": "Billing workflow", "group": "bookstore"},
+            {"id": "hatchet-workers", "type": "backgroundworker", "label": "Hatchet workers", "group": "bookstore", "runs_on": ["node-2", "node-3"]},
+            {"id": "billing", "type": "scheduledjob", "label": "Billing workflow", "group": "bookstore"},
             {"id": "hatchet-db", "type": "database", "label": "Hatchet DB", "group": "bookstore", "engine": "postgres"},
-            {"id": "electric", "type": "sync", "label": "Electric", "group": "bookstore", "runs_on": ["node-1"]},
+            {"id": "electric", "type": "syncengine", "label": "Electric", "group": "bookstore", "runs_on": ["node-1"]},
         ]
     edges = [
         {"from": "dns", "to": "lb", "kind": "tcp"},

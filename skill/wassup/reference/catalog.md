@@ -3,9 +3,9 @@
 Fifteen building block types plus `custom`. Each type declares its lane, the
 gauges drawn inside its box, the **facet** a probe must fill to feed it
 (`internal/probe/facet`; the facet is named after the type: `node` ↔
-`NodeFacet`, `worker` ↔ `WorkerFacet`), and the probes that ship for it.
-Use only these types. The older spellings `lb` and `db` are still accepted
-and normalized to `loadbalancer` and `database`.
+`NodeFacet`, `backgroundworker` ↔ `BackgroundWorkerFacet`), and the probes
+that ship for it. Use only these types. The older spellings `lb`, `db`, `job`,
+`worker` and `sync` are still accepted and normalized.
 
 | Type | Facet | Lane | Gauges shown in the box | Shipped probes | Notes |
 | --- | --- | --- | --- | --- | --- |
@@ -15,13 +15,13 @@ and normalized to `loadbalancer` and `database`.
 | `ingress` | `IngressFacet`, `CertificateFacet` | edge | req/s, error rate, cert days left | `k8s.ingress`, `cert.tls` | Behind an `lb` it is a hop, not an entry. |
 | `node` | `NodeFacet` | compute | CPU, RAM, disk, pod count | `k8s.node`, `kubelet.stats` | Container for workloads placed by `runs_on`; lists the hosted workloads with their states. |
 | `workload` | `WorkloadFacet` | compute | replicas ready/desired, CPU, RAM, restarts | `k8s.workload`, `hatchet.health` | Deployment, StatefulSet or DaemonSet; one box per workload, not per pod. |
-| `worker` | `WorkerFacet`, `WorkloadFacet` | compute | workers online/total, slots used/max, ready, CPU, RAM | `hatchet.workers`, `celery.worker`, `k8s.workload` | A fleet of background workers, whatever runs it. Every slot busy with work queued reads "waiting, all 24 slots busy, 850 queued"; a task past 10× the usual duration reads as stuck. |
-| `job` | `JobFacet` | compute | running, succeeded, failed last 24h | `k8s.cronjob`, `hatchet.workflow` | CronJobs, one-off jobs and Hatchet workflows. Entry point. |
+| `backgroundworker` | `BackgroundWorkerFacet`, `WorkloadFacet` | compute | workers online/total, slots used/max, ready, CPU, RAM | `hatchet.workers`, `celery.worker`, `k8s.workload` | A fleet of background workers, whatever runs it. Every slot busy with work queued reads "waiting, all 24 slots busy, 850 queued"; a task past 10× the usual duration reads as stuck. |
+| `scheduledjob` | `ScheduledJobFacet` | compute | running, succeeded, failed last 24h | `k8s.cronjob`, `hatchet.workflow` | CronJobs, one-off jobs and Hatchet workflows. Entry point. |
 | `queue` | `QueueFacet` | compute | depth, oldest age, consumers | `celery.queue`, `amqp.queue`, `redis.list`, `hatchet.queue` | Depth is drawn as a growing pile. Celery on Redis binds `celery.queue`; Celery on RabbitMQ binds `amqp.queue` (management API); Hatchet queues bind `hatchet.queue`. |
 | `cache` | `CacheFacet` | data | memory used/max, hit rate, evictions | `redis.info` | Full memory with a low hit rate flips it to failing. |
 | `database` | `DatabaseFacet`, `ReplicationFacet` | data | CPU, RAM, disk, connections used/max, replication lag | `cnpg.cluster`, `cnpg.instance`, `pg.stats` | `roles: {primary, replicas}` creates one instance component each; replication edges go between them. |
 | `storage` | `StorageFacet` | data | used/total, IOPS | `k8s.pvc`, `s3.bucket` | Volumes, buckets. |
-| `sync` | `SyncFacet`, `ReplicationFacet` | data | replication lag, WAL retained, latency | `electric.sync`, `pg.stats` | A sync engine following the database's replication stream (Electric SQL). Bind `pg.stats` with `replica: <slot name>` on the component and on its replication edge, so an inactive slot shows as failing and the retained WAL as a trend on the primary. |
+| `syncengine` | `SyncEngineFacet`, `ReplicationFacet` | data | replication lag, WAL retained, latency | `electric.sync`, `pg.stats` | A sync engine following the database's replication stream (Electric SQL). Bind `pg.stats` with `replica: <slot name>` on the component and on its replication edge, so an inactive slot shows as failing and the retained WAL as a trend on the primary. |
 | `observability` | `ObservabilityFacet` | side | ingest rate, retention disk | `signoz.health` | The source of traffic data; when it fails, edges show "no data", not idle. |
 | `external` | `ExternalFacet` | side | latency, error rate, timeouts | `signoz.edge`, `http.ping` | GitHub, LLM providers, payment APIs, anything outside your control. |
 | `custom` | any | compute | none | any | Free icon, no gauges. |
@@ -79,18 +79,18 @@ components:
 **Hatchet** (background workflows on Postgres): the engine is a `workload`
 (`k8s.workload` plus `hatchet.health`), each Hatchet queue or workflow with a
 backlog is a `queue` (`hatchet.queue`, filter with `queue:` or `workflow:`),
-the worker deployment is a `worker` (`k8s.workload` plus `hatchet.workers`,
+the worker deployment is a `backgroundworker` (`k8s.workload` plus `hatchet.workers`,
 which adds slots, long tasks and the backlog behind full slots), every
-workflow you care about is a `job` (`hatchet.workflow`), and Hatchet's
+workflow you care about is a `scheduledjob` (`hatchet.workflow`), and Hatchet's
 Postgres is a `database` on `pg.stats`. Edges: api → hatchet queue (`queue`), queue →
 workers (`queue`), workers → your database (`sql`), engine → hatchet db (`sql`).
 
 **Celery**: each queue is a `queue` (`celery.queue` on a Redis broker or
-`amqp.queue` on RabbitMQ), the worker deployment is a `worker`
+`amqp.queue` on RabbitMQ), the worker deployment is a `backgroundworker`
 (`k8s.workload` plus `celery.worker` through Flower for online workers,
 concurrency and stuck tasks).
 
-**Electric SQL**: one `sync` component (`electric.sync` for health and the
+**Electric SQL**: one `syncengine` component (`electric.sync` for health and the
 shape handshake, `pg.stats` with `replica: electric_slot_default` for the
 slot), a `replication` edge from the primary to it bound with the same
 `pg.stats` replica spec, and an `http` edge from the ingress to it for the
