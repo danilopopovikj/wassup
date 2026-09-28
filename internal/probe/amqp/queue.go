@@ -320,28 +320,28 @@ func (p *Queue) poll(ctx context.Context, c config) probe.Observation {
 	}
 
 	o.Metrics = map[string]float64{}
-	f := facet.Queue{Known: q.MessagesReady != nil}
+	f := facet.QueueFacet{}
 	if q.MessagesReady != nil {
-		f.Depth = int(*q.MessagesReady)
-		p.ring.push(now, float64(f.Depth))
+		f.Depth = facet.NI(int(*q.MessagesReady))
+		p.ring.push(now, f.Depth.V)
 		if g, ok := p.ring.growth(); ok {
-			f.GrowthPerMin, f.HasGrowth = g, true
+			f.GrowthPerMin = facet.N(g)
 		}
 	}
 	if q.MessagesUnacked != nil {
 		o.Metrics["unacked"] = float64(*q.MessagesUnacked)
 	}
 	if q.Consumers != nil {
-		f.Consumers, f.HasConsumers = int(*q.Consumers), true
+		f.Consumers = facet.NI(int(*q.Consumers))
 	}
 	if q.MessageStats != nil {
 		if r := rateOf(q.MessageStats.DeliverGet); r != nil {
-			f.Rate, f.HasRate = *r, true
+			f.Rate = facet.N(*r)
 		} else if r := rateOf(q.MessageStats.Ack); r != nil {
-			f.Rate, f.HasRate = *r, true
+			f.Rate = facet.N(*r)
 		}
 		if r := rateOf(q.MessageStats.Publish); r != nil {
-			f.PublishRate, f.HasPublishRate = *r, true
+			f.PublishRate = facet.N(*r)
 		}
 	}
 	if q.HeadMessageTimestamp != nil && *q.HeadMessageTimestamp > 0 {

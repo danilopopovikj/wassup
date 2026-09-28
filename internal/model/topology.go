@@ -45,11 +45,11 @@ func (t *Topology) Edge(id string) (Edge, bool) {
 func (t *Topology) RoleInstances() []Component {
 	var out []Component
 	for _, c := range t.Components {
-		if c.Type != "db" || c.Roles == nil {
+		if c.Type != "database" || c.Roles == nil {
 			continue
 		}
 		mk := func(id, role string) Component {
-			return Component{ID: id, Type: "db", Label: id, Group: c.ID, Lane: c.Lane, Engine: c.Engine, Owner: c.Owner, Parent: c.ID, Notes: role}
+			return Component{ID: id, Type: "database", Label: id, Group: c.ID, Lane: c.Lane, Engine: c.Engine, Owner: c.Owner, Parent: c.ID, Notes: role}
 		}
 		if c.Roles.Primary != "" {
 			out = append(out, mk(c.Roles.Primary, "primary"))
@@ -73,14 +73,14 @@ func (t *Topology) AllComponents() []Component {
 // HasRoles reports whether the component is a db that declares roles.
 func (t *Topology) HasRoles(id string) bool {
 	c, ok := t.Component(id)
-	return ok && c.Type == "db" && c.Roles != nil && c.Roles.Primary != ""
+	return ok && c.Type == "database" && c.Roles != nil && c.Roles.Primary != ""
 }
 
 // BoxFor returns the id of the box that draws an element. A db with roles is
 // drawn as a container, so its edges anchor on the primary instance.
 func (t *Topology) BoxFor(id string) string {
 	c, ok := t.Component(id)
-	if ok && c.Type == "db" && c.Roles != nil && c.Roles.Primary != "" {
+	if ok && c.Type == "database" && c.Roles != nil && c.Roles.Primary != "" {
 		return c.Roles.Primary
 	}
 	return id
@@ -90,12 +90,12 @@ func (t *Topology) BoxFor(id string) string {
 func (t *Topology) AllGroups() []Group {
 	out := append([]Group(nil), t.Groups...)
 	for _, c := range t.Components {
-		if c.Type == "db" && c.Roles != nil && c.Roles.Primary != "" {
+		if c.Type == "database" && c.Roles != nil && c.Roles.Primary != "" {
 			label := c.DisplayLabel()
 			if c.Engine != "" {
 				label += " (" + c.Engine + ")"
 			}
-			out = append(out, Group{ID: c.ID, Kind: "db", Label: label, Parent: c.Group})
+			out = append(out, Group{ID: c.ID, Kind: "database", Label: label, Parent: c.Group})
 		}
 	}
 	return out

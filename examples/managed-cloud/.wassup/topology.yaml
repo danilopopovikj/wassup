@@ -50,7 +50,7 @@ components:
     group: shop
     runs_on: [web-1, web-2]
   - id: worker
-    type: workload
+    type: worker
     label: Workers
     group: shop
     runs_on: [jobs-1]

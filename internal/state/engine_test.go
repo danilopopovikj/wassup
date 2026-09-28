@@ -14,11 +14,11 @@ var now = time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
 
 func topo() *model.Topology {
 	return &model.Topology{Name: "t", Components: []model.Component{
-		{ID: "lb", Type: "lb", Label: "Load balancer"},
+		{ID: "lb", Type: "loadbalancer", Label: "Load balancer"},
 		{ID: "ingress", Type: "ingress", Label: "Ingress"},
 		{ID: "api", Type: "workload", Label: "API", RunsOn: []string{"n1"}},
 		{ID: "n1", Type: "node"},
-		{ID: "db", Type: "db", Label: "Database"},
+		{ID: "db", Type: "database", Label: "Database"},
 		{ID: "q", Type: "queue", Label: "Jobs"},
 		{ID: "obs", Type: "observability", Label: "SigNoz"},
 	}, Edges: []model.Edge{

@@ -157,13 +157,13 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 		list = append(list, entry)
 	}
 	o.Detail["workers"] = list
-	pool := facet.WorkerPool{
-		Known: true, Online: online, Total: len(workers), LongTask: st.longTask,
+	pool := facet.WorkerFacet{
+		Online: facet.NI(online), Total: facet.NI(len(workers)), LongTask: st.longTask,
 		NotReadyDetail: "no active Hatchet workers",
 		Since:          func(key string, at time.Time) time.Time { return st.seen.mark(key, at) },
 	}
 	if slotsKnown {
-		pool.SlotsUsed, pool.SlotsMax = int(poolUsed), int(poolMax)
+		pool.SlotsUsed, pool.SlotsMax = facet.N(poolUsed), facet.N(poolMax)
 	}
 
 	var problems []string
@@ -177,7 +177,7 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 	if err != nil {
 		problems = append(problems, "running tasks: "+err.Error())
 	} else {
-		pool.Active, pool.HasActive = len(running), true
+		pool.Active = facet.NI(len(running))
 		var long []map[string]any
 		for _, r := range running {
 			started := firstOf(r.StartedAt, r.CreatedAt)
@@ -195,7 +195,7 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 	if err != nil {
 		problems = append(problems, "queue metrics: "+err.Error())
 	} else {
-		pool.Backlog, pool.HasBacklog = int(qm.total().depth()), true
+		pool.Backlog = facet.N(qm.total().depth())
 	}
 
 	done, err := st.c.runs(ctx, runQuery{
@@ -221,7 +221,7 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 
 	// The facet writes the canonical form: metrics, TaskRunning,
 	// PoolExhausted, NotReady, the same for every worker backend.
-	facet.EmitWorkerPool(&o, pool, now)
+	facet.EmitWorker(&o, pool, now)
 	live := map[string]bool{}
 	for _, c := range o.Conditions {
 		switch c.Kind {

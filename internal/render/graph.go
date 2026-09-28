@@ -60,12 +60,13 @@ type DrawOptions struct {
 var primaryGauges = map[string][]string{
 	"node":          {"cpu", "ram", "disk"},
 	"workload":      {"ready", "cpu", "ram"},
-	"lb":            {"targets"},
+	"loadbalancer":  {"targets"},
+	"worker":        {"workers", "slots", "cpu"},
 	"ingress":       {"errors", "cert"},
 	"job":           {"running", "ok 24h", "failed"},
 	"queue":         {"depth", "oldest"},
 	"cache":         {"mem", "hits"},
-	"db":            {"conns", "cpu", "disk"},
+	"database":      {"conns", "cpu", "disk"},
 	"storage":       {"used"},
 	"observability": {"ingest", "disk"},
 	"external":      {"latency", "errors"},
@@ -213,7 +214,7 @@ func DrawOn(c *Canvas, g *layout.Graph, opts DrawOptions) {
 }
 
 func groupTitle(gf layout.GroupFrame, opts DrawOptions) string {
-	if opts.Detail == model.DetailFull && gf.Kind != "" && gf.Kind != "db" {
+	if opts.Detail == model.DetailFull && gf.Kind != "" && gf.Kind != "database" {
 		return " " + gf.Label + " · " + gf.Kind + " "
 	}
 	return " " + gf.Label + " "
@@ -321,7 +322,7 @@ func drawBox(c *Canvas, g *layout.Graph, b *layout.Box, snap *model.Snapshot, op
 			hint = comp.Group
 		}
 	}
-	if comp.Type == "db" && comp.Notes != "" && comp.Parent != "" {
+	if comp.Type == "database" && comp.Notes != "" && comp.Parent != "" {
 		hint = comp.Notes // primary / replica: always worth knowing
 	}
 	if hint != "" && inner-len([]rune(label))-3 >= len([]rune(hint)) {

@@ -153,7 +153,7 @@ func Propose(f *Findings, opts ProposeOptions) *Proposal {
 		}
 		// A db with roles anchors its replication edges on the instances.
 		fromID, toID := l.From, l.To
-		if kind == "replication" && from.Type == "db" && from.Roles != nil {
+		if kind == "replication" && from.Type == "database" && from.Roles != nil {
 			fromID = from.Roles.Primary
 		}
 		id := model.EdgeID(fromID, toID)
@@ -188,7 +188,7 @@ func Propose(f *Findings, opts ProposeOptions) *Proposal {
 		}
 		var dbs []model.Component
 		for _, d := range t.Components {
-			if d.Type == "db" && (d.Engine == "postgres" || d.Engine == "") {
+			if d.Type == "database" && (d.Engine == "postgres" || d.Engine == "") {
 				dbs = append(dbs, d)
 			}
 		}
@@ -246,7 +246,7 @@ func kindFor(from, to model.Component, hint string) string {
 		return "tcp"
 	}
 	switch to.Type {
-	case "db":
+	case "database":
 		return "sql"
 	case "cache":
 		return "cache"
@@ -255,12 +255,12 @@ func kindFor(from, to model.Component, hint string) string {
 	case "external":
 		return "external"
 	case "sync":
-		if from.Type == "db" {
+		if from.Type == "database" {
 			return "replication"
 		}
 		return "http"
-	case "workload", "ingress", "lb":
-		if from.Type == "lb" && to.Type == "node" {
+	case "workload", "ingress", "loadbalancer":
+		if from.Type == "loadbalancer" && to.Type == "node" {
 			return "tcp"
 		}
 		if hint == "grpc" {
@@ -299,7 +299,7 @@ func bindingsFor(c Candidate, opts ProposeOptions) []model.ProbeSpec {
 	}
 	svc := firstAddress(c.Addresses)
 	switch c.Type {
-	case "workload":
+	case "workload", "worker":
 		if c.Selector != "" {
 			out = append(out, k8s("k8s.workload", map[string]any{"selector": c.Selector}))
 		} else if c.Name != "" && c.Kind != "" {
@@ -324,7 +324,7 @@ func bindingsFor(c Candidate, opts ProposeOptions) []model.ProbeSpec {
 		}
 	case "node":
 		out = append(out, model.ProbeSpec{"probe": "k8s.node", "name": c.Name})
-	case "db":
+	case "database":
 		if c.Extra["cnpg"] == "true" {
 			out = append(out, k8s("cnpg.cluster", map[string]any{"cluster": c.Name}))
 		}
@@ -350,7 +350,7 @@ func bindingsFor(c Candidate, opts ProposeOptions) []model.ProbeSpec {
 			spec["table"] = tables[0]
 		}
 		out = append(out, spec)
-	case "lb":
+	case "loadbalancer":
 		if strings.HasPrefix(c.Extra["terraform"], "hcloud_") {
 			out = append(out, model.ProbeSpec{"probe": "hcloud.lb", "name": c.Name, "token_env": "HCLOUD_TOKEN"})
 		}

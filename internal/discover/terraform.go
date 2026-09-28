@@ -34,11 +34,11 @@ type tfResource struct {
 
 // tfTypeMap maps terraform resource types to catalog types.
 var tfTypeMap = map[string]string{
-	"hcloud_load_balancer": "lb", "aws_lb": "lb", "aws_alb": "lb", "aws_elb": "lb", "google_compute_forwarding_rule": "lb", "google_compute_global_forwarding_rule": "lb", "digitalocean_loadbalancer": "lb", "azurerm_lb": "lb",
+	"hcloud_load_balancer": "loadbalancer", "aws_lb": "loadbalancer", "aws_alb": "loadbalancer", "aws_elb": "loadbalancer", "google_compute_forwarding_rule": "loadbalancer", "google_compute_global_forwarding_rule": "loadbalancer", "digitalocean_loadbalancer": "loadbalancer", "azurerm_lb": "loadbalancer",
 	"hcloud_firewall": "firewall", "aws_security_group": "firewall", "google_compute_firewall": "firewall", "digitalocean_firewall": "firewall", "azurerm_network_security_group": "firewall",
 	"hcloud_server": "node", "aws_instance": "node", "google_compute_instance": "node", "digitalocean_droplet": "node", "azurerm_linux_virtual_machine": "node",
 	"hcloud_volume": "storage", "aws_ebs_volume": "storage", "aws_s3_bucket": "storage", "google_storage_bucket": "storage", "digitalocean_spaces_bucket": "storage", "azurerm_storage_account": "storage", "aws_efs_file_system": "storage",
-	"aws_db_instance": "db", "aws_rds_cluster": "db", "google_sql_database_instance": "db", "digitalocean_database_cluster": "db", "azurerm_postgresql_flexible_server": "db", "postgresql_database": "db",
+	"aws_db_instance": "database", "aws_rds_cluster": "database", "google_sql_database_instance": "database", "digitalocean_database_cluster": "database", "azurerm_postgresql_flexible_server": "database", "postgresql_database": "database",
 	"aws_elasticache_cluster": "cache", "aws_elasticache_replication_group": "cache", "google_redis_instance": "cache", "azurerm_redis_cache": "cache",
 	"aws_sqs_queue": "queue", "google_pubsub_topic": "queue", "aws_mq_broker": "queue",
 	"cloudflare_record": "dns", "cloudflare_dns_record": "dns", "aws_route53_record": "dns", "google_dns_record_set": "dns", "digitalocean_record": "dns", "hcloud_rdns": "dns", "dns_a_record_set": "dns",
@@ -51,7 +51,7 @@ var helmChartMap = map[string]string{
 	"redis": "cache", "valkey": "cache", "redis-cluster": "cache",
 	"rabbitmq": "queue", "nats": "queue", "kafka": "queue",
 	"signoz": "observability", "kube-prometheus-stack": "observability", "prometheus": "observability", "grafana": "observability", "loki": "observability", "opentelemetry-collector": "observability",
-	"postgresql": "db", "postgresql-ha": "db", "cloudnative-pg": "custom", "cnpg": "custom",
+	"postgresql": "database", "postgresql-ha": "database", "cloudnative-pg": "custom", "cnpg": "custom",
 	"ingress-nginx": "ingress", "traefik": "ingress", "cert-manager": "custom",
 }
 
@@ -160,7 +160,7 @@ func terraformAttachment(a *accumulator, r *tfResource, addr map[string]string) 
 			continue
 		}
 		switch tfTypeMap[t] {
-		case "lb":
+		case "loadbalancer":
 			lbs = append(lbs, id)
 		case "firewall":
 			fws = append(fws, id)
@@ -272,7 +272,7 @@ func terraformResource(a *accumulator, r *tfResource, addr map[string]string) {
 		c.Group = groupIDFor(tfProviderOf(r.Type))
 	}
 	switch typ {
-	case "db":
+	case "database":
 		c.Engine = engineOf(r.Attrs)
 		if src := r.Attrs["replicate_source_db"]; src != "" {
 			c.Extra["replica_of"] = src
@@ -290,7 +290,7 @@ func terraformResource(a *accumulator, r *tfResource, addr map[string]string) {
 			c.Label = host
 			c.Addresses = append(c.Addresses, host)
 		}
-	case "lb":
+	case "loadbalancer":
 		if r.Attrs["location"] != "" {
 			c.Extra["location"] = r.Attrs["location"]
 		}
@@ -308,13 +308,13 @@ func terraformResource(a *accumulator, r *tfResource, addr map[string]string) {
 			refID = model.SlugifyID(n)
 		}
 		switch {
-		case typ == "lb" && refType == "node", t == "hcloud_load_balancer_target":
+		case typ == "loadbalancer" && refType == "node", t == "hcloud_load_balancer_target":
 			a.link(Link{From: added.ID, To: refID, Kind: "tcp", Evidence: []Evidence{{Source: "terraform", File: r.File, Line: r.Line, Note: r.Type + "." + r.Name + " references " + ref}}})
 		case typ == "firewall" && refType == "node":
 			added.Extra["applies_to"] = strings.TrimSpace(added.Extra["applies_to"] + " " + refID)
-		case typ == "dns" && refType == "lb":
+		case typ == "dns" && refType == "loadbalancer":
 			a.link(Link{From: added.ID, To: refID, Kind: "tcp", Evidence: []Evidence{{Source: "terraform", File: r.File, Line: r.Line, Note: "record points at " + ref}}})
-		case typ == "db" && refType == "db":
+		case typ == "database" && refType == "database":
 			added.Extra["replica_of"] = refID
 		}
 	}

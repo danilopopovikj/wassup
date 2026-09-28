@@ -55,7 +55,10 @@ type Probe interface {
 // Factory builds a fresh probe instance for one binding.
 type Factory func() Probe
 
-// Access documents what a probe needs to read its source.
+// Access documents what a probe needs to read its source and which facets
+// it fills (internal/probe/facet). `wassup validate` checks a binding by
+// facet: a probe may bind to a component whose type accepts one of the
+// facets the probe declares, or to an edge when it declares an edge facet.
 type Access struct {
 	Kind        string   `json:"kind"`
 	Source      string   `json:"source"`
@@ -63,6 +66,7 @@ type Access struct {
 	SpecFields  []string `json:"spec_fields"`
 	Needs       string   `json:"needs"`
 	Implemented bool     `json:"implemented"`
+	Facets      []string `json:"facets,omitempty"`
 }
 
 var (

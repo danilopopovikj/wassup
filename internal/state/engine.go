@@ -97,7 +97,7 @@ func Evaluate(in Input) *model.Snapshot {
 	}
 	// Roles: a db with roles inherits from its primary and notes replica trouble.
 	for _, comp := range c.t.Components {
-		if comp.Type == "db" && comp.Roles != nil && comp.Roles.Primary != "" {
+		if comp.Type == "database" && comp.Roles != nil && comp.Roles.Primary != "" {
 			c.rollupRoles(comp)
 		}
 	}
@@ -292,7 +292,7 @@ func (c *ctx) failingReason(comp model.Component, j *bind.Joined, th model.Thres
 	has := func(k string) (model.Condition, bool) { return model.HasCondition(conds, k) }
 
 	switch comp.Type {
-	case "workload":
+	case "workload", "worker":
 		if cnd, ok := has(model.CondCrashLoopBackOff); ok {
 			return c.failingReplicaPhrase(j) + c.restartPhrase(j, cnd)
 		}
@@ -392,7 +392,7 @@ func (c *ctx) failingReason(comp model.Component, j *bind.Joined, th model.Thres
 		if hasHit && hit < th.HitRateMinPct && mem < 99.5 {
 			return fmt.Sprintf("%s misses", Pct(100-hit))
 		}
-	case "db":
+	case "database":
 		if cnd, ok := has(model.CondReplicationBroken); ok {
 			return replicationPhrase(now, j, cnd, false)
 		}
@@ -414,7 +414,7 @@ func (c *ctx) failingReason(comp model.Component, j *bind.Joined, th model.Thres
 			}
 			return s
 		}
-	case "lb":
+	case "loadbalancer":
 		if _, ok := has(model.CondTargetUnhealthy); ok {
 			if h, ok := metric(j, "targets_healthy"); ok && h == 0 {
 				return "no healthy targets"
@@ -539,7 +539,7 @@ func (c *ctx) waitingReason(comp model.Component, j *bind.Joined, th model.Thres
 	_, exhausted := model.HasCondition(j.Conditions, model.CondPoolExhausted)
 	if (ok1 && ok2 && max > 0 && used >= max) || exhausted {
 		if w := metricOr(j, "waiters", 0); w > 0 || exhausted {
-			if comp.Type == "workload" {
+			if comp.Type == "workload" || comp.Type == "worker" {
 				// a worker pool: every slot busy, work piling up behind it
 				return fmt.Sprintf("all %s slots busy, %s queued", Num(max), Num(w))
 			}
@@ -665,7 +665,7 @@ func (c *ctx) evalEdge(e model.Edge) model.ElementState {
 	dst := c.snap.Components[e.To]
 	dstComp, _ := c.t.Component(e.To)
 	dstLabel := "the " + Lower(dstComp.DisplayLabel())
-	if dstComp.Type == "external" || dstComp.Type == "node" || dstComp.Type == "workload" {
+	if dstComp.Type == "external" || dstComp.Type == "node" || dstComp.Type == "workload" || dstComp.Type == "worker" {
 		dstLabel = Lower(dstComp.DisplayLabel())
 	}
 

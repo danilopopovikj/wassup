@@ -89,7 +89,7 @@ func AddCluster(f *Findings, inv *k8s.Inventory) {
 		for i := 1; i < int(cl.Instances); i++ {
 			roles.Replicas = append(roles.Replicas, model.SlugifyID(cl.Name)+"-r"+itoa(i))
 		}
-		c := Candidate{ID: model.SlugifyID(cl.Name), Type: "db", Label: labelFor(cl.Name), Engine: "postgres", Namespace: cl.Namespace, Name: cl.Name, Roles: roles,
+		c := Candidate{ID: model.SlugifyID(cl.Name), Type: "database", Label: labelFor(cl.Name), Engine: "postgres", Namespace: cl.Namespace, Name: cl.Name, Roles: roles,
 			Extra: map[string]string{"cnpg": "true", "primary_pod": cl.Primary}, Evidence: []Evidence{ev("CNPG Cluster " + cl.Namespace + "/" + cl.Name + " (" + itoa(int(cl.Instances)) + " instances)")}}
 		for _, suffix := range []string{"-rw", "-ro", "-r", ""} {
 			c.Addresses = append(c.Addresses, serviceAddresses(cl.Name+suffix, cl.Namespace)...)

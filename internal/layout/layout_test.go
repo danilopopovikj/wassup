@@ -10,13 +10,13 @@ func sample() *model.Topology {
 	return &model.Topology{Name: "t",
 		Groups: []model.Group{{ID: "cloud", Kind: "cloud", Label: "Cloud"}, {ID: "k", Kind: "cluster", Parent: "cloud"}},
 		Components: []model.Component{
-			{ID: "lb", Type: "lb", Group: "cloud"},
+			{ID: "lb", Type: "loadbalancer", Group: "cloud"},
 			{ID: "n1", Type: "node", Group: "k"},
 			{ID: "n2", Type: "node", Group: "k"},
 			{ID: "api", Type: "workload", Group: "k", RunsOn: []string{"n1", "n2"}},
 			{ID: "worker", Type: "workload", Group: "k"},
 			{ID: "q", Type: "queue", Group: "k"},
-			{ID: "db", Type: "db", Group: "k", Roles: &model.Roles{Primary: "p", Replicas: []string{"r"}}},
+			{ID: "db", Type: "database", Group: "k", Roles: &model.Roles{Primary: "p", Replicas: []string{"r"}}},
 			{ID: "ext", Type: "external"},
 		},
 		Edges: []model.Edge{

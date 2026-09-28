@@ -56,7 +56,7 @@ components:
       - node-3
     owner: "@danilo"
   - id: worker
-    type: workload
+    type: worker
     label: Workers
     group: bookstore
     runs_on:

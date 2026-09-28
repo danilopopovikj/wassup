@@ -27,10 +27,10 @@ var imageTypes = []struct {
 	{"redis", "cache", "Redis"},
 	{"valkey", "cache", "Valkey"},
 	{"memcached", "cache", "Memcached"},
-	{"postgres", "db", "Postgres"},
-	{"cloudnative-pg/postgresql", "db", "Postgres"},
-	{"mysql", "db", "MySQL"},
-	{"mariadb", "db", "MariaDB"},
+	{"postgres", "database", "Postgres"},
+	{"cloudnative-pg/postgresql", "database", "Postgres"},
+	{"mysql", "database", "MySQL"},
+	{"mariadb", "database", "MariaDB"},
 	{"signoz", "observability", "SigNoz"},
 	{"otel/opentelemetry-collector", "observability", "OTel collector"},
 	{"prom/prometheus", "observability", "Prometheus"},
@@ -269,7 +269,7 @@ func manifestObject(a *accumulator, rel string, line int, obj k8sObj, source str
 		if v, err := strconv.Atoi(str(obj.Spec, "instances")); err == nil {
 			instances = v
 		}
-		c := Candidate{ID: model.SlugifyID(name), Type: "db", Label: labelFor(name), Engine: "postgres", Namespace: ns, Name: name, Extra: map[string]string{"cnpg": "true", "instances": strconv.Itoa(instances)}, Evidence: []Evidence{ev}}
+		c := Candidate{ID: model.SlugifyID(name), Type: "database", Label: labelFor(name), Engine: "postgres", Namespace: ns, Name: name, Extra: map[string]string{"cnpg": "true", "instances": strconv.Itoa(instances)}, Evidence: []Evidence{ev}}
 		roles := &model.Roles{Primary: model.SlugifyID(name) + "-primary"}
 		for i := 1; i < instances; i++ {
 			roles.Replicas = append(roles.Replicas, model.SlugifyID(name)+"-r"+strconv.Itoa(i))
@@ -307,11 +307,11 @@ var envHints = []struct {
 	dstType string
 	note    string
 }{
-	{"DATABASE_URL", "sql", "db", "database connection"},
-	{"POSTGRES", "sql", "db", "database connection"},
-	{"PG_DSN", "sql", "db", "database connection"},
-	{"PGHOST", "sql", "db", "database host"},
-	{"DB_HOST", "sql", "db", "database host"},
+	{"DATABASE_URL", "sql", "database", "database connection"},
+	{"POSTGRES", "sql", "database", "database connection"},
+	{"PG_DSN", "sql", "database", "database connection"},
+	{"PGHOST", "sql", "database", "database host"},
+	{"DB_HOST", "sql", "database", "database host"},
 	{"REDIS", "cache", "cache", "redis connection"},
 	{"CELERY_BROKER", "queue", "queue", "celery broker"},
 	{"BROKER_URL", "queue", "queue", "broker"},
@@ -320,7 +320,7 @@ var envHints = []struct {
 	{"HATCHET_CLIENT_HOST_PORT", "grpc", "workload", "hatchet engine"},
 	{"HATCHET_CLIENT_TOKEN", "grpc", "workload", "hatchet token"},
 	{"ELECTRIC_URL", "http", "sync", "electric shapes"},
-	{"ELECTRIC_DATABASE_URL", "replication", "db", "electric source database"},
+	{"ELECTRIC_DATABASE_URL", "replication", "database", "electric source database"},
 	{"SIGNOZ", "tcp", "observability", "traces"},
 	{"OTEL_EXPORTER_OTLP_ENDPOINT", "tcp", "observability", "traces"},
 	{"SENTRY_DSN", "external", "external", "error tracking"},
@@ -407,8 +407,13 @@ func commandLinks(a *accumulator, c *Candidate, cmds []string, rel string, line 
 			c.Extra["flower"] = "true"
 		}
 	}
-	if strings.Contains(strings.ToLower(c.Image), "hatchet") || c.Env["HATCHET_CLIENT_TOKEN"] != "" && c.Type == "workload" && strings.Contains(strings.ToLower(c.Name), "worker") {
+	img := strings.ToLower(c.Image)
+	official := strings.Contains(img, "hatchet-dev/hatchet-") // engine, api, dashboard, lite
+	if !official && c.Type == "workload" && (strings.Contains(img, "hatchet") || c.Env["HATCHET_CLIENT_TOKEN"] != "") && strings.Contains(strings.ToLower(c.Name+" "+img), "worker") {
 		c.Extra["hatchet_worker"] = "true"
+	}
+	if c.Type == "workload" && (c.Extra["celery_worker"] == "true" || c.Extra["hatchet_worker"] == "true") {
+		c.Type = "worker"
 	}
 }
 

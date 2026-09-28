@@ -221,6 +221,9 @@ func Load(dir string) (*Config, error) {
 	} else {
 		cfg.Present["topology.yaml"] = true
 		issues = append(issues, ValidateDoc("topology", "topology.yaml", generic)...)
+		for i := range cfg.Topology.Components {
+			cfg.Topology.Components[i].Type = NormalizeType(cfg.Topology.Components[i].Type)
+		}
 	}
 
 	optionalYAML := []struct {
@@ -317,7 +320,7 @@ func (c *Config) CrossCheck() []Problem {
 				add("topology.yaml", fmt.Sprintf("/components/%d/runs_on", i), n+" is a "+nc.Type+", runs_on must name nodes")
 			}
 		}
-		if comp.Roles != nil && comp.Type != "db" {
+		if comp.Roles != nil && comp.Type != "database" {
 			add("topology.yaml", fmt.Sprintf("/components/%d/roles", i), "roles are only allowed on db components")
 		}
 		if _, ok := Catalog[comp.Type]; !ok {

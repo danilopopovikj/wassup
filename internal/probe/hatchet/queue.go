@@ -140,10 +140,9 @@ func (p *QueueProbe) poll(ctx context.Context, st *queueState) probe.Observation
 			"legacy": qm.legacy,
 		},
 	}
-	q := facet.Queue{Known: true, Depth: int(s.queued)}
+	q := facet.QueueFacet{Depth: facet.N(s.queued)}
 	if s.known {
-		q.Pending, q.HasPending = int(s.pending), true
-		q.Running, q.HasRunning = int(s.running), true
+		q.Pending, q.Running = facet.N(s.pending), facet.N(s.running)
 	}
 	if t := qm.total(); t.known {
 		o.Detail["total"] = map[string]any{"queued": t.queued, "pending": t.pending, "running": t.running}
@@ -160,7 +159,7 @@ func (p *QueueProbe) poll(ctx context.Context, st *queueState) probe.Observation
 	}
 	st.ring.push(now, s.depth())
 	if g, ok := st.ring.growth(); ok {
-		q.GrowthPerMin, q.HasGrowth = g, true
+		q.GrowthPerMin = facet.N(g)
 	}
 
 	var problems []string
@@ -178,7 +177,7 @@ func (p *QueueProbe) poll(ctx context.Context, st *queueState) probe.Observation
 				consumers++
 			}
 		}
-		q.Consumers, q.HasConsumers = consumers, true
+		q.Consumers = facet.NI(consumers)
 	}
 
 	if age, scope, err := p.oldestQueued(ctx, st, now); err != nil {

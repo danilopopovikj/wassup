@@ -184,7 +184,7 @@ func Compute(t *model.Topology, l model.Layout, opts Options) *Graph {
 	var items []item
 	seenGroupBox := map[string]bool{}
 	for _, c := range t.AllComponents() {
-		if c.Type == "db" && c.Roles != nil && c.Roles.Primary != "" {
+		if c.Type == "database" && c.Roles != nil && c.Roles.Primary != "" {
 			g.BoxOf[c.ID] = c.Roles.Primary
 			continue // drawn as a group of instances
 		}

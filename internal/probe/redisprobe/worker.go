@@ -300,13 +300,13 @@ func (p *WorkerProbe) round(ctx context.Context, flower *flowerClient, c workerC
 	sort.Strings(queueNames)
 	o.Detail["queues"] = queueNames
 
-	pool := facet.WorkerPool{
-		Known: true, Online: online, Total: len(names), Active: active, HasActive: true, LongTask: c.longTask,
+	pool := facet.WorkerFacet{
+		Online: facet.NI(online), Total: facet.NI(len(names)), Active: facet.NI(active), LongTask: c.longTask,
 		NotReadyDetail: "no Celery workers online",
 		Since:          func(key string, at time.Time) time.Time { return seen.mark(key, at) },
 	}
 	if poolMax > 0 {
-		pool.SlotsUsed, pool.SlotsMax = active, poolMax
+		pool.SlotsUsed, pool.SlotsMax = facet.NI(active), facet.NI(poolMax)
 	}
 	for _, t := range allActive {
 		pool.Running = append(pool.Running, facet.Task{ID: t.id, Name: t.name, Worker: t.worker, Started: t.started})
@@ -333,7 +333,7 @@ func (p *WorkerProbe) round(ctx context.Context, flower *flowerClient, c workerC
 		o.Detail["tasks_error"] = err.Error()
 	}
 
-	facet.EmitWorkerPool(&o, pool, now)
+	facet.EmitWorker(&o, pool, now)
 	live := map[string]bool{}
 	for _, cond := range o.Conditions {
 		switch cond.Kind {

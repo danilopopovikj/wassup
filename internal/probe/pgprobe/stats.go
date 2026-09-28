@@ -151,12 +151,12 @@ func Observe(s Stats, opts StatsOptions) (map[string]float64, []model.Condition,
 			detail["state"] = rep.State
 		}
 		broken := !streaming || (hasSlot && !slot.Active)
-		r := facet.Replication{Known: true, Slot: name, Streaming: !broken}
+		r := facet.ReplicationFacet{Slot: name, Streaming: !broken}
 		if hasRep {
-			r.Lag, r.HasLag = int64(rep.LagBytes), true
+			r.Lag = facet.N(rep.LagBytes)
 		}
 		if hasSlot {
-			r.WALRetained, r.HasWALRetained = int64(slot.RetainedBytes), true
+			r.WALRetained = facet.N(slot.RetainedBytes)
 			r.SlotDetail = fmt.Sprintf("%s retains %s of WAL", name, humanBytes(slot.RetainedBytes))
 		}
 		if broken {

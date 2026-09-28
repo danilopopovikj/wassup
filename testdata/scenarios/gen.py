@@ -17,7 +17,7 @@ def topology(workers=("worker",), extras=False):
     comps = [
         {"id": "dns", "type": "dns", "label": "bookstore.example", "group": "hetzner"},
         {"id": "fw", "type": "firewall", "label": "Firewall", "group": "hetzner"},
-        {"id": "lb", "type": "lb", "label": "Load balancer", "group": "hetzner"},
+        {"id": "lb", "type": "loadbalancer", "label": "Load balancer", "group": "hetzner"},
         {"id": "ingress", "type": "ingress", "label": "Ingress", "group": "k3s",
          "runs_on": ["node-1", "node-2", "node-3"]},
         {"id": "node-1", "type": "node", "group": "k3s"},
@@ -28,14 +28,14 @@ def topology(workers=("worker",), extras=False):
     ]
     for w in workers:
         label = "Workers" if w == "worker" else w
-        comps.append({"id": w, "type": "workload", "label": label, "group": "bookstore",
+        comps.append({"id": w, "type": "worker", "label": label, "group": "bookstore",
                       "runs_on": ["node-1", "node-2"]})
     comps += [
         {"id": "default-queue", "type": "queue", "label": "Default queue", "group": "bookstore"},
         {"id": "exports-queue", "type": "queue", "label": "Exports queue", "group": "bookstore"},
         {"id": "docs-sync", "type": "job", "label": "Docs sync", "group": "bookstore"},
         {"id": "cache", "type": "cache", "label": "Redis", "group": "bookstore"},
-        {"id": "db", "type": "db", "label": "Database", "group": "bookstore", "engine": "postgres",
+        {"id": "db", "type": "database", "label": "Database", "group": "bookstore", "engine": "postgres",
          "roles": {"primary": "db-primary", "replicas": ["db-r1", "db-r2"]}},
         {"id": "signoz", "type": "observability", "label": "SigNoz", "group": "k3s"},
         {"id": "github", "type": "external", "label": "GitHub"},
@@ -44,9 +44,9 @@ def topology(workers=("worker",), extras=False):
         comps += [
             {"id": "hatchet", "type": "workload", "label": "Hatchet engine", "group": "bookstore", "runs_on": ["node-1", "node-2"]},
             {"id": "hatchet-queue", "type": "queue", "label": "Hatchet tasks", "group": "bookstore"},
-            {"id": "hatchet-workers", "type": "workload", "label": "Hatchet workers", "group": "bookstore", "runs_on": ["node-2", "node-3"]},
+            {"id": "hatchet-workers", "type": "worker", "label": "Hatchet workers", "group": "bookstore", "runs_on": ["node-2", "node-3"]},
             {"id": "billing", "type": "job", "label": "Billing workflow", "group": "bookstore"},
-            {"id": "hatchet-db", "type": "db", "label": "Hatchet DB", "group": "bookstore", "engine": "postgres"},
+            {"id": "hatchet-db", "type": "database", "label": "Hatchet DB", "group": "bookstore", "engine": "postgres"},
             {"id": "electric", "type": "sync", "label": "Electric", "group": "bookstore", "runs_on": ["node-1"]},
         ]
     edges = [

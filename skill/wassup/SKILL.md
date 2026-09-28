@@ -70,7 +70,7 @@ not about now.
    labels into words a CS person would say, keeping only catalog types
    (`reference/catalog.md`); the mapping for Hatchet, Celery and Electric is
    at the end of that file. One `workload` per Deployment, never per pod.
-   A Postgres cluster is one `db` with `roles`; the instances come free.
+   A Postgres cluster is one `database` with `roles`; the instances come free.
 5. **Stop and show the topology to the user** before finishing bindings.
 6. Move `proposed/bindings.yaml` to `.wassup/bindings.yaml` and complete
    it: the proposal names the env vars secrets must come from (`dsn_env`,

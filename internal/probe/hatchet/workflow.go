@@ -248,8 +248,7 @@ func (p *WorkflowProbe) applyRuns(o *probe.Observation, st *workflowState, runs 
 	if lastFailure != nil {
 		o.Detail["last_failure"] = firstOf(lastFailure.FinishedAt, lastFailure.CreatedAt)
 	}
-	job := facet.Job{Known: true,
-		Active: int(o.Metrics["active"]), Succeeded: int(o.Metrics["succeeded"]), Failed: int(o.Metrics["failed"]), Queued: int(o.Metrics["queued"])}
+	job := facet.JobFacet{Active: facet.N(o.Metrics["active"]), Succeeded: facet.N(o.Metrics["succeeded"]), Failed: facet.N(o.Metrics["failed"]), Queued: facet.N(o.Metrics["queued"])}
 	if latestFinished != nil && latestFinished.Status == statusFailed {
 		job.LastFailure = &facet.Failure{Ref: "run/" + latestFinished.runID(), At: firstOf(latestFinished.FinishedAt, latestFinished.CreatedAt), Reason: truncate(latestFinished.ErrorMessage, errorMessageLen)}
 	}

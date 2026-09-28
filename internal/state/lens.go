@@ -35,7 +35,7 @@ func (c *ctx) depthMap() map[string]float64 {
 		}
 		if comp, ok := c.t.Component(id); ok {
 			out = append(out, comp.RunsOn...)
-			if comp.Type == "db" && comp.Roles != nil {
+			if comp.Type == "database" && comp.Roles != nil {
 				if comp.Roles.Primary != "" {
 					out = append(out, comp.Roles.Primary)
 				}
@@ -81,7 +81,7 @@ func (c *ctx) depthMap() map[string]float64 {
 	}
 	// Role instances sit just below their container.
 	for _, comp := range c.t.Components {
-		if comp.Type == "db" && comp.Roles != nil {
+		if comp.Type == "database" && comp.Roles != nil {
 			if d, ok := depth[comp.ID]; ok {
 				if comp.Roles.Primary != "" {
 					depth[comp.Roles.Primary] = d + 0.25
@@ -151,7 +151,7 @@ func (c *ctx) pathTo(target string, depth map[string]float64) []string {
 					consider(comp.ID)
 				}
 			}
-			if comp.Type == "db" && comp.Roles != nil {
+			if comp.Type == "database" && comp.Roles != nil {
 				if comp.Roles.Primary == cur {
 					consider(comp.ID)
 				}
@@ -559,10 +559,10 @@ func (c *ctx) componentSentence(id string, es model.ElementState, path []string,
 		return ""
 	}
 	switch comp.Type {
-	case "lb", "ingress", "dns":
+	case "loadbalancer", "ingress", "dns":
 		var parts []string
 		behind := c.behindEntry(id)
-		if comp.Type != "lb" && behind && es.State != model.Failing && es.Severity < model.Warn {
+		if comp.Type != "loadbalancer" && behind && es.State != model.Failing && es.Severity < model.Warn {
 			return ""
 		}
 		if comp.Type == "dns" && es.State != model.Failing && es.Severity < model.Warn {
@@ -592,7 +592,7 @@ func (c *ctx) componentSentence(id string, es model.ElementState, path []string,
 			} else {
 				parts = append(parts, "requests arrive")
 			}
-			if comp.Type == "lb" {
+			if comp.Type == "loadbalancer" {
 				n := c.nodeCount(id)
 				if okT {
 					parts = append(parts, fmt.Sprintf("load balancer passes them to %s of %s nodes", Num(h), Num(t)))
@@ -605,7 +605,7 @@ func (c *ctx) componentSentence(id string, es model.ElementState, path []string,
 			parts = append(parts, fmt.Sprintf("the certificate at the %s expires in %s %s", Lower(label), Num(days), Plural(days, "day", "days")))
 			parts = append(parts, renewalNotes(es)...)
 		}
-		if behind && comp.Type != "lb" {
+		if behind && comp.Type != "loadbalancer" {
 			// Drop the generic arrival line; the upstream entry already said it.
 			var kept []string
 			for _, p := range parts {
@@ -624,7 +624,7 @@ func (c *ctx) componentSentence(id string, es model.ElementState, path []string,
 			return "the firewall blocks the path, " + strings.TrimPrefix(nextEdge.Label, "blocked at firewall ")
 		}
 		return ""
-	case "workload":
+	case "workload", "worker":
 		switch es.State {
 		case model.Failing:
 			// Failing on a failing node: blame the node in the same sentence.
@@ -691,7 +691,7 @@ func (c *ctx) componentSentence(id string, es model.ElementState, path []string,
 			return fmt.Sprintf("the %s is %s", name, es.Label)
 		}
 		return ""
-	case "db":
+	case "database":
 		if comp.Parent != "" {
 			for _, pid := range path {
 				if pid == comp.Parent && c.snap.Components[pid].Severity >= es.Severity {

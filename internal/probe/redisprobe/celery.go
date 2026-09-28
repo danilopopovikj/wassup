@@ -361,10 +361,10 @@ func (p *CeleryProbe) round(ctx context.Context, client *redis.Client, flower *f
 		p.h.Set(probe.HealthDegraded, o.Err)
 		return o
 	}
-	q := facet.Queue{Known: true, Depth: int(depth), LongTask: longTask}
+	q := facet.QueueFacet{Depth: facet.NI(int(depth)), LongTask: longTask}
 	ring.push(o.At, float64(depth))
 	if g, ok := ring.growth(); ok {
-		q.GrowthPerMin, q.HasGrowth = g, true
+		q.GrowthPerMin = facet.N(g)
 	}
 	if oldest && depth > 0 {
 		raw, err := client.LIndex(rctx, queue, -1).Result()
@@ -385,7 +385,7 @@ func (p *CeleryProbe) round(ctx context.Context, client *redis.Client, flower *f
 			health, msg = probe.HealthDegraded, "flower: "+err.Error()
 			o.Detail["flower_error"] = err.Error()
 		} else {
-			q.Consumers, q.HasConsumers = s.Consumers, true
+			q.Consumers = facet.NI(s.Consumers)
 			if s.HasP95 {
 				q.TypicalDuration = time.Duration(s.P95 * float64(time.Second))
 			}

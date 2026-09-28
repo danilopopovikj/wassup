@@ -34,9 +34,9 @@ func hasEdge(p *Proposal, from, to, kind string) bool {
 func TestScanFindsTheStack(t *testing.T) {
 	f, p := scanFixture(t)
 	want := map[string]string{
-		"node-1": "node", "node-2": "node", "bookstore-lb": "lb", "bookstore": "firewall",
-		"api": "workload", "worker": "workload", "hatchet-worker": "workload", "hatchet-engine": "workload",
-		"redis": "cache", "electric": "sync", "bookstore-db": "db", "hatchet-db": "db",
+		"node-1": "node", "node-2": "node", "bookstore-lb": "loadbalancer", "bookstore": "firewall",
+		"api": "workload", "worker": "worker", "hatchet-worker": "worker", "hatchet-engine": "workload",
+		"redis": "cache", "electric": "sync", "bookstore-db": "database", "hatchet-db": "database",
 		"exports-queue": "queue", "default-queue": "queue", "billing": "job", "ingress": "ingress",
 		"app-bookstore-example": "dns", "stripe": "external",
 	}
@@ -120,7 +120,7 @@ func TestDiffAndApply(t *testing.T) {
 		{ID: "api", Type: "workload", Label: "API"},
 		{ID: "worker", Type: "workload", Label: "Workers"},
 		{ID: "redis", Type: "cache", Label: "Redis"},
-		{ID: "db", Type: "db", Label: "Bookstore db", Roles: &model.Roles{Primary: "db-primary", Replicas: []string{"db-r1", "db-r2"}}},
+		{ID: "db", Type: "database", Label: "Bookstore db", Roles: &model.Roles{Primary: "db-primary", Replicas: []string{"db-r1", "db-r2"}}},
 		{ID: "legacy-ftp", Type: "external", Label: "FTP drop"},
 	}, Edges: []model.Edge{{From: "api", To: "db", Kind: "sql"}, {From: "api", To: "redis", Kind: "cache"}}}
 	cur.Bindings = model.Bindings{Version: 1, Components: map[string][]model.ProbeSpec{"api": {{"probe": "k8s.workload", "namespace": "bookstore", "selector": "app=api"}}}}

@@ -26,7 +26,7 @@ components:
     label: Firewall
     group: hetzner
   - id: lb
-    type: lb
+    type: loadbalancer
     label: Load balancer
     group: hetzner
   - id: ingress
@@ -56,21 +56,21 @@ components:
       - node-3
     owner: "@danilo"
   - id: worker-1
-    type: workload
+    type: worker
     label: worker-1
     group: bookstore
     runs_on:
       - node-1
       - node-2
   - id: worker-2
-    type: workload
+    type: worker
     label: worker-2
     group: bookstore
     runs_on:
       - node-1
       - node-2
   - id: worker-3
-    type: workload
+    type: worker
     label: worker-3
     group: bookstore
     runs_on:
@@ -93,7 +93,7 @@ components:
     label: Redis
     group: bookstore
   - id: db
-    type: db
+    type: database
     label: Database
     group: bookstore
     engine: postgres

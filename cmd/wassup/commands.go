@@ -136,8 +136,20 @@ func validateCmd() *cobra.Command {
 			for id, specs := range cfg.Bindings.Edges {
 				check("bindings.yaml", "edges/"+id, specs)
 			}
-			// Catalog: probes allowed per type are advisory; report as warnings.
+			// Fit by facet: a probe declares the facets it fills, a type the
+			// facets it accepts. Probes that declare nothing fall back to the
+			// catalog's advisory probe list.
 			var warnings []string
+			fits := func(typeFacets, probeFacets []string) bool {
+				for _, a := range typeFacets {
+					for _, b := range probeFacets {
+						if a == b {
+							return true
+						}
+					}
+				}
+				return false
+			}
 			for id, specs := range cfg.Bindings.Components {
 				comp, ok := cfg.Topology.Component(id)
 				if !ok {
@@ -145,6 +157,13 @@ func validateCmd() *cobra.Command {
 				}
 				spec := model.Catalog[comp.Type]
 				for _, s := range specs {
+					acc, _ := probe.AccessFor(s.Kind())
+					if len(acc.Facets) > 0 {
+						if len(spec.Facets) > 0 && !fits(spec.Facets, acc.Facets) {
+							warnings = append(warnings, fmt.Sprintf("%s: probe %s fills %s, but a %s shows %s", id, s.Kind(), strings.Join(acc.Facets, "/"), comp.Type, strings.Join(spec.Facets, "/")))
+						}
+						continue
+					}
 					allowed := len(spec.Probes) == 0
 					for _, p := range spec.Probes {
 						if p == s.Kind() {
@@ -153,6 +172,14 @@ func validateCmd() *cobra.Command {
 					}
 					if !allowed {
 						warnings = append(warnings, fmt.Sprintf("%s: probe %s is unusual for type %s", id, s.Kind(), comp.Type))
+					}
+				}
+			}
+			for id, specs := range cfg.Bindings.Edges {
+				for _, s := range specs {
+					acc, _ := probe.AccessFor(s.Kind())
+					if len(acc.Facets) > 0 && !fits(model.EdgeFacets, acc.Facets) {
+						warnings = append(warnings, fmt.Sprintf("%s: probe %s fills %s, which is not an edge facet (%s)", id, s.Kind(), strings.Join(acc.Facets, "/"), strings.Join(model.EdgeFacets, "/")))
 					}
 				}
 			}
@@ -870,15 +897,15 @@ func probesCmd() *cobra.Command {
 				return printJSON(all)
 			}
 			if markdown {
-				fmt.Println("| Probe | Source | Delivers | Spec fields | Needs | Status |")
-				fmt.Println("| --- | --- | --- | --- | --- | --- |")
+				fmt.Println("| Probe | Facets | Source | Delivers | Spec fields | Needs | Status |")
+				fmt.Println("| --- | --- | --- | --- | --- | --- | --- |")
 				for _, a := range all {
 					status := "shipped"
 					if !a.Implemented {
 						status = "spec only, not implemented yet"
 					}
 					esc := func(s string) string { return strings.ReplaceAll(s, "|", "\\|") }
-					fmt.Printf("| `%s` | %s | %s | %s | %s | %s |\n", a.Kind, esc(a.Source), esc(a.Delivers), "`"+strings.Join(a.SpecFields, "`, `")+"`", esc(a.Needs), status)
+					fmt.Printf("| `%s` | %s | %s | %s | %s | %s | %s |\n", a.Kind, strings.Join(a.Facets, ", "), esc(a.Source), esc(a.Delivers), "`"+strings.Join(a.SpecFields, "`, `")+"`", esc(a.Needs), status)
 				}
 				return nil
 			}

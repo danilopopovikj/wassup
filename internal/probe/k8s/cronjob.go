@@ -172,7 +172,7 @@ func observeCronJob(cronjobs batchlisters.CronJobLister, jobs batchlisters.JobLi
 			}
 		}
 	}
-	job := facet.Job{Known: true, Active: active, Succeeded: succeeded, Failed: failed}
+	job := facet.JobFacet{Active: facet.NI(active), Succeeded: facet.NI(succeeded), Failed: facet.NI(failed)}
 	if !oldestActive.IsZero() {
 		job.Running = &facet.Task{ID: "cronjob/" + cj.Name, Name: fmt.Sprintf("%d active", active), Started: oldestActive}
 	}
