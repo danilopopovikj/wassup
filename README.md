@@ -45,6 +45,8 @@ wassup itself needs no AI to run. MIT, single binary, runs in tmux, no daemon.
 
 - [Try it in a minute](#try-it-in-a-minute)
 - [Install](#install)
+  - [Install and set up with AI](#install-and-set-up-with-ai)
+  - [Install by hand](#install-by-hand)
 - [Set up a real system](#set-up-a-real-system)
 - [Principles](#principles)
 - [Keys](#keys)
@@ -71,6 +73,81 @@ Press `i` for the issue lens, `enter` for the detail panel, `?` for every key.
 
 ## Install
 
+### Install and set up with AI
+
+The short way: open your coding agent (Claude Code, or any agent that can
+run shell commands) in the repository that deploys your system, and send it
+this prompt. It installs the binary, reads your infrastructure, drafts the
+diagram and checks it against live data.
+
+```text
+Install wassup and set it up for this repository.
+
+wassup is a terminal app that draws one live architecture diagram of a
+Kubernetes-hosted system and shows where it is stuck, since when, and what
+changed. It is configured by two files you will write in .wassup/:
+topology.yaml (the components and the edges between them) and bindings.yaml
+(the probes that attach each of them to live data).
+Source and docs: https://github.com/danilopopovikj/wassup
+
+1. Install the binary, unless `wassup version` already works. With Go 1.26
+   or newer, run
+   `go install github.com/danilopopovikj/wassup/cmd/wassup@latest`
+   and make sure "$(go env GOPATH)/bin" is on the PATH. Without Go, take the
+   archive for this OS and architecture from
+   https://github.com/danilopopovikj/wassup/releases, check it against
+   checksums.txt and put `wassup` on the PATH. Ask me before installing Go
+   or anything else system-wide.
+
+2. From the repository root, run `wassup skill install`. It copies the
+   wassup skill to .claude/skills/wassup/ (`--dir <path>` if your skills
+   live elsewhere). Read SKILL.md there in full and follow its Setup
+   workflow. The skill is the authority on the steps below; its reference/
+   folder has the catalog of component types, every probe with the access
+   it needs, the JSON Schemas and two complete examples.
+
+3. Run `wassup discover --propose --write`. It reads Terraform, Kubernetes
+   manifests, Helm values, .env files, application code and the live
+   cluster, and drafts .wassup/proposed/ with every component and edge
+   cited to a file and line. Treat the draft as evidence, not as the
+   answer: open the citation behind each edge and confirm the connection
+   is real, and place or drop every entry in the unresolved hosts list.
+
+4. Write .wassup/topology.yaml, with labels in words someone who has never
+   used Kubernetes would say. Then stop and show me the topology, and wait
+   for my answer before you write bindings.
+
+5. Write .wassup/bindings.yaml, then run `wassup validate` and
+   `wassup probe --once`. Fix every unbound component or edge (wrong
+   namespace, selector, permissions, missing env var) and run both again
+   until what remains unbound has a reason you can name.
+
+Rules:
+- Read only. wassup never changes the system and neither should you: run
+  nothing that writes to the cluster or the infrastructure.
+- No secrets in .wassup/. Bindings name the environment variables that
+  hold credentials; never copy a value out of .env or a secret.
+- Ask me only for what cannot be discovered, such as the kubeconfig path
+  and context when they are not obvious, or the name of an env var that
+  holds a token.
+- Never guess. A connection you cannot back with evidence is left out and
+  reported, not drawn.
+- Commit .wassup/ only after I approve the result (its state/ directory is
+  gitignored).
+
+When you are done, tell me: what is on the diagram, what stays unbound and
+why, and which environment variables I need to export before I run
+`wassup`.
+```
+
+The agent stops once to show you the topology before it attaches live data,
+and it never writes to your cluster. When it is done, run `wassup`.
+
+### Install by hand
+
+wassup needs no AI to run, and every step the agent takes is a command you
+can run yourself.
+
 | How | Command |
 | --- | --- |
 | Go 1.26 or newer | `go install github.com/danilopopovikj/wassup/cmd/wassup@latest` |
@@ -85,6 +162,11 @@ Optional: `resvg` or `rsvg-convert` on the `PATH` lets `wassup export` write
 PNG next to SVG.
 
 ## Set up a real system
+
+If you sent the prompt from
+[Install and set up with AI](#install-and-set-up-with-ai), this is already
+done. With the binary installed by hand, the same setup starts from the
+first run:
 
 ```sh
 cd your-repo
