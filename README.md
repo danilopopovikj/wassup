@@ -169,6 +169,11 @@ testdata/scenarios/  fixtures 01 to 10 (gen.py regenerates them)
 examples/            full .wassup/ examples
 ```
 
+## Contributing
+
+`CLAUDE.md` holds the building principles, the vocabulary and the recipes
+for adding a provider, a shape, a scenario or a verb. Read it first.
+
 ## Development
 
 ```sh
