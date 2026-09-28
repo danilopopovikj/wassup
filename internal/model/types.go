@@ -356,10 +356,6 @@ type ElementState struct {
 	Unit      string  `json:"unit,omitempty"`
 }
 
-// MaxHostedRows bounds the rows a node box lists at the normal detail
-// level; the rest is summed up as "+N more" and shown in full.
-const MaxHostedRows = 6
-
 // Hosted is one component as seen from the node it runs on. Known is true
 // when the counts come from the cluster (the provider reported which pods
 // sit on this node); otherwise only runs_on in the topology says it is here.

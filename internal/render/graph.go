@@ -128,6 +128,9 @@ func DrawOn(c *Canvas, g *layout.Graph, opts DrawOptions) {
 			if b := g.BoxOf[id]; b != "" {
 				lit[b] = true
 			}
+			for _, ib := range g.Instances[id] {
+				lit[ib] = true
+			}
 		}
 	}
 	annotated := map[string]bool{}
@@ -153,10 +156,16 @@ func DrawOn(c *Canvas, g *layout.Graph, opts DrawOptions) {
 		c.Box(gf.X, gf.Y, gf.W, gf.H, BorderDouble, st)
 		c.Text(gf.X+2, gf.Y, groupTitle(gf, opts), Style{Fg: ColGray, Bold: true}, gf.W-4)
 	}
+	// Node frames go under the routes, so the arrows between the instances
+	// inside a machine stay visible; every other box goes on top.
+	for _, id := range g.Order {
+		if b := g.Boxes[id]; b.Frame {
+			drawBox(c, g, b, snap, opts, lit, annotated)
+		}
+	}
 	var labels []func()
-	for _, id := range sortedRouteIDs(g.Routes) {
-		r := g.Routes[id]
-		if lf := drawRoute(c, g, r, snap, opts, lit, annotated); lf != nil {
+	for _, routes := range edgeGroups(g) {
+		if lf := drawEdge(c, g, routes, snap, opts, lit, annotated); lf != nil {
 			labels = append(labels, lf)
 		}
 	}
@@ -170,6 +179,9 @@ func DrawOn(c *Canvas, g *layout.Graph, opts DrawOptions) {
 	}
 	for _, id := range g.Order {
 		b := g.Boxes[id]
+		if b.Frame {
+			continue
+		}
 		drawBox(c, g, b, snap, opts, lit, annotated)
 	}
 	// Annotation callouts anchored at the last element of each path.
@@ -255,14 +267,18 @@ func drawBox(c *Canvas, g *layout.Graph, b *layout.Box, snap *model.Snapshot, op
 		label = "▸ " + label
 	} else {
 		var known bool
-		es, known = snap.Components[b.ID]
+		es, known = snap.Components[b.Element()]
 		if !known {
 			es = model.ElementState{State: model.Idle, Marker: model.MarkerUnbound, Label: "no snapshot yet"}
 		}
-		if cc, ok := opts.Topology.Component(b.ID); ok {
+		if cc, ok := opts.Topology.Component(b.Element()); ok {
 			comp = cc
 			label = cc.DisplayLabel()
 		}
+	}
+	if b.Instance != "" {
+		drawInstance(c, g, b, comp, es, snap, opts, lit, annotated)
+		return
 	}
 	col := StateColor(es.State)
 	kind := BorderRounded
@@ -294,6 +310,15 @@ func drawBox(c *Canvas, g *layout.Graph, b *layout.Box, snap *model.Snapshot, op
 	}
 	c.Fill(b.X, b.Y, b.W, b.H, fill, Style{Fg: ColGray, Dim: true})
 	c.Box(b.X, b.Y, b.W, b.H, kind, st)
+	if b.Frame {
+		// A machine: its own label, state and gauges in the header; the
+		// instances inside are drawn afterwards, on top.
+		drawFrameHeader(c, b, comp, es, opts)
+		if opts.Lens != nil && !lit[b.ID] {
+			c.Dim(b.X, b.Y, b.W, b.H)
+		}
+		return
+	}
 
 	inner := b.W - 4
 	x, y := b.X+2, b.Y+1
@@ -347,30 +372,6 @@ func drawBox(c *Canvas, g *layout.Graph, b *layout.Box, snap *model.Snapshot, op
 		drawGauge(c, x, y, inner, gg)
 		y++
 	}
-	// What runs on a node: one row per component, the troubled ones first
-	// so they survive the clipping, "+N more" when the box is short.
-	if comp.Type == "node" && opts.Detail != model.DetailMinimal && len(es.Hosted) > 0 {
-		hosted := append([]model.Hosted(nil), es.Hosted...)
-		sort.SliceStable(hosted, func(i, j int) bool { return stateRank(hosted[i].State) > stateRank(hosted[j].State) })
-		limit := len(hosted)
-		if opts.Detail != model.DetailFull && limit > model.MaxHostedRows {
-			limit = model.MaxHostedRows
-		}
-		for i, h := range hosted {
-			if y >= b.Bottom()-1 {
-				break
-			}
-			if i == limit-1 && len(hosted) > limit {
-				c.Text(x, y, fmt.Sprintf("+%d more", len(hosted)-i), Style{Fg: ColGray, Dim: true}, inner)
-				y++
-				break
-			}
-			glyph, text, st := hostedRow(h)
-			c.Text(x, y, glyph+" ", st, 2)
-			c.Text(x+2, y, ellipsis(text, inner-2), st, inner-2)
-			y++
-		}
-	}
 	// Notes: change stamps always (that is "what changed"); the rest only when
 	// the component is in trouble or the level is full.
 	for _, n := range es.Notes {
@@ -411,38 +412,165 @@ func ellipsis(s string, w int) string {
 	return string(r[:w-1]) + "…"
 }
 
-// hostedRow words one row of a node box: "● API ×2", "✗ API ×1 · 0 of 1
-// ready", "┄ Ingress" for a component with no probe data.
-func hostedRow(h model.Hosted) (glyph, text string, st Style) {
-	glyph = h.State.Glyph()
-	st = Style{Fg: StateColor(h.State)}
-	switch h.Marker {
-	case model.MarkerUnbound:
-		glyph, st = "┄", Style{Fg: ColGray, Dim: true}
-	case model.MarkerStale:
-		glyph, st.Dim = "◷", true
+// hostedOf finds what a node knows about one of its residents.
+func hostedOf(snap *model.Snapshot, nodeID, compID string) (model.Hosted, bool) {
+	for _, h := range snap.Components[nodeID].Hosted {
+		if h.ID == compID {
+			return h, true
+		}
 	}
-	if h.State == model.Idle && h.Marker == "" {
+	return model.Hosted{}, false
+}
+
+// drawFrameHeader paints a node's title, state and gauges in the header
+// rows of its frame.
+func drawFrameHeader(c *Canvas, b *layout.Box, comp model.Component, es model.ElementState, opts DrawOptions) {
+	col := StateColor(es.State)
+	inner := b.W - 4
+	x, y := b.X+2, b.Y+1
+	glyph := es.State.Glyph()
+	tst := Style{Fg: col, Bold: true}
+	switch es.Marker {
+	case model.MarkerUnbound:
+		glyph, tst = "┄", Style{Fg: ColGray}
+	case model.MarkerStale:
+		glyph = "◷"
+	}
+	c.Text(x, y, glyph+" ", tst, 2)
+	c.Text(x+2, y, ellipsis(comp.DisplayLabel(), inner-2), Style{Bold: true}, inner-2)
+	if opts.Detail == model.DetailFull {
+		hint := "machine"
+		c.Text(b.Right()-2-len(hint), y, hint, Style{Fg: ColGray, Dim: true}, len(hint))
+	}
+	y++
+	lab := es.Label
+	if es.Marker == model.MarkerStale {
+		lab = "stale, " + lab
+	}
+	c.Text(x, y, ellipsis(lab, inner), Style{Fg: col}, inner)
+	y++
+	for _, gg := range visibleGauges(comp, es, opts.Detail) {
+		if y > b.Y+b.Header {
+			break
+		}
+		drawGauge(c, x, y, inner, gg)
+		y++
+	}
+}
+
+// drawInstance paints one copy of a component inside a node: "● API ×1",
+// then what this node knows (0 of 1 ready, 6 restarts) or the component's
+// own state line, then a compact gauge line when there is room.
+func drawInstance(c *Canvas, g *layout.Graph, b *layout.Box, comp model.Component, es model.ElementState, snap *model.Snapshot, opts DrawOptions, lit, annotated map[string]bool) {
+	state, marker := es.State, es.Marker
+	label := comp.DisplayLabel()
+	line := es.Label
+	if h, ok := hostedOf(snap, b.Node, b.Instance); ok && h.Known {
+		state = h.State
+		label += fmt.Sprintf(" ×%d", h.Pods)
+		switch {
+		case h.Pods == 0:
+			line = "none here"
+		case h.Ready < h.Pods:
+			line = fmt.Sprintf("%d of %d ready", h.Ready, h.Pods)
+		case h.Restarts > 0:
+			line = fmt.Sprintf("%d restarts here", h.Restarts)
+		case h.State == model.Flowing && es.State != model.Flowing:
+			line = "fine here"
+		}
+	}
+	col := StateColor(state)
+	kind := BorderRounded
+	st := Style{Fg: col}
+	switch marker {
+	case model.MarkerUnbound:
+		kind = BorderDashed
+		st = Style{Fg: ColGray, Dim: true}
+	case model.MarkerStale:
 		st.Dim = true
 	}
-	text = h.Label
-	switch {
-	case !h.Known:
-		if h.State != model.Flowing && h.State != model.Idle {
-			text += " · " + string(h.State)
-		}
-	case h.Pods == 0:
-		text += " · none here"
-	case h.Ready < h.Pods:
-		text += fmt.Sprintf(" · %d of %d ready", h.Ready, h.Pods)
-	case h.Restarts > 0:
-		text += fmt.Sprintf(" ×%d · %d restarts", h.Pods, h.Restarts)
-	case h.State != model.Flowing && h.State != model.Idle:
-		text += fmt.Sprintf(" ×%d · %s", h.Pods, h.State)
-	default:
-		text += fmt.Sprintf(" ×%d", h.Pods)
+	if state == model.Idle && marker == "" {
+		st.Dim = true
 	}
-	return glyph, text, st
+	if opts.Selected == b.Instance || opts.Selected == b.ID {
+		kind = BorderHeavy
+		st.Bold = true
+		st.Dim = false
+	}
+	if annotated[b.Instance] {
+		st.Fg = ColAccent
+		st.Dim = false
+	}
+	fill := ' '
+	if marker == model.MarkerStale {
+		fill = '░'
+	}
+	c.Fill(b.X, b.Y, b.W, b.H, fill, Style{Fg: ColGray, Dim: true})
+	c.Box(b.X, b.Y, b.W, b.H, kind, st)
+	inner := b.W - 4
+	x, y := b.X+2, b.Y+1
+	glyph := state.Glyph()
+	if state == model.Processing && opts.Animate {
+		glyph = string(spinner[opts.Frame/2%len(spinner)])
+	}
+	tst := Style{Fg: col, Bold: true}
+	switch marker {
+	case model.MarkerUnbound:
+		glyph, tst = "┄", Style{Fg: ColGray}
+	case model.MarkerStale:
+		glyph = "◷"
+	}
+	c.Text(x, y, glyph+" ", tst, 2)
+	c.Text(x+2, y, ellipsis(label, inner-2), Style{Bold: true}, inner-2)
+	y++
+	if y < b.Bottom()-1 {
+		if marker == model.MarkerStale {
+			line = "stale, " + line
+		}
+		c.Text(x, y, ellipsis(line, inner), Style{Fg: col}, inner)
+		y++
+	}
+	if y < b.Bottom()-1 {
+		// cpu 40% · ram 55%: the component's essentials in one line
+		var parts []string
+		for _, gg := range visibleGauges(comp, es, opts.Detail) {
+			name := gg.Short
+			if name == "" {
+				name = gg.Name
+			}
+			parts = append(parts, name+" "+gg.Value)
+			if len(parts) == 3 {
+				break
+			}
+		}
+		if len(parts) > 0 {
+			c.Text(x, y, ellipsis(strings.Join(parts, " · "), inner), Style{Fg: ColGray}, inner)
+			y++
+		}
+	}
+	for _, n := range es.Notes {
+		if y >= b.Bottom()-1 {
+			break
+		}
+		if opts.Detail != model.DetailFull && es.Severity < model.Warn && !isStamp(n) {
+			continue
+		}
+		nst := Style{Fg: ColGray}
+		if isStamp(n) {
+			nst = Style{Fg: ColCyan}
+		}
+		c.Text(x, y, ellipsis(n, inner), nst, inner)
+		y++
+	}
+	if state == model.Waiting {
+		c.Text(b.Right()-4, b.Bottom()-1, "≡≡", Style{Fg: ColAmber, Bold: true}, 2)
+	}
+	if state == model.Blocked {
+		c.Text(b.Right()-3, b.Bottom()-1, "⊘", Style{Fg: ColRed, Bold: true}, 1)
+	}
+	if opts.Lens != nil && !lit[b.Instance] && !lit[b.ID] {
+		c.Dim(b.X, b.Y, b.W, b.H)
+	}
 }
 
 // isStamp reports whether a note is a change marker ("deploy 09:48 b7e9f21").
@@ -521,14 +649,94 @@ func drawGauge(c *Canvas, x, y, inner int, g model.Gauge) {
 }
 
 // drawRoute paints an edge along its cells.
-func drawRoute(c *Canvas, g *layout.Graph, r *layout.Route, snap *model.Snapshot, opts DrawOptions, lit, annotated map[string]bool) func() {
-	if len(r.Cells) < 2 {
+// edgeGroups returns the routes grouped by logical edge, in a stable order.
+func edgeGroups(g *layout.Graph) [][]*layout.Route {
+	byEdge := map[string][]*layout.Route{}
+	for _, id := range sortedRouteIDs(g.Routes) {
+		r := g.Routes[id]
+		key := r.Edge
+		if key == "" {
+			key = r.ID
+		}
+		byEdge[key] = append(byEdge[key], r)
+	}
+	keys := make([]string, 0, len(byEdge))
+	for k := range byEdge {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([][]*layout.Route, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, byEdge[k])
+	}
+	return out
+}
+
+// Directions a line cell connects to, as bits.
+const (
+	dirUp = 1 << iota
+	dirDown
+	dirLeft
+	dirRight
+)
+
+// junctionChar picks the box-drawing rune for a cell from the directions it
+// connects to: straights, corners, tees where a sibling route joins its
+// trunk, a cross where four meet.
+func junctionChar(d int) rune {
+	switch d {
+	case dirLeft | dirRight, dirLeft, dirRight:
+		return '─'
+	case dirUp | dirDown, dirUp, dirDown:
+		return '│'
+	case dirRight | dirDown:
+		return '╭'
+	case dirLeft | dirDown:
+		return '╮'
+	case dirRight | dirUp:
+		return '╰'
+	case dirLeft | dirUp:
+		return '╯'
+	case dirLeft | dirRight | dirDown:
+		return '┬'
+	case dirLeft | dirRight | dirUp:
+		return '┴'
+	case dirUp | dirDown | dirRight:
+		return '├'
+	case dirUp | dirDown | dirLeft:
+		return '┤'
+	}
+	return '┼'
+}
+
+// bit is the direction from a to its orthogonal neighbour b.
+func bit(a, b Point) int {
+	switch {
+	case b.X > a.X:
+		return dirRight
+	case b.X < a.X:
+		return dirLeft
+	case b.Y > a.Y:
+		return dirDown
+	case b.Y < a.Y:
+		return dirUp
+	}
+	return 0
+}
+
+// drawEdge paints every route of one logical edge as one bundle: the cells
+// are joined by direction so trunks and branches meet in tees, arrowheads
+// sit at each route's end, and one label goes on the longest route. It
+// returns the label painter, run after every line is down.
+func drawEdge(c *Canvas, g *layout.Graph, routes []*layout.Route, snap *model.Snapshot, opts DrawOptions, lit, annotated map[string]bool) func() {
+	if len(routes) == 0 {
 		return nil
 	}
+	r0 := routes[0]
 	// The drawn state is the worst among merged edges.
 	var es model.ElementState
 	first := true
-	for _, id := range r.Merged {
+	for _, id := range r0.Merged {
 		e := snap.Edges[id]
 		if first || stateRank(e.State) > stateRank(es.State) || (e.State == es.State && e.Rate > es.Rate) {
 			if first || stateRank(e.State) >= stateRank(es.State) {
@@ -541,16 +749,14 @@ func drawRoute(c *Canvas, g *layout.Graph, r *layout.Route, snap *model.Snapshot
 	st := Style{Fg: col}
 	dashed := es.State == model.Blocked || es.State == model.Failing
 	switch es.Marker {
-	case model.MarkerUnbound:
-		st = Style{Fg: ColGray, Dim: true}
-	case model.MarkerNoData:
+	case model.MarkerUnbound, model.MarkerNoData:
 		st = Style{Fg: ColGray, Dim: true}
 	}
 	if es.State == model.Idle && es.Marker == "" {
 		st.Dim = true
 	}
 	isLit := false
-	for _, id := range r.Merged {
+	for _, id := range r0.Merged {
 		if lit[id] {
 			isLit = true
 		}
@@ -567,76 +773,90 @@ func drawRoute(c *Canvas, g *layout.Graph, r *layout.Route, snap *model.Snapshot
 		st.Dim = true
 		st.Bold = false
 	}
-	cells := r.Cells
-	n := len(cells)
-	for i, p := range cells {
-		var ch rune
-		prev, next := Point(p), Point(p)
-		if i > 0 {
-			prev = Point(cells[i-1])
+
+	// Directions per cell over the whole bundle, then the runes.
+	links := map[Point]int{}
+	heads := map[Point]rune{}
+	for _, r := range routes {
+		cells := r.Cells
+		n := len(cells)
+		if n < 2 {
+			continue
 		}
-		if i < n-1 {
-			next = Point(cells[i+1])
+		for i := 1; i < n; i++ {
+			links[cells[i-1]] |= bit(cells[i-1], cells[i])
+			links[cells[i]] |= bit(cells[i], cells[i-1])
 		}
-		if i == n-1 {
-			ch = arrow(prev, p)
-		} else if i == 0 && r.Both {
-			ch = arrow(next, p)
-		} else {
-			ch = lineChar(prev, p, next, i == 0, i == n-1)
-			if es.Marker == model.MarkerNoData || es.Marker == model.MarkerUnbound {
-				if ch == '─' {
-					ch = '┄'
-				} else if ch == '│' {
-					ch = '┆'
-				}
-			} else if dashed {
-				if ch == '─' {
-					ch = '╌'
-				} else if ch == '│' {
-					ch = '╎'
-				}
+		heads[cells[n-1]] = arrow(cells[n-2], cells[n-1])
+		if r.Both {
+			heads[cells[0]] = arrow(cells[1], cells[0])
+		}
+	}
+	for p, d := range links {
+		ch := junctionChar(d)
+		if es.Marker == model.MarkerNoData || es.Marker == model.MarkerUnbound {
+			if ch == '─' {
+				ch = '┄'
+			} else if ch == '│' {
+				ch = '┆'
+			}
+		} else if dashed {
+			if ch == '─' {
+				ch = '╌'
+			} else if ch == '│' {
+				ch = '╎'
 			}
 		}
-		// Do not overwrite box borders or other arrowheads at endpoints.
-		existing := c.Get(p.X, p.Y)
-		if i != n-1 && existing.Ch != ' ' && isLineRune(existing.Ch) && existing.Ch != ch {
+		if h, ok := heads[p]; ok {
+			ch = h
+		} else if existing := c.Get(p.X, p.Y); existing.Ch != ' ' && isLineRune(existing.Ch) && existing.Ch != ch {
 			ch = crossChar(existing.Ch, ch)
 		}
 		c.Set(p.X, p.Y, ch, st)
 	}
-	// Animation: a bright dot moving along a flowing edge; speed scales with rate.
-	if es.State == model.Flowing && opts.Animate && es.Marker == "" && n > 3 {
-		step := speedStep(es.Rate)
-		if step > 0 {
-			pos := (opts.Frame / step) % (n - 1)
-			if pos > 0 {
-				p := cells[pos]
-				c.Set(p.X, p.Y, '●', Style{Fg: col, Bold: true, Dim: st.Dim})
-			}
+
+	longest := r0
+	for _, r := range routes {
+		if len(r.Cells) > len(longest.Cells) {
+			longest = r
 		}
 	}
-	if es.State == model.Processing && opts.Animate {
-		if (opts.Frame/5)%2 == 0 {
-			for _, p := range cells[1 : n-1] {
-				cell := c.Get(p.X, p.Y)
-				cell.St.Bold = true
-				c.Set(p.X, p.Y, cell.Ch, cell.St)
+	for _, r := range routes {
+		cells := r.Cells
+		n := len(cells)
+		// Animation: a bright dot moving along a flowing edge; speed scales with rate.
+		if es.State == model.Flowing && opts.Animate && es.Marker == "" && n > 3 {
+			step := speedStep(es.Rate)
+			if step > 0 {
+				pos := (opts.Frame / step) % (n - 1)
+				if pos > 0 {
+					p := cells[pos]
+					c.Set(p.X, p.Y, '●', Style{Fg: col, Bold: true, Dim: st.Dim})
+				}
 			}
 		}
-	}
-	// Waiting: dots piled at the arrowhead, up to 5, plus the count.
-	if es.State == model.Waiting && n > 2 {
-		pile := int(es.Queued)
-		if pile > 5 {
-			pile = 5
+		if es.State == model.Processing && opts.Animate && n > 2 {
+			if (opts.Frame/5)%2 == 0 {
+				for _, p := range cells[1 : n-1] {
+					cell := c.Get(p.X, p.Y)
+					cell.St.Bold = true
+					c.Set(p.X, p.Y, cell.Ch, cell.St)
+				}
+			}
 		}
-		if pile < 1 {
-			pile = 1
-		}
-		for k := 1; k <= pile && n-1-k > 0; k++ {
-			p := cells[n-1-k]
-			c.Set(p.X, p.Y, '•', Style{Fg: ColAmber, Bold: true})
+		// Waiting: dots piled at the arrowhead, up to 5, plus the count.
+		if es.State == model.Waiting && n > 2 {
+			pile := int(es.Queued)
+			if pile > 5 {
+				pile = 5
+			}
+			if pile < 1 {
+				pile = 1
+			}
+			for k := 1; k <= pile && n-1-k > 0; k++ {
+				p := cells[n-1-k]
+				c.Set(p.X, p.Y, '•', Style{Fg: ColAmber, Bold: true})
+			}
 		}
 	}
 	// Label at the midpoint, drawn later. Off the lit path, and on healthy
@@ -644,10 +864,10 @@ func drawRoute(c *Canvas, g *layout.Graph, r *layout.Route, snap *model.Snapshot
 	if opts.Lens != nil && !isLit {
 		return nil
 	}
-	if !edgeLabelWorthIt(g, r, es, opts) {
+	if !edgeLabelWorthIt(g, longest, es, opts) {
 		return nil
 	}
-	return func() { labelRoute(c, g, r, es, st, opts) }
+	return func() { labelRoute(c, g, longest, es, st, opts) }
 }
 
 // edgeLabelWorthIt decides whether a flowing edge deserves a rate label.
@@ -666,7 +886,7 @@ func edgeLabelWorthIt(g *layout.Graph, r *layout.Route, es model.ElementState, o
 	}
 	kind := ""
 	if opts.Topology != nil {
-		if e, ok := opts.Topology.Edge(r.ID); ok {
+		if e, ok := opts.Topology.Edge(edgeOf(r)); ok {
 			kind = e.Kind
 		}
 	}
@@ -675,6 +895,14 @@ func edgeLabelWorthIt(g *layout.Graph, r *layout.Route, es model.ElementState, o
 		return false
 	}
 	return true
+}
+
+// edgeOf is the logical edge a route draws.
+func edgeOf(r *layout.Route) string {
+	if r.Edge != "" {
+		return r.Edge
+	}
+	return r.ID
 }
 
 // Point alias for readability.
@@ -709,52 +937,8 @@ func arrow(from, to Point) rune {
 	}
 }
 
-func lineChar(prev, cur, next Point, first, last bool) rune {
-	dIn := dir(prev, cur)
-	dOut := dir(cur, next)
-	if first {
-		dIn = dOut
-	}
-	if last {
-		dOut = dIn
-	}
-	if dIn == dOut {
-		if dIn == 'h' {
-			return '─'
-		}
-		return '│'
-	}
-	// corners: figure out which quadrant
-	fromLeft := prev.X < cur.X
-	fromRight := prev.X > cur.X
-	fromUp := prev.Y < cur.Y
-	fromDown := prev.Y > cur.Y
-	toLeft := next.X < cur.X
-	toRight := next.X > cur.X
-	toUp := next.Y < cur.Y
-	toDown := next.Y > cur.Y
-	switch {
-	case (fromLeft && toDown) || (fromDown && toLeft):
-		return '╮'
-	case (fromLeft && toUp) || (fromUp && toLeft):
-		return '╯'
-	case (fromRight && toDown) || (fromDown && toRight):
-		return '╭'
-	case (fromRight && toUp) || (fromUp && toRight):
-		return '╰'
-	}
-	return '┼'
-}
-
-func dir(a, b Point) byte {
-	if a.Y == b.Y {
-		return 'h'
-	}
-	return 'v'
-}
-
 func isLineRune(r rune) bool {
-	return strings.ContainsRune("─│╌╎┄┆╭╮╰╯┼", r)
+	return strings.ContainsRune("─│╌╎┄┆╭╮╰╯┼┬┴├┤", r)
 }
 
 func crossChar(existing, ch rune) rune {
@@ -764,6 +948,13 @@ func crossChar(existing, ch rune) rune {
 		return '┼'
 	}
 	return ch
+}
+
+func dir(a, b Point) byte {
+	if a.Y == b.Y {
+		return 'h'
+	}
+	return 'v'
 }
 
 // labelRoute writes the short edge label next to the route, trying the

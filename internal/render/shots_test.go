@@ -74,7 +74,7 @@ func TestShots(t *testing.T) {
 		rt.Ring().AddAll(run.Frames)
 		rt.Binder().Seed(run.Binder.Events())
 		m := New(rt, Options{})
-		m.Update(tea.WindowSizeMsg{Width: 190, Height: 56})
+		m.Update(tea.WindowSizeMsg{Width: 190, Height: 100})
 		m.snap, m.view = snap, snap
 		m.frame = 7
 		sh.setup(m)

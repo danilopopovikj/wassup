@@ -22,6 +22,29 @@ type Box struct {
 	GroupBox bool
 	// Members lists the component ids inside a collapsed group box.
 	Members []string
+	// Frame is true for a node drawn as a container: the instances of the
+	// components that run on it sit inside, below Header interior rows kept
+	// for the node's own label, state and gauges.
+	Frame  bool
+	Header int
+	// Instance names the component an instance box stands for and Node the
+	// node it sits in; the box id is "<component>@<node>".
+	Instance string
+	Node     string
+}
+
+// Element returns the element a box stands for: the component of an
+// instance, otherwise the box id itself.
+func (b *Box) Element() string {
+	if b.Instance != "" {
+		return b.Instance
+	}
+	return b.ID
+}
+
+// Inside reports whether o lies within b (an instance in its node).
+func (b *Box) Inside(o *Box) bool {
+	return o.X >= b.X && o.Right() <= b.Right() && o.Y >= b.Y && o.Bottom() <= b.Bottom()
 }
 
 // Right and Bottom are exclusive bounds.
@@ -50,9 +73,11 @@ type GroupFrame struct {
 // Point is a grid cell.
 type Point struct{ X, Y int }
 
-// Route is a drawn edge.
+// Route is a drawn edge. A logical edge between components drawn inside
+// nodes has one route per instance pair; they share Edge and Merged.
 type Route struct {
 	ID     string
+	Edge   string // the logical edge id
 	From   string // box id
 	To     string // box id
 	Cells  []Point
@@ -77,7 +102,7 @@ type Options struct {
 
 // DefaultOptions are the documented defaults.
 func DefaultOptions() Options {
-	return Options{MinBoxW: 18, MinBoxH: 5, LaneGap: 4, BoxGap: 4, GroupGap: 8}
+	return Options{MinBoxW: 18, MinBoxH: 5, LaneGap: 6, BoxGap: 6, GroupGap: 10}
 }
 
 // Graph is a complete layout.
@@ -88,8 +113,31 @@ type Graph struct {
 	Routes map[string]*Route
 	W, H   int
 	// BoxOf maps any element id (including db containers with roles) to the box that draws it.
+	// A component drawn inside nodes maps to its first instance.
 	BoxOf map[string]string
+	// Instances lists, per component drawn inside nodes, its instance box ids
+	// in node order.
+	Instances map[string][]string
 }
+
+// ElementOf returns the element id a box id stands for (see Box.Element).
+func (g *Graph) ElementOf(boxID string) string {
+	if b, ok := g.Boxes[boxID]; ok {
+		return b.Element()
+	}
+	return boxID
+}
+
+// Layout constants of the machine view.
+const (
+	// instanceGap is the rows between two instances in a node, room for an
+	// arrow from one to the next.
+	instanceGap = 2
+	// frameTop and framePad are the interior rows above the first and below
+	// the last instance: room for a port and its run-up.
+	frameTop = 2
+	framePad = 1
+)
 
 // BoxAt returns the box under a cell, preferring the smallest.
 func (g *Graph) BoxAt(x, y int) *Box {
@@ -148,7 +196,7 @@ func Compute(t *model.Topology, l model.Layout, opts Options) *Graph {
 			opts.Collapsed[id] = true
 		}
 	}
-	g := &Graph{Boxes: map[string]*Box{}, Routes: map[string]*Route{}, BoxOf: map[string]string{}}
+	g := &Graph{Boxes: map[string]*Box{}, Routes: map[string]*Route{}, BoxOf: map[string]string{}, Instances: map[string][]string{}}
 
 	// 1. Which components are drawn as boxes: everything not inside a
 	// collapsed group, plus one box per collapsed group. A db with roles is
@@ -183,10 +231,34 @@ func Compute(t *model.Topology, l model.Layout, opts Options) *Graph {
 	}
 	var items []item
 	seenGroupBox := map[string]bool{}
+	// A component that runs on nodes is drawn inside them, one instance per
+	// node, when neither it nor the node is folded into a collapsed group.
+	hostsOf := map[string][]model.Component{} // node id -> what it draws
+	nodesOf := map[string][]string{}          // component id -> its nodes
+	for _, c := range t.AllComponents() {
+		if c.Type == "node" || len(c.RunsOn) == 0 || collapsedAncestor(c.Group) != "" {
+			continue
+		}
+		for _, n := range c.RunsOn {
+			nc, ok := t.Component(n)
+			if !ok || nc.Type != "node" || collapsedAncestor(nc.Group) != "" {
+				continue
+			}
+			nodesOf[c.ID] = append(nodesOf[c.ID], n)
+			hostsOf[n] = append(hostsOf[n], c)
+		}
+	}
 	for _, c := range t.AllComponents() {
 		if c.Type == "database" && c.Roles != nil && c.Roles.Primary != "" {
 			g.BoxOf[c.ID] = c.Roles.Primary
 			continue // drawn as a group of instances
+		}
+		if nodes := nodesOf[c.ID]; len(nodes) > 0 {
+			for _, n := range nodes {
+				g.Instances[c.ID] = append(g.Instances[c.ID], c.ID+"@"+n)
+			}
+			g.BoxOf[c.ID] = g.Instances[c.ID][0]
+			continue // drawn inside its nodes
 		}
 		if ca := collapsedAncestor(c.Group); ca != "" {
 			g.BoxOf[c.ID] = ca
@@ -227,12 +299,18 @@ func Compute(t *model.Topology, l model.Layout, opts Options) *Graph {
 		var out []string
 		for _, x := range ids {
 			for _, n := range t.Neighbors(x) {
-				b := g.BoxOf[n]
-				if b == "" || b == id || seen[b] {
-					continue
+				// a component inside nodes pulls toward those nodes
+				targets := nodesOf[n]
+				if len(targets) == 0 {
+					targets = []string{g.BoxOf[n]}
 				}
-				seen[b] = true
-				out = append(out, b)
+				for _, b := range targets {
+					if b == "" || b == id || seen[b] {
+						continue
+					}
+					seen[b] = true
+					out = append(out, b)
+				}
 			}
 		}
 		return out
@@ -320,6 +398,32 @@ func Compute(t *model.Topology, l model.Layout, opts Options) *Graph {
 	sweep(model.LaneSide, func(l model.Lane) bool { return l != model.LaneSide })
 
 	// 3. Size boxes from content.
+	instanceH := func() int {
+		switch {
+		case opts.Compact, opts.Detail == model.DetailMinimal:
+			return 3 // border + label
+		case opts.Detail == model.DetailFull:
+			return 6 // + state + gauges line + note
+		}
+		return 5 // border + label + state + gauges line
+	}
+	instanceW := func(hosts []model.Component) int {
+		w := opts.MinBoxW
+		for _, hc := range hosts {
+			// "● Hatchet workers ×3" with a margin
+			if lw := len([]rune(hc.DisplayLabel())) + 12; lw > w {
+				w = lw
+			}
+		}
+		return w
+	}
+	// frameHeader is the interior rows a node keeps for itself.
+	frameHeader := func(gauges int) int {
+		if opts.Compact || opts.Detail == model.DetailMinimal {
+			return 2
+		}
+		return 2 + min(gauges, 3)
+	}
 	size := func(it item) (int, int) {
 		w, h := opts.MinBoxW, opts.MinBoxH
 		if it.gbox {
@@ -345,37 +449,28 @@ func Compute(t *model.Topology, l model.Layout, opts Options) *Graph {
 		if w < 25 && gauges > 0 {
 			w = 25
 		}
-		// A node lists what runs on it, one row each: "● API ×2".
-		hosted := 0
-		if c.Type == "node" {
-			for _, hc := range t.Hosted(c.ID) {
-				hosted++
-				// room for "Workers · 1 of 3 ready" beside the glyph
-				if lw := len([]rune(hc.DisplayLabel())) + 20; lw > w {
-					w = lw
-				}
-			}
-			if w < 28 {
-				w = 28
-			}
+		// A node with residents is a frame: header rows, then one instance
+		// box per resident, stacked with room for an arrow between them.
+		if hosts := hostsOf[c.ID]; c.Type == "node" && len(hosts) > 0 {
+			w = max(w, instanceW(hosts)+4, 34)
+			header := frameHeader(gauges)
+			h = 2 + header + frameTop + len(hosts)*instanceH() + (len(hosts)-1)*instanceGap + framePad
+			return w, h
 		}
 		switch opts.Detail {
 		case model.DetailMinimal:
 			// border(2) + label + state + one note line
 			h = 2 + 1 + 1 + 1
 		case model.DetailFull:
-			// border(2) + label + state + gauges + note lines + every row
-			h = 2 + 1 + 1 + gauges + 2 + hosted
+			// border(2) + label + state + gauges + note lines
+			h = 2 + 1 + 1 + gauges + 2
 		default:
 			if gauges > 3 {
 				gauges = 3
 			}
 			// border(2) + label + state + up to three gauges + one line for a
-			// change stamp; nodes add their rows (at most maxHostedRows)
+			// change stamp
 			h = 2 + 1 + 1 + gauges + 1
-			if hosted > 0 {
-				h += min(hosted, model.MaxHostedRows)
-			}
 		}
 		if opts.Compact {
 			h = 2 + 1 + 1 + 1
@@ -460,10 +555,12 @@ func Compute(t *model.Topology, l model.Layout, opts Options) *Graph {
 	for id, b := range boxes {
 		if p, ok := l.Components[id]; ok && !p.Auto {
 			b.X, b.Y = p.X, p.Y
-			if p.W >= opts.MinBoxW {
+			// a saved size never shrinks a node frame below its residents
+			frame := len(hostsOf[id]) > 0 && !b.GroupBox
+			if p.W >= opts.MinBoxW && (!frame || p.W >= b.W) {
 				b.W = p.W
 			}
-			if p.H >= 3 {
+			if p.H >= 3 && (!frame || p.H >= b.H) {
 				b.H = p.H
 			}
 			b.Saved = true
@@ -517,6 +614,34 @@ func Compute(t *model.Topology, l model.Layout, opts Options) *Graph {
 			return bi.X < bj.X
 		})
 		g.Order = append(g.Order, laneIDs...)
+	}
+	// 5b. Instances inside their node frames, drawn after every lane box so
+	// they sit on top. Entry-side residents (an ingress) come first, then
+	// the rest in topology order.
+	laneRank := map[model.Lane]int{}
+	for i, ln := range model.AllLanes {
+		laneRank[ln] = i
+	}
+	nodeIDs := make([]string, 0, len(hostsOf))
+	for n := range hostsOf {
+		nodeIDs = append(nodeIDs, n)
+	}
+	sort.Strings(nodeIDs)
+	for _, n := range nodeIDs {
+		nb, ok := boxes[n]
+		if !ok || nb.GroupBox {
+			continue
+		}
+		hosts := append([]model.Component(nil), hostsOf[n]...)
+		sort.SliceStable(hosts, func(i, j int) bool { return laneRank[model.LaneOf(hosts[i])] < laneRank[model.LaneOf(hosts[j])] })
+		nb.Frame, nb.Header = true, frameHeader(len(model.Catalog["node"].Gauges))
+		y := nb.Y + 1 + nb.Header + frameTop
+		for _, hc := range hosts {
+			ib := &Box{ID: hc.ID + "@" + n, X: nb.X + 2, Y: y, W: nb.W - 4, H: instanceH(), Lane: nb.Lane, Group: hc.Group, Instance: hc.ID, Node: n}
+			boxes[ib.ID] = ib
+			g.Order = append(g.Order, ib.ID)
+			y += ib.H + instanceGap
+		}
 	}
 
 	// 6. Group frames: bounding boxes of descendants, padded by depth.
@@ -572,8 +697,8 @@ func frames(t *model.Topology, g *Graph, groups []model.Group, parentOf map[stri
 		var members []string
 		for _, id := range t.GroupDescendants(gr.ID) {
 			if b := g.BoxOf[id]; b != "" {
-				if bx, ok := g.Boxes[b]; ok && bx.Lane == model.LaneSide {
-					continue // the side column stands outside the frames
+				if bx, ok := g.Boxes[b]; ok && (bx.Lane == model.LaneSide || bx.Instance != "") {
+					continue // the side column stands outside the frames; instances live in their node
 				}
 				members = append(members, b)
 			}

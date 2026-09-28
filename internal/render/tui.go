@@ -135,7 +135,7 @@ func (m *Model) relayout() {
 	m.graph = layout.Compute(&m.cfg.Topology, m.cfg.Layout, opts)
 	if m.selected == "" {
 		if len(m.graph.Order) > 0 {
-			m.selected = m.graph.Order[0]
+			m.selected = m.graph.ElementOf(m.graph.Order[0])
 		}
 	}
 }
@@ -678,9 +678,10 @@ func (m *Model) selectFirstMatch() {
 	}
 	f := strings.ToLower(m.filter)
 	for _, id := range m.graph.Order {
-		lbl := strings.ToLower(m.cfg.Topology.LabelOf(id))
-		if strings.Contains(id, f) || strings.Contains(lbl, f) {
-			m.selected = id
+		el := m.graph.ElementOf(id)
+		lbl := strings.ToLower(m.cfg.Topology.LabelOf(el))
+		if strings.Contains(el, f) || strings.Contains(lbl, f) {
+			m.selected = el
 			m.follow()
 			return
 		}
@@ -697,7 +698,7 @@ func (m *Model) moveSelection(dx, dy int) {
 	}
 	if cur == nil {
 		if len(m.graph.Order) > 0 {
-			m.selected = m.graph.Order[0]
+			m.selected = m.graph.ElementOf(m.graph.Order[0])
 		}
 		return
 	}
@@ -705,10 +706,10 @@ func (m *Model) moveSelection(dx, dy int) {
 	best := ""
 	bestScore := 1 << 30
 	for _, id := range m.graph.Order {
-		if id == cur.ID {
+		b := m.graph.Boxes[id]
+		if id == cur.ID || b.Element() == cur.Element() {
 			continue
 		}
-		b := m.graph.Boxes[id]
 		bx, by := b.Center()
 		vx, vy := bx-cx, by-cy
 		// must be in the requested half-plane
@@ -729,7 +730,7 @@ func (m *Model) moveSelection(dx, dy int) {
 		}
 	}
 	if best != "" {
-		m.selected = best
+		m.selected = m.graph.ElementOf(best)
 		m.follow()
 	}
 }
@@ -773,13 +774,16 @@ func (m *Model) onClick(mm tea.Mouse) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if b := m.graph.BoxAt(gx, gy); b != nil {
-		m.selected = b.ID
+		m.selected = b.Element()
+		if b.Instance != "" {
+			return m, nil // an instance moves with its node
+		}
 		resize := gx >= b.Right()-2 && gy >= b.Bottom()-1
 		m.drag = &dragState{id: b.ID, startX: gx, startY: gy, origX: b.X, origY: b.Y, origW: b.W, origH: b.H, resize: resize}
 		return m, nil
 	}
 	if r := m.graph.RouteAt(gx, gy); r != nil {
-		m.selected = r.ID
+		m.selected = edgeOf(r)
 		m.panelMode = panelDetail
 	}
 	return m, nil
@@ -927,8 +931,9 @@ func (m *Model) graphCanvas() *Canvas {
 	if m.filter != "" {
 		f := strings.ToLower(m.filter)
 		for _, id := range m.graph.Order {
-			lbl := strings.ToLower(m.cfg.Topology.LabelOf(id))
-			if !strings.Contains(id, f) && !strings.Contains(lbl, f) {
+			el := m.graph.ElementOf(id)
+			lbl := strings.ToLower(m.cfg.Topology.LabelOf(el))
+			if !strings.Contains(el, f) && !strings.Contains(lbl, f) {
 				b := m.graph.Boxes[id]
 				c.Dim(b.X, b.Y, b.W, b.H)
 			}
