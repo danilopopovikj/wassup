@@ -1,0 +1,42 @@
+name: Feature or probe request
+description: A new probe, a new shape, or a change to how wassup behaves
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: >
+        What were you trying to find out about your system, and what stood
+        in the way? A concrete incident is the most useful thing you can
+        describe here.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: >
+        For a probe: the system it reads, the API or command it would use,
+        and the numbers and conditions that matter.
+    validations:
+      required: true
+  - type: dropdown
+    id: kind
+    attributes:
+      label: Kind
+      options:
+        - New probe for an existing shape
+        - New shape (catalog type)
+        - CLI command or flag
+        - Diagram, labels or keys
+        - Discovery and sync
+        - Something else
+    validations:
+      required: true
+  - type: checkboxes
+    id: contribute
+    attributes:
+      label: Contributing
+      options:
+        - label: I would like to work on this myself

@@ -1,0 +1,53 @@
+name: Bug report
+description: Something wassup does wrong, draws wrong or says wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time. Please remove hostnames, tokens and
+        anything else private from what you paste: issues are public.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you saw, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: >
+        The smallest steps that show it. A bundled scenario
+        (`wassup demo 2`) or a fixture directory is ideal, because it
+        needs no cluster.
+      placeholder: |
+        1. wassup demo 4
+        2. press i
+        3. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: wassup version
+      description: Output of `wassup version`.
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Operating system, terminal, and tmux if you use it.
+      placeholder: macOS 15, Ghostty, tmux 3.5
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: >
+        Command output, `wassup validate --json`, or `wassup export --svg`
+        of the diagram, with private names removed.
+      render: text

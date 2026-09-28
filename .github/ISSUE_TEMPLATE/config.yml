@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/danilopopovikj/wassup/discussions
+    about: Ask how to do something, or talk an idea through before filing it.
+  - name: Security vulnerability
+    url: https://github.com/danilopopovikj/wassup/security/advisories/new
+    about: Report it privately. Please do not open a public issue.

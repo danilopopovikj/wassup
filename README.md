@@ -1,5 +1,10 @@
 # wassup
 
+[![CI](https://github.com/danilopopovikj/wassup/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/danilopopovikj/wassup/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/danilopopovikj/wassup.svg)](https://pkg.go.dev/github.com/danilopopovikj/wassup)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/danilopopovikj/wassup/badge)](https://scorecard.dev/viewer/?uri=github.com/danilopopovikj/wassup)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 One live architecture diagram of a Kubernetes-hosted system, in the terminal.
 It answers three questions at a glance: **where is it stuck, since when, what
 changed.** It is the first layer of visual support for an on-call engineer who
@@ -28,39 +33,58 @@ diagnoses with Claude Code in the neighbouring tmux pane.
 
 More frames from the recorded scenarios: [node out of memory](docs/screenshots/04-node-memory-lens.svg),
 [node dropped from the load balancer, timeline strip](docs/screenshots/07-node-dropped-timeline.svg).
-`WASSUP_SHOTS=<dir> go test ./internal/render/ -run TestShots` regenerates them as SVG.
 
 wassup is not an agent, not a dashboard and not a kubectl replacement.
 Claude Code writes its configuration, reads its snapshots and draws on it;
 wassup itself needs no AI to run. MIT, single binary, runs in tmux, no daemon.
 
-## Principles
+> **Status:** early and before 1.0. It works, the recorded scenarios pass,
+> and the file formats in `.wassup/` may still change between minor versions.
 
-- **One diagram.** The general view and the issue view are the same picture, filtered.
-- **Six states.** Every node and edge is always in exactly one of: flowing, idle, waiting, processing, blocked, failing. One glyph and one color per state, everywhere.
-- **Plain words.** Labels read "waiting, 38 queued, at the database", never "CrashLoopBackOff".
-- **Files, not sockets.** Everything Claude Code and wassup exchange is a file in `.wassup/`.
-- **Watch, don't poll.** Kubernetes data comes from informers; metrics tick every 5 seconds; the screen redraws at up to 10 fps.
-- **Layout is stable.** Boxes never jump on their own. Positions live in `layout.json`, which the user owns.
-- **Extensible by type.** New infrastructure is a probe implementing one interface plus a catalog type, never a renderer change.
+## Contents
 
-## Install
+- [Try it in a minute](#try-it-in-a-minute)
+- [Install](#install)
+- [Set up a real system](#set-up-a-real-system)
+- [Principles](#principles)
+- [Keys](#keys)
+- [Commands](#commands)
+- [What it can watch](#what-it-can-watch)
+- [The recorded scenarios](#the-recorded-scenarios)
+- [Contributing](#contributing)
+- [Security](#security)
+- [License](#license)
+
+## Try it in a minute
+
+No cluster needed. The demo replays a recorded incident:
 
 ```sh
 go install github.com/danilopopovikj/wassup/cmd/wassup@latest
-# or build here
-make build
+
+wassup demo              # the connection pool scenario
+wassup demo 4 --speed 5  # node memory pressure, five times faster
+wassup demo --list       # all twelve
 ```
 
-Try it with no cluster at all:
+Press `i` for the issue lens, `enter` for the detail panel, `?` for every key.
 
-```sh
-wassup demo            # replays the connection-pool scenario
-wassup demo 4 --speed 5
-wassup demo --list
-```
+## Install
 
-## Setting up a real system
+| How | Command |
+| --- | --- |
+| Go 1.26 or newer | `go install github.com/danilopopovikj/wassup/cmd/wassup@latest` |
+| Binary | Download the archive for Linux or macOS from [Releases](https://github.com/danilopopovikj/wassup/releases) and put `wassup` on your `PATH` |
+| From source | `git clone https://github.com/danilopopovikj/wassup && cd wassup && make install` |
+
+Release archives come with checksums, a bill of materials and a signed build
+provenance. [SECURITY.md](SECURITY.md#verifying-a-release) shows how to
+verify one.
+
+Optional: `resvg` or `rsvg-convert` on the `PATH` lets `wassup export` write
+PNG next to SVG.
+
+## Set up a real system
 
 ```sh
 cd your-repo
@@ -75,6 +99,10 @@ component and edge cited to a file and line, verifies each data flow against
 that evidence, and checks the result with `wassup validate` and `wassup
 probe --once`. Then run `wassup`. Later, `wassup sync` shows what the repo
 or cluster gained since, and `--apply` merges it without touching your layout.
+
+wassup only reads. Probes take credentials from the environment variables
+named in `bindings.yaml`, or from your kubeconfig, never from a file in
+`.wassup/`. `wassup probes` lists the access each probe needs.
 
 The `.wassup/` directory is the only channel between you, Claude Code and the
 TUI:
@@ -91,6 +119,19 @@ TUI:
 | `state/events.jsonl` | TUI | TUI, CLI | change markers: deploys, terraform applies, reboots, scale events |
 | `state/annotations.json` | `wassup annotate` | TUI | highlighted paths and notes |
 
+Two complete examples are in [examples/](examples): a k3s cluster with
+CloudNativePG on Hetzner, and a managed cloud setup.
+
+## Principles
+
+- **One diagram.** The general view and the issue view are the same picture, filtered.
+- **Six states.** Every node and edge is always in exactly one of: flowing, idle, waiting, processing, blocked, failing. One glyph and one color per state, everywhere.
+- **Plain words.** Labels read "waiting, 38 queued, at the database", never "CrashLoopBackOff".
+- **Files, not sockets.** Everything Claude Code and wassup exchange is a file in `.wassup/`.
+- **Watch, don't poll.** Kubernetes data comes from informers; metrics tick every 5 seconds; the screen redraws at up to 10 fps.
+- **Layout is stable.** Boxes never jump on their own. Positions live in `layout.json`, which the user owns.
+- **Extensible by type.** New infrastructure is a probe implementing one interface plus a catalog type, never a renderer change.
+
 ## Keys
 
 `←↑→↓`/`hjkl` move · `enter` detail · `tab` panel · `i` issue lens · `n` next
@@ -102,7 +143,7 @@ reset layout · `/` filter · `?` all keys.
 Mouse: click selects, drag moves, drag a corner resizes, click a group title
 collapses it.
 
-## CLI
+## Commands
 
 | Command | Does |
 | --- | --- |
@@ -124,68 +165,68 @@ collapses it.
 | `wassup skill install` | copies the skill into `.claude/skills/wassup/` |
 | `wassup demo [n]` | replays a bundled scenario |
 | `wassup probes` | lists the probe kinds this build ships |
+| `wassup version` | prints the version |
 
 Every command accepts `--json`.
 
-## Background work and sync engines
+## What it can watch
 
-Hatchet, Celery and Electric SQL map onto the catalog without new
-renderer code: Hatchet queues and workflows (`hatchet.queue`,
-`hatchet.workflow`), worker pools with slots and stuck tasks
-(`hatchet.workers`, `celery.worker`), Celery queues on Redis or RabbitMQ
-(`celery.queue`, `amqp.queue`), and Electric as a `syncengine` component whose
-replication slot is watched through `pg.stats` (`electric.sync`). Scenarios
-11 and 12 record a Hatchet backlog with every slot busy and an Electric slot
-gone inactive. The mapping is spelled out in `skill/wassup/reference/catalog.md`.
+Kubernetes workloads, nodes, ingresses, volumes and cron jobs; CloudNativePG
+clusters, Postgres statistics and connection pools; Redis; S3-compatible
+object storage; Hetzner load balancers and firewalls; DNS records, TLS
+certificates and HTTP endpoints; SigNoz; Terraform state and git as sources
+of change markers. `wassup probes` prints the full list with the access each
+one needs, and [probes.md](skill/wassup/reference/probes.md) is the same
+list as a document.
 
-## The ten scenarios
+Background work and sync engines map onto the catalog without new renderer
+code: Hatchet queues and workflows (`hatchet.queue`, `hatchet.workflow`),
+worker pools with slots and stuck tasks (`hatchet.workers`, `celery.worker`),
+Celery queues on Redis or RabbitMQ (`celery.queue`, `amqp.queue`), and
+Electric as a `syncengine` component whose replication slot is watched
+through `pg.stats` (`electric.sync`). The mapping is spelled out in
+[catalog.md](skill/wassup/reference/catalog.md).
 
-The build is accepted against ten recorded scenarios in
+Something missing? A new system comes in as a probe, and
+[internal/probe/README.md](internal/probe/README.md) explains how to write
+one.
+
+## The recorded scenarios
+
+The build is accepted against twelve recorded scenarios in
 `testdata/scenarios/`: deploy crash loop, connection pool exhausted, primary
 disk filling from an inactive replication slot, node memory pressure, TLS
 certificate not renewed, Celery backlog with a stuck worker, node dropped out
-of the load balancer, firewall change blocked observability, cache full, and
-an external dependency down. `go test ./...` replays all ten; `wassup replay
---check testdata/scenarios/<n>` does one; `wassup replay testdata/scenarios/<n>`
-plays it in the TUI.
+of the load balancer, firewall change blocked observability, cache full,
+an external dependency down, a Hatchet backlog with every slot busy, and an
+Electric replication slot gone inactive.
 
-## Repository layout
-
-```
-cmd/wassup/          main, subcommands (cobra)
-internal/model/      schemas, types, validation, ids, refs, remap
-internal/probe/      Probe interface, registry, one package per probe family
-internal/bind/       joins observations to components and edges
-internal/state/      six-state engine, severity, labels, cause rule and story
-internal/history/    snapshot writer, history frames, events, trends
-internal/layout/     lanes, barycenter ordering, orthogonal A* router
-internal/render/     Bubble Tea model, canvas, panels, timeline, export
-internal/explain/    the explain command
-internal/app/        runtime: probes, tick loop, persistence, hot reload
-internal/scenario/   offline replay harness used by tests and --check
-skill/wassup/        SKILL.md and reference files (embedded, `skill install`)
-prompts/             setup.md (embedded)
-testdata/scenarios/  fixtures 01 to 10 (gen.py regenerates them)
-examples/            full .wassup/ examples
+```sh
+go test ./...                                    # replays all twelve
+wassup replay --check testdata/scenarios/<name>  # checks one
+wassup replay testdata/scenarios/<name>          # plays one in the TUI
 ```
 
 ## Contributing
 
-`CLAUDE.md` holds the building principles, the vocabulary and the recipes
-for adding a provider, a shape, a scenario or a verb. Read it first.
+Contributions are welcome: bug reports, probes for systems wassup does not
+know yet, clearer labels, better docs.
 
-## Development
+- [CONTRIBUTING.md](CONTRIBUTING.md) covers the setup, the layout of the
+  code and how pull requests are handled.
+- [CLAUDE.md](CLAUDE.md) holds the building principles, the vocabulary and
+  the recipes for adding a provider, a shape, a scenario or a command.
+- Questions and ideas go to
+  [Discussions](https://github.com/danilopopovikj/wassup/discussions).
 
-```sh
-make test          # go test ./...
-make lint          # gofmt + go vet
-make demo          # build and run the demo
-python3 testdata/scenarios/gen.py   # regenerate fixtures after editing gen.py
-```
+Everyone taking part is expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
-New infrastructure comes in as a probe (see `internal/probe/README.md`).
-Worker fleets, queues, replication consumers and jobs have typed facets in
-`internal/probe/facet`: a backend fills a struct and the facet writes the
-canonical observation, so Hatchet, Celery and RabbitMQ read the same on the
-diagram and the next backend needs no engine or UI change. Only a genuinely
-new shape needs a catalog type in `internal/model/catalog.go`.
+## Security
+
+Please report vulnerabilities privately, as described in
+[SECURITY.md](SECURITY.md), not in a public issue.
+
+## License
+
+[MIT](LICENSE) © Danilo Popovikj

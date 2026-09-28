@@ -43,7 +43,7 @@ already taken so they are not re-litigated in every session.
    as a catalog type with a facet named after it. The renderer, the state
    engine and the story never learn a product name.
 9. **Deterministic and offline-testable.** Layout, routing, the engine and
-   discovery are pure functions over files. The ten (now twelve) recorded
+   discovery are pure functions over files. The twelve recorded
    scenarios are the acceptance suite; every behavior change is a fixture
    change first.
 10. **Keep it simple.** Standard library first; a dependency needs a reason

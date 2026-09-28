@@ -1,23 +1,34 @@
 version: 2
 project_name: wassup
+
 builds:
   - main: ./cmd/wassup
     binary: wassup
     env: [CGO_ENABLED=0]
     goos: [linux, darwin]
     goarch: [amd64, arm64]
+    # -trimpath and a fixed timestamp make the build reproducible.
+    flags: [-trimpath]
+    mod_timestamp: "{{ .CommitTimestamp }}"
     ldflags: ["-s -w -X main.Version={{.Version}}"]
+
 archives:
   - formats: [tar.gz]
     files: [LICENSE, README.md]
+
 checksum:
   name_template: checksums.txt
-brews:
-  - repository:
-      owner: danilopopovikj
-      name: homebrew-tap
-    homepage: https://github.com/danilopopovikj/wassup
-    description: One live architecture diagram of a Kubernetes-hosted system
-    license: MIT
+
+# One software bill of materials per archive; needs syft on the PATH.
+sboms:
+  - artifacts: archive
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge "
+
 release:
   draft: true
