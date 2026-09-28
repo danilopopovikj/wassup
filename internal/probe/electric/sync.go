@@ -1,7 +1,11 @@
 // Package electric implements electric.sync, the probe of an Electric SQL
 // sync service. It reads the service's health endpoint and, when a table is
 // configured, performs the same shape handshake a client would: an initial
-// shape request followed by one short live poll. Everything is read only.
+// shape request followed by one short live poll. The probe only sends GET.
+// A shape request is a read that makes Electric work all the same: for a
+// table no client syncs yet, Electric runs a snapshot query and adds the
+// table to its publication in the database. That is why table is never set
+// by default.
 package electric
 
 import (
@@ -53,6 +57,7 @@ func init() {
 		SpecFields:  []string{"url", "secret_env", "table", "interval", "timeout"},
 		Needs:       "HTTP access to Electric; the ELECTRIC_SECRET in the environment variable named by secret_env when the service requires one",
 		Implemented: true,
+		Tier:        probe.TierToken,
 		Facets:      []string{facet.NameSyncEngine},
 	}, func() probe.Probe { return &Sync{} })
 }
@@ -185,7 +190,7 @@ func (p *Sync) Start(ctx context.Context, spec map[string]any, out chan<- probe.
 func newClient(timeout time.Duration) *http.Client {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.DisableKeepAlives = true
-	return &http.Client{Timeout: timeout, Transport: tr}
+	return &http.Client{Timeout: timeout, Transport: probe.ReadOnly(tr)}
 }
 
 // loop runs check once, then every interval, re-emitting the last

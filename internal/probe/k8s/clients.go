@@ -3,23 +3,118 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"io"
+	"log/slog"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/clientcmd"
+	"k8s.io/klog/v2"
 	metricsclientset "k8s.io/metrics/pkg/client/clientset/versioned"
+
+	"github.com/danilopopovikj/wassup/internal/probe"
 )
 
 // syncTimeout bounds the wait for the informer caches to fill.
 const syncTimeout = 30 * time.Second
+
+const (
+	// reachTimeout bounds the question whether the API server answers.
+	reachTimeout = 5 * time.Second
+	// reachFresh is how long an answer counts for the probes that ask
+	// next: they all start in the same second.
+	reachFresh = 3 * time.Second
+	// reachRetry is the pause before a server that did not answer is asked
+	// again.
+	reachRetry = 5 * time.Second
+)
+
+const (
+	// clientQPS and clientBurst replace the library's defaults of 5 and 10,
+	// which are sized for a controller that writes. wassup only reads, and
+	// starts the informers of every bound probe in the same second: with the
+	// defaults the requests queue up behind the client's own rate limiter,
+	// the first picture arrives late and the library reports each wait.
+	clientQPS   = 50
+	clientBurst = 100
+
+	// debugEnv is the environment variable that leaves the Kubernetes
+	// client's own log on stderr.
+	debugEnv = "WASSUP_DEBUG"
+)
+
+// defaultErrorHandlers is the library's handler list as it was at start, put
+// back when the client's log is wanted.
+var defaultErrorHandlers = utilruntime.ErrorHandlers
+
+// The Kubernetes client logs through a process-wide logger, and what it has
+// to say (throttling waits, reflector retries, port-forward stream errors)
+// lands on stderr in the middle of the diagram. A probe reports its failures
+// through Observation.Err and its health, so nothing is lost by dropping the
+// library's copy. It is set once, before any goroutine logs.
+func init() { quietClientLog(os.Getenv(debugEnv) == "") }
+
+// quietClientLog sends the Kubernetes client's log and its unhandled-error
+// reports nowhere when quiet is true, and back to stderr when it is false.
+func quietClientLog(quiet bool) {
+	if !quiet {
+		klog.ClearLogger()
+		klog.LogToStderr(true)
+		utilruntime.ErrorHandlers = defaultErrorHandlers
+		return
+	}
+	// A logger takes every message whatever its severity; the two settings
+	// after it cover code that writes to the log's files directly.
+	klog.SetSlogLogger(slog.New(slog.DiscardHandler))
+	klog.LogToStderr(false)
+	klog.SetOutput(io.Discard)
+	utilruntime.ErrorHandlers = []utilruntime.ErrorHandler{dropError}
+}
+
+// dropError is the unhandled-error handler of a quiet run.
+func dropError(context.Context, error, string, ...any) {}
+
+// tuneConfig sets what every client of wassup shares: its name towards the
+// API server, a rate limit that fits a reader starting many informers, and
+// a transport that only reads. Every client is built from a config that
+// went through here, the port-forward's included, so a create, an update, a
+// patch or a delete is refused before it reaches the API server.
+func tuneConfig(cfg *rest.Config) {
+	cfg.UserAgent = "wassup"
+	cfg.QPS = clientQPS
+	cfg.Burst = clientBurst
+	cfg.Wrap(func(rt http.RoundTripper) http.RoundTripper {
+		return probe.ReadOnlyExcept(rt, opensPortForward)
+	})
+}
+
+// opensPortForward reports whether a request opens a port-forward to a pod.
+// It is a POST because it upgrades the connection to a stream; it creates
+// nothing in the cluster, and what goes through the stream is up to the
+// probe that asked for it, which only reads.
+func opensPortForward(req *http.Request) bool {
+	if req.Method != http.MethodPost {
+		return false
+	}
+	// The path ends in api/v1/namespaces/<namespace>/pods/<pod>/portforward;
+	// what comes before is the prefix of an API server behind a proxy.
+	p := strings.Split(strings.Trim(req.URL.Path, "/"), "/")
+	n := len(p)
+	return n >= 7 && p[n-7] == "api" && p[n-6] == "v1" && p[n-5] == "namespaces" &&
+		p[n-3] == "pods" && p[n-1] == "portforward"
+}
 
 // Clients bundles every client a probe may need for one cluster. Probes bound
 // to the same kubeconfig and context share one Clients and, through it, one
@@ -38,6 +133,64 @@ type Clients struct {
 
 	infOnce sync.Once
 	inf     *informerSet
+
+	// The last answer to reach, shared by the probes of one cluster.
+	reachMu  sync.Mutex
+	reachAt  time.Time
+	reachErr error
+}
+
+// reach asks the API server for its version, which is the cheapest request
+// there is, so that a server that refuses the connection or the credentials
+// is reported in the first second and not after the caches gave up. Clients
+// without a server behind them (tests) are taken as reached.
+func (c *Clients) reach(ctx context.Context) error {
+	if c.Core == nil {
+		return nil
+	}
+	rc, ok := c.Core.CoreV1().RESTClient().(*rest.RESTClient)
+	if !ok || rc == nil {
+		return nil
+	}
+	c.reachMu.Lock()
+	defer c.reachMu.Unlock()
+	if !c.reachAt.IsZero() && time.Since(c.reachAt) < reachFresh {
+		return c.reachErr
+	}
+	rctx, cancel := context.WithTimeout(ctx, reachTimeout)
+	defer cancel()
+	_, err := rc.Get().AbsPath("/version").DoRaw(rctx)
+	if err != nil && ctx.Err() != nil {
+		// The probe was stopped: that says nothing about the server.
+		return ctx.Err()
+	}
+	host := ""
+	if c.REST != nil {
+		host = c.REST.Host
+	}
+	c.reachAt, c.reachErr = time.Now(), reachError(host, err)
+	return c.reachErr
+}
+
+// reachError words why the API server did not answer, with what to check.
+func reachError(host string, err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "connection refused"):
+		return fmt.Errorf("the API server at %s refused the connection: check the kubeconfig and the context, and that this machine reaches the cluster (VPN, firewall) (%w)", host, err)
+	case apierrors.IsUnauthorized(err) || strings.Contains(msg, "unauthorized"):
+		return fmt.Errorf("the API server at %s does not accept the credentials of the kubeconfig: a token may have expired (%w)", host, err)
+	case strings.Contains(msg, "no such host"):
+		return fmt.Errorf("the name of the API server %s does not resolve on this machine: check the kubeconfig, and the VPN when the name is a private one (%w)", host, err)
+	case strings.Contains(msg, "certificate"):
+		return fmt.Errorf("the certificate of the API server at %s was not accepted: the kubeconfig may belong to another cluster (%w)", host, err)
+	case strings.Contains(msg, "deadline exceeded") || strings.Contains(msg, "timeout"):
+		return fmt.Errorf("no answer from the API server at %s within %s: check that this machine reaches the cluster (VPN, firewall) (%w)", host, reachTimeout, err)
+	}
+	return fmt.Errorf("the API server at %s did not answer: %w", host, err)
 }
 
 // NewClients builds the clients for a cluster. The kubeconfig is, in order,
@@ -49,7 +202,7 @@ func NewClients(kubeconfig, kubeContext string) (*Clients, error) {
 	if err != nil {
 		return nil, err
 	}
-	cfg.UserAgent = "wassup"
+	tuneConfig(cfg)
 	core, err := kubernetes.NewForConfig(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("kubernetes client: %w", err)
@@ -65,8 +218,9 @@ func NewClients(kubeconfig, kubeContext string) (*Clients, error) {
 	return &Clients{Core: core, Metrics: metrics, Dynamic: dyn, REST: cfg, Context: kubeContext}, nil
 }
 
-// restConfig resolves the kubeconfig the way NewClients documents.
-func restConfig(kubeconfig, kubeContext string) (*rest.Config, error) {
+// kubeconfigPath resolves the kubeconfig the way NewClients documents. It
+// returns "" when there is none, which leaves the in-cluster service account.
+func kubeconfigPath(kubeconfig string) string {
 	path := kubeconfig
 	if path == "" {
 		path = os.Getenv("WASSUP_KUBECONFIG")
@@ -82,6 +236,13 @@ func restConfig(kubeconfig, kubeContext string) (*rest.Config, error) {
 			}
 		}
 	}
+	return path
+}
+
+// restConfig builds the configuration of the clients for a kubeconfig and a
+// context.
+func restConfig(kubeconfig, kubeContext string) (*rest.Config, error) {
+	path := kubeconfigPath(kubeconfig)
 	if path == "" {
 		cfg, err := rest.InClusterConfig()
 		if err != nil {

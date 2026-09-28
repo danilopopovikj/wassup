@@ -208,3 +208,60 @@ func TestHostedRowsFollowPlacement(t *testing.T) {
 		t.Errorf("runs_on rows = %+v", rows)
 	}
 }
+
+// A probe that failed, timed out or may not read its source delivered
+// nothing. The element says "no data" with the reason; failing is only ever
+// concluded from data that was read.
+func TestProbeFailureIsNoDataNeverFailing(t *testing.T) {
+	refused := "failed to connect to `host=127.0.0.1 user=bookstore database=bookstore`: dial error: dial tcp 127.0.0.1:55432: connect: connection refused"
+	s := eval(t,
+		probe.Observation{Target: "api", Probe: "k8s.workload", Metrics: map[string]float64{"replicas_ready": 3, "replicas_desired": 3, "rate": 40}},
+		probe.Observation{Target: "db", Probe: "pg.stats", Err: refused},
+		probe.Observation{Target: "q", Probe: "redis.list", Metrics: map[string]float64{"depth": 0}},
+		probe.Observation{Target: "api->q", Probe: "pg.pool", Err: "permission denied for relation pg_stat_replication"},
+	)
+	db := s.Components["db"]
+	if db.State == model.Failing || db.Marker != model.MarkerUnbound || db.Severity != model.Info {
+		t.Errorf("db = %+v", db)
+	}
+	if db.Label != "no data, connection refused" {
+		t.Errorf("db label = %q", db.Label)
+	}
+	if errs, _ := db.Detail["probe_errors"].([]string); len(errs) != 1 || !strings.Contains(errs[0], "pg.stats: "+refused) {
+		t.Errorf("the whole error belongs in the detail: %+v", db.Detail["probe_errors"])
+	}
+	// Both ends of api->q are bound and api has a rate the edge could
+	// borrow. Its own probe failed, so it says that instead.
+	e := s.Edges["api->q"]
+	if e.Marker != model.MarkerNoData || e.State != model.Idle || e.Severity != model.Info {
+		t.Errorf("edge = %+v", e)
+	}
+	if e.Label != "no data, permission denied for relation pg_stat_replication" {
+		t.Errorf("edge label = %q", e.Label)
+	}
+	if len(s.Issues) != 0 {
+		t.Errorf("a failed probe is not an issue of the system: %+v", s.Issues)
+	}
+}
+
+// One probe of several failing keeps the element bound on what the others
+// read, and the failure stays visible in the detail.
+func TestPartialProbeFailureKeepsTheData(t *testing.T) {
+	s := eval(t,
+		probe.Observation{Target: "api", Probe: "k8s.workload", Metrics: map[string]float64{"replicas_ready": 3, "replicas_desired": 3}},
+		probe.Observation{Target: "db", Probe: "cnpg.cluster", Metrics: map[string]float64{"replicas_ready": 2, "replicas_desired": 2}},
+		probe.Observation{Target: "db", Probe: "pg.stats", Err: "connection refused"},
+		probe.Observation{Target: "api->db", Probe: "pg.pool", Metrics: map[string]float64{"rate": 12, "pool_used": 3, "pool_max": 20}},
+		probe.Observation{Target: "api->db", Probe: "signoz.edge", Err: "timeout"},
+	)
+	if db := s.Components["db"]; db.Marker != "" || db.Metrics["replicas_ready"] != 2 {
+		t.Errorf("db = %+v", db)
+	} else if errs, _ := db.Detail["probe_errors"].([]string); len(errs) != 1 || errs[0] != "pg.stats: connection refused" {
+		t.Errorf("probe_errors = %+v", db.Detail["probe_errors"])
+	}
+	if e := s.Edges["api->db"]; e.State != model.Flowing || e.Marker != "" {
+		t.Errorf("edge = %+v", e)
+	} else if errs, _ := e.Detail["probe_errors"].([]string); len(errs) != 1 {
+		t.Errorf("probe_errors = %+v", e.Detail["probe_errors"])
+	}
+}

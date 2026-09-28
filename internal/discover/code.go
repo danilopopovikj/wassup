@@ -3,6 +3,7 @@ package discover
 import (
 	"bufio"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -44,6 +45,9 @@ func scanCode(a *accumulator, path, rel string) {
 	}
 	defer fh.Close()
 	owner := ownerFor(rel)
+	// Celery is a Python library. Its patterns are plain enough
+	// ("queue": "name") to match a dependency list in any other file.
+	python := strings.EqualFold(filepath.Ext(path), ".py")
 	sc := bufio.NewScanner(fh)
 	sc.Buffer(make([]byte, 1<<20), 1<<21)
 	line := 0
@@ -51,14 +55,11 @@ func scanCode(a *accumulator, path, rel string) {
 	for sc.Scan() {
 		line++
 		text := sc.Text()
-		if strings.HasPrefix(strings.TrimSpace(text), "//") || strings.HasPrefix(strings.TrimSpace(text), "#") {
-			// comments still count for URLs but not for structure
-		}
 		ev := func(note string) Evidence { return Evidence{Source: "code", File: rel, Line: line, Note: note} }
-		if celeryAppRe.MatchString(text) {
+		if python && celeryAppRe.MatchString(text) {
 			a.note("celery app in %s:%d", rel, line)
 		}
-		for _, m := range celeryTaskQueueRe.FindAllStringSubmatch(text, -1) {
+		for _, m := range celeryMatches(python, celeryTaskQueueRe, text) {
 			q := m[1]
 			qc := Candidate{ID: model.SlugifyID(q + "-queue"), Type: "queue", Label: labelFor(q) + " queue", Name: q, Extra: map[string]string{"celery": "true", "queue": q}, Evidence: []Evidence{ev("celery task routed to queue " + q)}}
 			a.add(qc)
@@ -66,7 +67,7 @@ func scanCode(a *accumulator, path, rel string) {
 				a.link(Link{From: owner, To: qc.ID, Kind: "queue", Evidence: []Evidence{ev(owner + " enqueues to " + q)}})
 			}
 		}
-		for _, m := range celeryRouteRe.FindAllStringSubmatch(text, -1) {
+		for _, m := range celeryMatches(python, celeryRouteRe, text) {
 			q := m[1]
 			a.add(Candidate{ID: model.SlugifyID(q + "-queue"), Type: "queue", Label: labelFor(q) + " queue", Name: q, Extra: map[string]string{"celery": "true", "queue": q}, Evidence: []Evidence{ev("celery task_routes queue " + q)}})
 		}
@@ -104,7 +105,7 @@ func scanCode(a *accumulator, path, rel string) {
 		}
 		for _, m := range bucketNameRe.FindAllStringSubmatch(text, -1) {
 			name := strings.ToLower(m[1])
-			bc := Candidate{ID: model.SlugifyID(name + "-bucket"), Type: "storage", Label: name + " bucket", Name: name, Extra: map[string]string{"bucket": name}, Evidence: []Evidence{ev("bucket " + name)}}
+			bc := Candidate{ID: bucketID(name), Type: "storage", Label: name + " bucket", Name: name, Extra: map[string]string{"bucket": name}, Evidence: []Evidence{ev("bucket " + name)}}
 			a.add(bc)
 			if owner != "" {
 				a.link(Link{From: owner, To: bc.ID, Kind: "tcp", Label: "objects", Evidence: []Evidence{ev(owner + " uses bucket " + name)}})
@@ -112,8 +113,8 @@ func scanCode(a *accumulator, path, rel string) {
 		}
 		for _, m := range externalURLRe.FindAllStringSubmatch(text, -1) {
 			host := strings.ToLower(m[1])
-			if externalSkip[host] || seenHosts[host] || strings.HasPrefix(host, "www.") {
-				continue
+			if externalSkip[host] || seenHosts[host] || strings.HasPrefix(host, "www.") || !usableHost(host) {
+				continue // documentation, a sample domain, a tunnel to a laptop
 			}
 			if !strings.HasPrefix(host, "api.") && !strings.Contains(host, ".api.") && !strings.HasPrefix(host, "hooks.") && !strings.HasPrefix(host, "sqs.") && !strings.HasPrefix(host, "storage.") {
 				continue // links and docs, not dependencies
@@ -126,6 +127,15 @@ func scanCode(a *accumulator, path, rel string) {
 			a.link(Link{From: from, Host: host, Kind: "external", Evidence: []Evidence{ev("calls " + host)}})
 		}
 	}
+}
+
+// celeryMatches applies a celery pattern to a line of a Python file, and to
+// nothing else.
+func celeryMatches(python bool, re *regexp.Regexp, text string) [][]string {
+	if !python {
+		return nil
+	}
+	return re.FindAllStringSubmatch(text, -1)
 }
 
 // ownerFor guesses which workload a source file belongs to from its path:

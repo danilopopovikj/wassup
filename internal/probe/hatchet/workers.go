@@ -39,6 +39,7 @@ var workersAccess = probe.Access{
 	SpecFields:  withFields("name", "long_task"),
 	Needs:       "a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token",
 	Implemented: true,
+	Tier:        probe.TierToken,
 	Facets:      []string{facet.NameBackgroundWorker},
 }
 

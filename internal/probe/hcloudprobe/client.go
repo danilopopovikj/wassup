@@ -58,7 +58,7 @@ func newClient(spec map[string]any) (*client, error) {
 	return &client{
 		endpoint: strings.TrimRight(probe.Str(spec, "endpoint", DefaultEndpoint), "/"),
 		token:    token,
-		http:     &http.Client{Timeout: requestTimeout},
+		http:     &http.Client{Timeout: requestTimeout, Transport: probe.ReadOnly(nil)},
 	}, nil
 }
 

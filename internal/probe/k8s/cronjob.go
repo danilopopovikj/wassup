@@ -30,6 +30,7 @@ func init() {
 		Needs:       "get/list/watch on cronjobs and jobs in the namespace",
 		Implemented: true,
 		Facets:      []string{facet.NameScheduledJob},
+		RBAC:        []probe.Rule{probe.Reads("batch", "cronjobs", "jobs")},
 	}, func() probe.Probe { return &cronJobProbe{base: base{kind: kindCronJob}} })
 }
 
@@ -79,8 +80,7 @@ func (j *cronJobProbe) Start(ctx context.Context, spec map[string]any, out chan<
 	}, notify)
 
 	go func() {
-		if err := j.syncOrFail(ctx, c, cjInf, jobInf); err != nil {
-			probe.Send(ctx, out, probe.Observation{Target: target, Probe: kindCronJob, At: time.Now(), Err: err.Error()})
+		if err := j.await(ctx, c, out, target, cjInf, jobInf); err != nil {
 			return
 		}
 		runLoop(ctx, tickOf(spec), kick, func() {

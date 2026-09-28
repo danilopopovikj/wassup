@@ -94,7 +94,8 @@ Each of these has a step-by-step recipe under "How to" in
   change `internal/state`.
 - **Add a scenario.** Extend `testdata/scenarios/gen.py` and run
   `make fixtures`.
-- **Add a command.** It must accept `--json`. Update the table in the README.
+- **Add a command.** It must accept `--json`. Update the table in
+  [docs/commands.md](docs/commands.md).
 
 Fixtures and examples are public. Use invented names and reserved domains
 such as `shop.example`, never a real system's hostnames or project names.

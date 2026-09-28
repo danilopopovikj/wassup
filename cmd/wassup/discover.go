@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,15 +19,54 @@ import (
 	"github.com/danilopopovikj/wassup/internal/probe/k8s"
 )
 
+// scanOptions say what a scan reads.
+type scanOptions struct {
+	Repo       string
+	Namespaces []string
+	NoCluster  bool
+	// Confirm asks whether the cluster is the right one before it is read,
+	// unless it was named for wassup or Yes is set.
+	Confirm, Yes bool
+	// Environment is the one environment to read; "" reads all but the
+	// local ones. Draft is set for a scan a draft is built from, which is
+	// of one environment: when the repository has several and none was
+	// named, the scan asks.
+	Environment string
+	Draft       bool
+}
+
 // scanRepo runs the repository scanners and, unless --no-cluster, adds the
-// live cluster's inventory as evidence.
-func scanRepo(ctx context.Context, repo string, namespaces []string, noCluster bool) (*discover.Findings, *k8s.Inventory, error) {
-	f, err := discover.Scan(discover.Options{Root: repo, Namespaces: namespaces})
+// live cluster's inventory as evidence. The cluster is named before it is
+// read.
+func scanRepo(ctx context.Context, o scanOptions) (*discover.Findings, *k8s.Inventory, error) {
+	repo, namespaces, noCluster := o.Repo, o.Namespaces, o.NoCluster
+	f, err := discover.Scan(discover.Options{Root: repo, Namespaces: namespaces, Environment: o.Environment})
 	if err != nil {
 		return nil, nil, err
 	}
+	if o.Draft && o.Environment == "" {
+		env, err := chooseEnvironment(f.Environments, os.Stdin, os.Stderr)
+		if err != nil {
+			return nil, nil, err
+		}
+		if env != "" {
+			if f, err = discover.Scan(discover.Options{Root: repo, Namespaces: namespaces, Environment: env}); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
 	var inv *k8s.Inventory
 	if !noCluster {
+		switch err := nameCluster(ctx, o); err.(type) {
+		case nil:
+		case *needsAnswer:
+			return nil, nil, err
+		default:
+			// No cluster to read is not the end of a scan: the repository
+			// alone is evidence too, and the note says what is missing.
+			f.Notes = append(f.Notes, "cluster not read: "+err.Error())
+			return f, nil, nil
+		}
 		c, err := k8s.NewClients(flags.kubeconfig, flags.kcontext)
 		if err != nil {
 			f.Notes = append(f.Notes, "cluster not read: "+err.Error())
@@ -42,11 +84,63 @@ func scanRepo(ctx context.Context, repo string, namespaces []string, noCluster b
 	return f, inv, nil
 }
 
+// chooseEnvironment returns the environment to draft when the repository
+// has several that are not for a developer's machine, by asking. A draft of
+// all of them at once shows every component as many times as there are
+// environments. With one or none there is nothing to choose and it returns
+// "". Without a person to ask it stops with exitNeedsAnswer.
+func chooseEnvironment(envs []discover.Environment, in io.Reader, w io.Writer) (string, error) {
+	var names []string
+	for _, e := range envs {
+		if !e.Local {
+			names = append(names, e.Name)
+		}
+	}
+	if len(names) < 2 {
+		return "", nil
+	}
+	if !interactive() {
+		q := &needsAnswer{Question: "the repository has " + strconv.Itoa(len(names)) + " environments and a draft is of one; name it", Environments: names}
+		for _, n := range names {
+			q.Answers = append(q.Answers, "--environment "+n)
+		}
+		return "", q
+	}
+	fmt.Fprintln(w, "environments in this repository:")
+	for _, e := range envs {
+		if !e.Local {
+			fmt.Fprintf(w, "  %s  (%s)\n", e.Name, strings.Join(e.Paths, ", "))
+		}
+	}
+	fmt.Fprintf(w, "\nWhich one is the draft for (%s)? ", strings.Join(names, ", "))
+	line, err := bufio.NewReader(in).ReadString('\n')
+	if err != nil && line == "" {
+		return "", fmt.Errorf("no answer: nothing was drafted")
+	}
+	answer := strings.TrimSpace(line)
+	for _, n := range names {
+		if strings.EqualFold(answer, n) {
+			return n, nil
+		}
+	}
+	return "", fmt.Errorf("%q is not one of %s; nothing was drafted", answer, strings.Join(names, ", "))
+}
+
+// nameCluster prints the cluster a scan is about to read and, for a scan
+// that confirms, asks whether it is the right one.
+func nameCluster(ctx context.Context, o scanOptions) error {
+	if o.Confirm {
+		return confirmCluster(ctx, o.Repo, o.Yes, os.Stdin, os.Stderr)
+	}
+	_, err := announceCluster(ctx, os.Stderr)
+	return err
+}
+
 func discoverCmd() *cobra.Command {
 	var namespaces []string
 	var repo string
-	var propose, write, noCluster bool
-	var name, defaultNS string
+	var propose, write, noCluster, yes bool
+	var name, defaultNS, environment string
 	c := &cobra.Command{
 		Use:   "discover",
 		Short: "read the repository and the cluster for what exists and how data flows; --propose drafts topology and bindings",
@@ -59,11 +153,32 @@ cron jobs) when a kubeconfig is reachable.
 
 Without --propose it prints the raw evidence. With --propose it prints a
 draft topology.yaml and bindings.yaml built from that evidence; --write puts
-them under .wassup/proposed/ together with evidence.json so Claude Code can
-review every component and edge against the file and line it came from.`,
+them under .wassup/proposed/ together with review.md and evidence.json, and
+makes sure .wassup/.gitignore ignores proposed/, state/ and local.env.
+review.md is what to review: one line and one citation per component and
+edge, with how sure the scan is and whether the cluster proves it or the
+repository hints at it. evidence.json is the whole record behind it.
+
+Before the cluster is read, discover prints which one it is: the kubeconfig,
+the context, the server and the number of nodes. When the kubeconfig and the
+context are the defaults of the machine it asks, and offers the kubeconfigs
+it finds in the repository. A draft is of one environment: when the
+repository has several, discover asks which one. Without a terminal to ask
+at, it exits 5, reads nothing, and lists the flags that answer.
+
+Of an environment variable discover keeps the name and the host it points
+at, never the value: no password, token or key, and no user, path or query
+of a URL, whether it comes from a manifest, a ConfigMap, a pod spec or a
+command line. Secrets are never read.
+
+It leaves out what git ignores (.gitignore, .git/info/exclude), lockfiles,
+tests, nested checkouts (worktrees, submodules) and Kustomize overlays for
+local development; the notes say which directories were skipped.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			f, inv, err := scanRepo(context.Background(), repo, namespaces, noCluster)
+			f, inv, err := scanRepo(context.Background(), scanOptions{Repo: repo, Namespaces: namespaces, NoCluster: noCluster, Confirm: true, Yes: yes,
+				Environment: environment, Draft: propose || write})
 			if err != nil {
+				exitOnQuestion(err)
 				return err
 			}
 			if !propose && !write {
@@ -79,28 +194,23 @@ review every component and edge against the file and line it came from.`,
 				if dir == "" {
 					dir = model.DirName
 				}
-				out := filepath.Join(dir, "proposed")
-				if err := os.MkdirAll(out, 0o755); err != nil {
+				// WriteProposal also makes sure .wassup/.gitignore keeps
+				// proposed/ and state/ out of git.
+				if err := discover.WriteProposal(dir, p, f); err != nil {
 					return err
 				}
-				if err := model.WriteYAML(filepath.Join(out, "topology.yaml"), p.Topology); err != nil {
-					return err
-				}
-				if err := model.WriteYAML(filepath.Join(out, "bindings.yaml"), p.Bindings); err != nil {
-					return err
-				}
-				if err := model.WriteJSON(filepath.Join(out, "evidence.json"), map[string]any{"evidence": p.Evidence, "unresolved": p.Unresolved, "notes": p.Notes, "findings": f}); err != nil {
-					return err
-				}
+				out := filepath.Join(dir, discover.ProposedDir)
 				if flags.jsonOut {
-					return printJSON(map[string]any{"written": out, "components": len(p.Topology.Components), "edges": len(p.Topology.Edges), "unresolved": p.Unresolved, "notes": p.Notes})
+					return printJSON(map[string]any{"written": out, "review": filepath.Join(out, discover.ReviewFile), "environment": f.Environment,
+						"components": len(p.Topology.Components), "edges": len(p.Topology.Edges), "confidence": p.Confidence, "unresolved": p.Unresolved, "notes": p.Notes})
 				}
-				fmt.Printf("wrote %s/{topology.yaml,bindings.yaml,evidence.json}: %d components, %d edges", out, len(p.Topology.Components), len(p.Topology.Edges))
+				fmt.Printf("wrote %s/{topology.yaml,bindings.yaml,review.md,evidence.json}: %d components, %d edges", out, len(p.Topology.Components), len(p.Topology.Edges))
 				if len(p.Unresolved) > 0 {
 					fmt.Printf(", %d unresolved hosts", len(p.Unresolved))
 				}
 				fmt.Println()
 				printNotes(p)
+				fmt.Printf("\nreview %s first: one line and one citation per component and edge, the least certain at the end\n", filepath.Join(out, discover.ReviewFile))
 				return nil
 			}
 			if flags.jsonOut {
@@ -121,6 +231,8 @@ review every component and edge against the file and line it came from.`,
 	c.Flags().BoolVar(&propose, "propose", false, "print a proposed topology.yaml and bindings.yaml")
 	c.Flags().BoolVar(&write, "write", false, "write the proposal under .wassup/proposed/")
 	c.Flags().BoolVar(&noCluster, "no-cluster", false, "do not read the cluster, repository only")
+	c.Flags().BoolVar(&yes, "yes", false, "read the cluster of the default kubeconfig and context without asking")
+	c.Flags().StringVar(&environment, "environment", "", "the environment to read (an overlay, a values file, a Terraform directory); the others are left out")
 	c.Flags().StringVar(&name, "name", "", "system name for the proposal (default: repository directory)")
 	c.Flags().StringVar(&defaultNS, "default-namespace", "default", "namespace for probes when the manifest has none")
 	return c
@@ -210,7 +322,7 @@ no longer finds. --check exits 4 when there is drift, for CI.`,
 			if err != nil {
 				return err
 			}
-			f, _, err := scanRepo(context.Background(), repo, namespaces, noCluster)
+			f, _, err := scanRepo(context.Background(), scanOptions{Repo: repo, Namespaces: namespaces, NoCluster: noCluster})
 			if err != nil {
 				return err
 			}

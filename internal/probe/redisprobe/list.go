@@ -4,21 +4,21 @@ import (
 	"context"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/danilopopovikj/wassup/internal/probe"
 	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
 // listAccess documents redis.list.
 var listAccess = probe.Access{
-	Kind:        "redis.list",
-	Source:      "LLEN on one Redis list",
-	Delivers:    "depth",
-	SpecFields:  []string{"addr", "url", "key", "password_env", "db", "tls"},
-	Needs:       "network access to the Redis port; a password in the environment variable named by password_env when AUTH is on",
+	Kind:       "redis.list",
+	Source:     "LLEN on one Redis list",
+	Delivers:   "depth",
+	SpecFields: []string{"addr", "url", "host", "port", "key", "user", "password_env", "db", "tls"},
+	Needs: "network access to the Redis port, named by url, by addr (host:port) or by host and port; " +
+		"a password in the environment variable named by password_env when AUTH is on (taken as it is, nothing to encode), and user for an ACL user",
 	Implemented: true,
 	Facets:      []string{facet.NameQueue},
+	Tier:        probe.TierData,
 }
 
 func init() {
@@ -26,9 +26,10 @@ func init() {
 }
 
 // ListProbe is redis.list: the depth of a plain list used as a queue. Spec:
-// addr or url, key (required), password_env, db, tls.
+// url, addr or host and port; key (required), user, password_env, db, tls.
 type ListProbe struct {
 	h probe.Health
+	probe.Lifetime
 }
 
 // Kind implements probe.Probe.
@@ -53,23 +54,24 @@ func (p *ListProbe) Start(ctx context.Context, spec map[string]any, out chan<- p
 		return err
 	}
 	key := probe.Str(spec, "key", "")
-	client := redis.NewClient(opt)
+	client := newClient(opt)
+	srv := serverOf(opt, spec)
 	tgt := target(spec)
 	every := tick(spec)
-	go func() {
+	p.Go(func() {
 		defer client.Close()
 		t := time.NewTicker(every)
 		defer t.Stop()
 		for {
 			o := probe.Observation{Target: tgt, Probe: p.Kind(), At: time.Now()}
-			rctx, cancel := context.WithTimeout(ctx, roundTimeout)
+			rctx, cancel := probe.RoundContext(ctx, roundTimeout)
 			depth, err := client.LLen(rctx, key).Result()
 			cancel()
 			if err != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				o.Err = "LLEN " + key + ": " + err.Error()
+				o.Err = srv.explain("LLEN "+key, err)
 				p.h.Set(probe.HealthDegraded, o.Err)
 			} else {
 				// The facet writes the canonical queue form: depth.
@@ -86,6 +88,6 @@ func (p *ListProbe) Start(ctx context.Context, spec map[string]any, out chan<- p
 			case <-t.C:
 			}
 		}
-	}()
+	})
 	return nil
 }

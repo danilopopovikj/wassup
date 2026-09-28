@@ -1,12 +1,16 @@
 // Package s3probe implements s3.bucket, the probe of one bucket in an
 // S3-compatible object store: AWS S3, Hetzner Object Storage, MinIO,
 // DigitalOcean Spaces, Cloudflare R2. It signs its own requests (SigV4) and
-// only ever reads: a HeadBucket for reachability and a paged ListObjectsV2
-// for what the bucket holds.
+// only ever reads: a HeadBucket for reachability and, when the binding asks
+// for it, a paged ListObjectsV2 for what the bucket holds. The listing is
+// not the default because it is not free: one request per 1000 objects,
+// every round, on a store that may bill requests.
 package s3probe
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/xml"
 	"errors"
 	"fmt"
@@ -17,6 +21,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/danilopopovikj/wassup/internal/probe"
@@ -42,31 +47,42 @@ const (
 
 func init() {
 	probe.Register(probe.Access{
-		Kind:   Kind,
-		Source: "an S3-compatible object store (AWS S3, Hetzner Object Storage, MinIO, Spaces, R2): HeadBucket, then a paged ListObjectsV2 under the optional prefix",
-		Delivers: "used_bytes and objects summed over the listing, latency_ms of HeadBucket, total_bytes and disk_pct when quota_bytes is set; " +
-			"NotReady when the bucket does not exist, ConnectionRefused when the endpoint does not answer; detail: last_write, region, endpoint. " +
-			"A bucket with more than max_objects keys reports only lower bounds in the detail",
-		SpecFields:  []string{"bucket", "endpoint", "region", "prefix", "path_style", "access_key_env", "secret_key_env", "session_token_env", "quota_bytes", "max_objects", "interval", "timeout"},
-		Needs:       "read-only credentials (s3:ListBucket) in the environment variables named by access_key_env and secret_key_env (default AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY)",
+		Kind: Kind,
+		Source: "an S3-compatible object store (AWS S3, Hetzner Object Storage, MinIO, Spaces, R2): HeadBucket, one request a round; " +
+			"with list_objects: true also a paged ListObjectsV2 under the optional prefix, one request per 1000 objects a round",
+		Delivers: "latency_ms of HeadBucket; NotReady when the bucket does not exist, ConnectionRefused when the endpoint does not answer; " +
+			"detail: region, endpoint. With list_objects: true also used_bytes and objects summed over the listing, last_write, " +
+			"and disk_pct when quota_bytes is set; a bucket with more than max_objects keys (default 20000) is not sized and reports only lower bounds in the detail. " +
+			"Without the listing the size and the object count are not read and not shown",
+		SpecFields: []string{"bucket", "endpoint", "region", "list_objects", "prefix", "path_style", "access_key_env", "secret_key_env", "session_token_env", "quota_bytes", "max_objects", "interval", "timeout"},
+		Needs: "read-only credentials in the environment variables named by access_key_env and secret_key_env (default AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY), " +
+			"allowed s3:ListBucket on the bucket, which HeadBucket and the listing both take. The check costs one request a round; " +
+			"the listing costs one more per 1000 objects, which a store that bills requests charges for",
 		Implemented: true,
 		Facets:      []string{facet.NameStorage},
+		Tier:        probe.TierToken,
 	}, func() probe.Probe { return &Bucket{} })
 }
 
 // config is the parsed spec.
 type config struct {
-	target     string
-	bucket     string
-	base       string // the bucket's URL, ending in "/"
-	region     string
-	prefix     string
-	creds      credentials
-	quota      facet.Num
-	maxObjects int
-	tick       time.Duration
-	interval   time.Duration
-	timeout    time.Duration
+	target string
+	bucket string
+	base   string // the bucket's URL, ending in "/"
+	region string
+	prefix string
+	creds  credentials
+	// accessEnv and secretEnv name where the keys came from, for the
+	// messages that say what to check.
+	accessEnv, secretEnv string
+	quota                facet.Num
+	// listObjects asks for the listing; prefix and maxObjects only apply
+	// with it.
+	listObjects bool
+	maxObjects  int
+	tick        time.Duration
+	interval    time.Duration
+	timeout     time.Duration
 }
 
 // Bucket is the s3.bucket probe.
@@ -109,9 +125,11 @@ func (p *Bucket) Validate(spec map[string]any) error {
 			}
 		}
 	}
-	if v, ok := spec["path_style"]; ok {
-		if _, isBool := v.(bool); !isBool {
-			return fmt.Errorf("path_style must be true or false, got %T", v)
+	for _, k := range []string{"path_style", "list_objects"} {
+		if v, ok := spec[k]; ok {
+			if _, isBool := v.(bool); !isBool {
+				return fmt.Errorf("%s must be true or false, got %T", k, v)
+			}
 		}
 	}
 	for _, k := range []string{"quota_bytes", "max_objects"} {
@@ -154,6 +172,7 @@ func parse(spec map[string]any) (config, error) {
 		c.tick = d
 	}
 	c.interval = max(probe.Dur(spec, "interval", defaultInterval), minInterval, c.tick)
+	c.listObjects, _ = spec["list_objects"].(bool)
 	if n, ok := probe.Num(spec, "max_objects"); ok && n > 0 {
 		c.maxObjects = int(n)
 	}
@@ -179,6 +198,8 @@ func parse(spec map[string]any) (config, error) {
 		}
 	}
 
+	c.accessEnv = probe.Str(spec, "access_key_env", defaultAccessEnv)
+	c.secretEnv = probe.Str(spec, "secret_key_env", defaultSecretEnv)
 	var err error
 	if c.creds.accessKey, err = envValue(spec, "access_key_env", defaultAccessEnv); err != nil {
 		return c, err
@@ -218,7 +239,7 @@ func (p *Bucket) Start(ctx context.Context, spec map[string]any, out chan<- prob
 		return err
 	}
 	if p.client == nil {
-		p.client = &http.Client{Timeout: c.timeout}
+		p.client = &http.Client{Timeout: c.timeout, Transport: probe.ReadOnly(nil)}
 	}
 	p.h.Set(probe.HealthOK, "polling "+c.base)
 	go loop(ctx, c.tick, c.interval, out, func(ctx context.Context) probe.Observation {
@@ -334,9 +355,86 @@ type listing struct {
 	} `xml:"Contents"`
 }
 
-// poll does one round: HeadBucket, then the listing. The storage facet writes
-// the canonical form; the probe's first-seen tracker keeps NotReady and
-// ConnectionRefused Since stable across rounds.
+// Notes the detail carries about the listing.
+const (
+	// notListed is said when the binding did not ask for the listing.
+	notListed = "object count not read; set list_objects: true to size the bucket, which lists every object under the prefix (one request per 1000 objects)"
+	// needsListing is said of the settings that do nothing without it.
+	needsListing = "without list_objects: true these settings do nothing: "
+)
+
+// keys names where the credentials come from.
+func (c config) keys() string {
+	if c.accessEnv == "" || c.secretEnv == "" {
+		return "the access key and the secret key"
+	}
+	return "the keys in " + c.accessEnv + " and " + c.secretEnv
+}
+
+// host is the host of the bucket's URL, for messages.
+func (c config) host() string {
+	if u, err := url.Parse(c.base); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return c.base
+}
+
+// unreachable words a request that got no answer: what happened and what to
+// check, with the request and the error of the client at the end.
+func (c config) unreachable(method string, r response) string {
+	cause := " (" + method + " " + c.base + ": " + r.err.Error() + ")"
+	var dns *net.DNSError
+	switch {
+	case r.timeout:
+		return fmt.Sprintf("no answer from %s within %s: check that this machine reaches the endpoint (VPN, firewall)", c.host(), c.timeout.Round(time.Millisecond)) + cause
+	case errors.As(r.err, &dns):
+		return fmt.Sprintf("the name %s does not resolve: check endpoint and region, and path_style for a store that has no name per bucket", dns.Name) + cause
+	case errors.Is(r.err, syscall.ECONNREFUSED) || strings.Contains(strings.ToLower(r.err.Error()), "connection refused"):
+		return fmt.Sprintf("connection refused on %s: nothing listens there. Check the endpoint and its port", c.host()) + cause
+	case isCertificate(r.err):
+		return fmt.Sprintf("the certificate of %s was not accepted: check that endpoint is the name of the store, and http or https", c.host()) + cause
+	}
+	return method + " " + c.base + ": " + r.err.Error()
+}
+
+// isCertificate reports whether the store's certificate was not accepted.
+func isCertificate(err error) bool {
+	var verify *tls.CertificateVerificationError
+	var authority x509.UnknownAuthorityError
+	var hostname x509.HostnameError
+	var invalid x509.CertificateInvalidError
+	return errors.As(err, &verify) || errors.As(err, &authority) || errors.As(err, &hostname) || errors.As(err, &invalid)
+}
+
+// denied words a request the store turned down.
+func (c config) denied(method string, status int) string {
+	return fmt.Sprintf("access denied to bucket %s: check %s, and that they are allowed s3:ListBucket on the bucket (%s %s: HTTP %d)",
+		c.bucket, c.keys(), method, c.base, status)
+}
+
+// listError words a listing that failed.
+func (c config) listError(err error) string {
+	var failed *statusError
+	if errors.As(err, &failed) && (failed.status == http.StatusForbidden || failed.status == http.StatusUnauthorized) {
+		return fmt.Sprintf("the bucket answers, the listing was denied: %s are allowed to check the bucket but not to list it; allow s3:ListBucket, or take list_objects out (%s)",
+			c.keys(), err)
+	}
+	return "list: " + err.Error()
+}
+
+// statusError is a request the store answered with an error.
+type statusError struct {
+	status int
+	detail string
+}
+
+// Error implements error.
+func (e *statusError) Error() string { return e.detail }
+
+// poll does one round: HeadBucket, then the listing when the binding asks
+// for it. The storage facet writes the canonical form; the probe's
+// first-seen tracker keeps NotReady and ConnectionRefused Since stable
+// across rounds.
 func (p *Bucket) poll(ctx context.Context, c config) probe.Observation {
 	now := p.clock()
 	o := probe.Observation{
@@ -353,10 +451,8 @@ func (p *Bucket) poll(ctx context.Context, c config) probe.Observation {
 
 	head := p.do(ctx, c, http.MethodHead, c.base)
 	if head.err != nil {
-		if head.timeout {
-			o.Err = fmt.Sprintf("HEAD %s timed out after %s", c.base, c.timeout.Round(time.Millisecond))
-		} else {
-			o.Err = "HEAD " + c.base + ": " + head.err.Error()
+		o.Err = c.unreachable(http.MethodHead, head)
+		if !head.timeout {
 			s.Unreachable, s.UnreachDetail = true, head.err.Error()
 			facet.EmitStorage(&o, s, now)
 		}
@@ -374,20 +470,23 @@ func (p *Bucket) poll(ctx context.Context, c config) probe.Observation {
 	case http.StatusNotFound:
 		s.NotReadyDetail = "bucket " + c.bucket + " does not exist"
 		facet.EmitStorage(&o, s, now)
-		p.h.Set(probe.HealthDegraded, s.NotReadyDetail)
+		p.h.Set(probe.HealthDegraded, s.NotReadyDetail+" at "+c.host()+": check the name of the bucket, the endpoint and the region")
 		return o
 	case http.StatusForbidden, http.StatusUnauthorized:
 		o.Metrics = nil
-		o.Err = fmt.Sprintf("HEAD %s: HTTP %d, access denied (check the credentials and s3:ListBucket)", c.base, head.status)
+		o.Err = c.denied(http.MethodHead, head.status)
 		o.Detail["last_error"] = o.Err
 		p.h.Set(probe.HealthFailed, o.Err)
 		return o
 	case http.StatusMovedPermanently, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
 		o.Metrics = nil
-		o.Err = fmt.Sprintf("HEAD %s: HTTP %d, the bucket lives elsewhere", c.base, head.status)
+		o.Err = fmt.Sprintf("bucket %s lives in another region than %s", c.bucket, c.region)
 		if r := head.header.Get("x-amz-bucket-region"); r != "" {
-			o.Err += " (region " + r + ")"
+			o.Err += ": set region to " + r
+		} else {
+			o.Err += ": check region and endpoint"
 		}
+		o.Err += fmt.Sprintf(" (HEAD %s: HTTP %d)", c.base, head.status)
 		o.Detail["last_error"] = o.Err
 		p.h.Set(probe.HealthFailed, o.Err)
 		return o
@@ -400,12 +499,25 @@ func (p *Bucket) poll(ctx context.Context, c config) probe.Observation {
 	}
 	p.clear(facet.KeyNotReady)
 
+	if !c.listObjects {
+		// The size and the count were not read: they stay out of the
+		// numbers, and the detail says how to get them and what it costs.
+		o.Detail["size"] = notListed
+		if ignored := c.needListing(); ignored != "" {
+			o.Detail["ignored"] = needsListing + ignored
+		}
+		facet.EmitStorage(&o, s, now)
+		p.h.Set(probe.HealthOK, "")
+		return o
+	}
+
 	health, msg := probe.HealthOK, ""
 	objects, used, last, complete, err := p.list(ctx, c)
 	switch {
 	case err != nil:
-		o.Detail["list_error"] = err.Error()
-		health, msg = probe.HealthDegraded, "list: "+err.Error()
+		msg = c.listError(err)
+		o.Detail["list_error"] = msg
+		health = probe.HealthDegraded
 	case complete:
 		s.Objects, s.UsedBytes, s.LastWrite = facet.NI(objects), facet.N(float64(used)), last
 	default:
@@ -414,11 +526,30 @@ func (p *Bucket) poll(ctx context.Context, c config) probe.Observation {
 		o.Detail["objects_at_least"] = objects
 		o.Detail["used_bytes_at_least"] = used
 		o.Detail["listing_capped_at"] = c.maxObjects
-		health, msg = probe.HealthDegraded, fmt.Sprintf("more than %d objects; set prefix or raise max_objects to size this bucket", c.maxObjects)
+		msg = fmt.Sprintf("bucket listing skipped, more than %d objects: set prefix to size a part of the bucket, or raise max_objects, at one request per %d objects a round",
+			c.maxObjects, pageSize)
+		o.Detail["size"] = msg
+		health = probe.HealthDegraded
 	}
 	facet.EmitStorage(&o, s, now)
 	p.h.Set(health, msg)
 	return o
+}
+
+// needListing names the settings of the binding that do nothing without the
+// listing, "" when there are none.
+func (c config) needListing() string {
+	var set []string
+	if c.prefix != "" {
+		set = append(set, "prefix")
+	}
+	if c.maxObjects != defaultMaxObjects {
+		set = append(set, "max_objects")
+	}
+	if c.quota.Set {
+		set = append(set, "quota_bytes")
+	}
+	return strings.Join(set, ", ")
 }
 
 // list pages through ListObjectsV2 under the prefix until the bucket is
@@ -439,7 +570,7 @@ func (p *Bucket) list(ctx context.Context, c config) (objects int, used int64, l
 			return objects, used, last, false, r.err
 		}
 		if r.status != http.StatusOK {
-			return objects, used, last, false, errors.New(errorDetail(r))
+			return objects, used, last, false, &statusError{status: r.status, detail: errorDetail(r)}
 		}
 		var page listing
 		if err := xml.Unmarshal(r.body, &page); err != nil {

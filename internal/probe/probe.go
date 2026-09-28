@@ -75,7 +75,41 @@ type Access struct {
 	Needs       string   `json:"needs"`
 	Implemented bool     `json:"implemented"`
 	Facets      []string `json:"facets,omitempty"`
+	// Tier says how far the probe reaches, so a setup can go one step at a
+	// time (`wassup probe --tier`). The zero value is TierOpen.
+	Tier int `json:"tier"`
+	// RBAC lists what the probe reads in a cluster, so `wassup access` can
+	// print the smallest role for the probes that are bound. A probe that
+	// reads no cluster leaves it empty.
+	RBAC []Rule `json:"rbac,omitempty"`
 }
+
+// Rule is one permission in a cluster, in the words of Kubernetes RBAC.
+type Rule struct {
+	// Group is the API group; "" is the core group.
+	Group     string   `json:"group"`
+	Resources []string `json:"resources"`
+	Verbs     []string `json:"verbs"`
+}
+
+// Reads returns the rule that lets a probe get, list and watch resources of
+// one API group, which is what an informer needs.
+func Reads(group string, resources ...string) Rule {
+	return Rule{Group: group, Resources: resources, Verbs: []string{"get", "list", "watch"}}
+}
+
+// The tiers of a setup. Each one needs more from the user than the one
+// before, and a run of tier n includes the tiers below it.
+const (
+	// TierOpen needs nothing but the kubeconfig and the network: Kubernetes
+	// reads, DNS, certificates, pings, files on this machine.
+	TierOpen = 0
+	// TierToken needs a token or a key for an API: Hatchet, Electric, a load
+	// balancer, object storage.
+	TierToken = 1
+	// TierData connects to a data store itself: Postgres, Redis.
+	TierData = 2
+)
 
 var (
 	mu        sync.RWMutex

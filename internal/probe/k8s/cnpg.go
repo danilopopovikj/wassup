@@ -45,6 +45,10 @@ func init() {
 		Needs:       "get/list on clusters.postgresql.cnpg.io and backups.postgresql.cnpg.io; list/watch on pods in the namespace",
 		Implemented: true,
 		Facets:      []string{facet.NameDatabase, facet.NameReplication},
+		RBAC: []probe.Rule{
+			probe.Reads("", "pods"),
+			probe.Reads("postgresql.cnpg.io", "clusters", "backups"),
+		},
 	}, func() probe.Probe { return &cnpgClusterProbe{base: base{kind: kindCNPGCluster}} })
 	probe.Register(probe.Access{
 		Kind:        kindCNPGInstance,
@@ -54,6 +58,7 @@ func init() {
 		Needs:       "list/watch on pods in the namespace; get/list on pods.metrics.k8s.io",
 		Implemented: true,
 		Facets:      []string{facet.NameDatabase, facet.NameWorkload},
+		RBAC:        []probe.Rule{probe.Reads("", "pods"), probe.Reads("metrics.k8s.io", "pods")},
 	}, func() probe.Probe { return &cnpgInstanceProbe{base: base{kind: kindCNPGInstance}} })
 }
 
@@ -95,8 +100,7 @@ func (p *cnpgClusterProbe) Start(ctx context.Context, spec map[string]any, out c
 	}, notify)
 
 	go func() {
-		if err := p.syncOrFail(ctx, c, inf.pods); err != nil {
-			probe.Send(ctx, out, probe.Observation{Target: target, Probe: kindCNPGCluster, At: time.Now(), Err: err.Error()})
+		if err := p.await(ctx, c, out, target, inf.pods); err != nil {
 			return
 		}
 		runLoop(ctx, tickOf(spec), kick, func() {
@@ -317,8 +321,7 @@ func (p *cnpgInstanceProbe) Start(ctx context.Context, spec map[string]any, out 
 	}, notify)
 
 	go func() {
-		if err := p.syncOrFail(ctx, c, inf.pods); err != nil {
-			probe.Send(ctx, out, probe.Observation{Target: target, Probe: kindCNPGInstance, At: time.Now(), Err: err.Error()})
+		if err := p.await(ctx, c, out, target, inf.pods); err != nil {
 			return
 		}
 		runLoop(ctx, tickOf(spec), kick, func() {

@@ -142,7 +142,7 @@ func (p *WorkerProbe) Start(ctx context.Context, spec map[string]any, out chan<-
 	}
 	c := parseWorkerSpec(spec)
 	if p.client == nil {
-		p.client = &http.Client{Timeout: c.timeout}
+		p.client = &http.Client{Timeout: c.timeout, Transport: probe.ReadOnly(nil)}
 	}
 	flower := &flowerClient{base: c.flower, http: p.client}
 	p.h.Set(probe.HealthOK, "polling "+c.flower)

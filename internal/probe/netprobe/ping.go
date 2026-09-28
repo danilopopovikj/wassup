@@ -145,7 +145,7 @@ func newClient(timeout time.Duration) *http.Client {
 	tr.DisableKeepAlives = true
 	return &http.Client{
 		Timeout:   timeout,
-		Transport: tr,
+		Transport: probe.ReadOnly(tr),
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= pingMaxRedirects {
 				return fmt.Errorf("stopped after %d redirects", pingMaxRedirects)

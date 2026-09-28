@@ -73,6 +73,9 @@ func (s *fakeServer) serve(conn net.Conn) {
 		return
 	}
 	be.Send(&pgproto3.AuthenticationOk{})
+	// The driver refuses simple protocol queries without these two.
+	be.Send(&pgproto3.ParameterStatus{Name: "standard_conforming_strings", Value: "on"})
+	be.Send(&pgproto3.ParameterStatus{Name: "client_encoding", Value: "UTF8"})
 	be.Send(&pgproto3.BackendKeyData{ProcessID: 1, SecretKey: []byte{0, 0, 0, 1}})
 	be.Send(&pgproto3.ReadyForQuery{TxStatus: 'I'})
 	if err := be.Flush(); err != nil {
@@ -286,5 +289,118 @@ func TestProbeIsDoneWhenTheConnectionIsReleased(t *testing.T) {
 	case <-never.Done():
 	case <-time.After(time.Second):
 		t.Fatal("a probe that never started holds nothing and is done")
+	}
+}
+
+// A round that is cut short because the probe was stopped says nothing about
+// the database: the probe's health must not read "context canceled".
+func TestStopDuringARoundIsNotReportedAsAFailure(t *testing.T) {
+	srv := newFakeServer(t, 5*time.Second)
+	t.Setenv("WASSUP_TEST_DSN", srv.dsn())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	out := make(chan probe.Observation, 8)
+	p := &StatsProbe{}
+	spec := map[string]any{"dsn_env": "WASSUP_TEST_DSN", "_target": "db", "_tick": time.Second}
+	if err := p.Start(ctx, spec, out); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		srv.mu.Lock()
+		n := srv.queries
+		srv.mu.Unlock()
+		if n > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the round did not start: %+v", p.Health())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-p.Done():
+	case <-time.After(stopGrace + closeTimeout + 2*time.Second):
+		t.Fatal("the probe did not report done")
+	}
+	if h := p.Health(); h.Message != "no data yet" {
+		t.Errorf("health after a stop = %+v, the stop is not a failure of the database", h)
+	}
+	select {
+	case o := <-out:
+		t.Errorf("a round cut short by the stop must not be reported: %+v", o)
+	default:
+	}
+}
+
+// With via naming a tunnel the probe dials the tunnel, not the host of the
+// DSN, and takes the tunnel down after the connection said goodbye.
+func TestConnectsThroughTheTunnel(t *testing.T) {
+	srv := newFakeServer(t, 0)
+	var opened, closedAfterGoodbye int
+	probe.RegisterTunnel("test.tunnel", func(ctx context.Context, target string, spec map[string]any) (*probe.Tunnel, error) {
+		if target != "bookstore/db-rw:5432" {
+			t.Errorf("target = %q", target)
+		}
+		opened++
+		return &probe.Tunnel{Addr: srv.ln.Addr().String(), Close: func() {
+			// The goodbye was sent before the tunnel is closed; the server
+			// reads it a moment later.
+			if ends := srv.endings(t); len(ends) == 1 && ends[0] == "terminate" {
+				closedAfterGoodbye++
+			}
+		}}, nil
+	})
+	// Nothing listens where the DSN points: only the tunnel leads anywhere.
+	t.Setenv("WASSUP_TEST_DSN", "postgres://wassup@db-rw.bookstore.svc:5432/bookstore?sslmode=disable")
+	c, err := newConnector(map[string]any{"dsn_env": "WASSUP_TEST_DSN", "via": "test.tunnel/bookstore/db-rw:5432"}, "dsn_env", "wassup", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	conn, err := c.acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire through the tunnel: %v", err)
+	}
+	if err := conn.Ping(ctx); err != nil {
+		t.Fatal(err)
+	}
+	c.close()
+	if ends := srv.endings(t); len(ends) != 1 || ends[0] != "terminate" {
+		t.Errorf("the connection should end with a terminate message, got %v", ends)
+	}
+	if opened != 1 || closedAfterGoodbye != 1 {
+		t.Errorf("tunnel opened %d times, closed after the goodbye %d times", opened, closedAfterGoodbye)
+	}
+	// A via that names no tunnel stays a label: the DSN is dialled as it is.
+	c, err = newConnector(map[string]any{"dsn_env": "WASSUP_TEST_DSN", "via": "k8s.workload/api"}, "dsn_env", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.via != "" {
+		t.Errorf("via %q should not open a tunnel", c.via)
+	}
+}
+
+func TestValidateVia(t *testing.T) {
+	probe.RegisterTunnel("test.tunnel", func(context.Context, string, map[string]any) (*probe.Tunnel, error) {
+		return nil, fmt.Errorf("not opened by validate")
+	})
+	p := &StatsProbe{}
+	for via, ok := range map[string]bool{
+		"":                                     true,
+		"bastion":                              true, // a label
+		"k8s.workload/api":                     true, // a label: no such tunnel in this test
+		"test.tunnel/bookstore/db-rw:5432":     true,
+		"test.tunnel/bookstore/db-rw:postgres": true,
+		"test.tunnel/db-rw:5432":               false,
+		"test.tunnel/bookstore/db-rw":          false,
+	} {
+		err := p.Validate(map[string]any{"dsn_env": "PG_DSN", "via": via})
+		if (err == nil) != ok {
+			t.Errorf("via %q: %v", via, err)
+		}
 	}
 }

@@ -41,4 +41,4 @@ components:
     - { probe: http.ping, url: https://api.stripe.com/healthcheck }
 edges:
   checkout->db:
-    - { probe: pg.pool, dsn_env: SHOP_PGBOUNCER_DSN, via: k8s.workload/checkout }
+    - { probe: pg.pool, dsn_env: SHOP_PGBOUNCER_DSN, via: k8s.service/shop/pgbouncer:6432 }

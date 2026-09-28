@@ -34,7 +34,10 @@ already taken so they are not re-litigated in every session.
 6. **Never fabricate.** A number the provider did not report is omitted
    (`facet.Num` unset), never written as 0. A component with no probe data is
    drawn unbound, never healthy. Idle, unbound, stale and no data must look
-   different at a glance.
+   different at a glance. A probe that failed, timed out or may not read
+   its source says nothing about the system: the element reads "no data"
+   with the reason, and failing is only ever concluded from data that was
+   read. A value the source hides from the role (NULL) is not known.
 7. **Layout is the user's.** Boxes never jump on their own. `layout.json`
    belongs to the user; code writes it only from a drag, a resize, a collapse
    or a detail toggle, and `sync --apply` never touches it.
@@ -107,11 +110,43 @@ and bindings. The runtime (`internal/app`) wires it all and hot-reloads
 
 - Kubernetes is one provider. Nothing outside `internal/probe/k8s` and
   `cmd/wassup/kube.go` may import client-go.
+- wassup only reads, and the guard is in the client, not in the care of
+  whoever writes the probe. The Kubernetes clients are built from one
+  configuration whose transport sends GET and the POST that opens a
+  port-forward, nothing else (`tuneConfig`). PostgreSQL statements go
+  through `reads`, one SELECT or SHOW at a time, in a read-only transaction.
+  Redis clients carry a hook that sends INFO, LLEN and LINDEX. HTTP clients
+  are built on `probe.ReadOnly` and send GET and HEAD. What is refused
+  returns `probe.ErrReadOnly` and never leaves the process. A new source
+  brings its own guard; `TestTheSourceHasNoWayToWrite` fails on a client
+  built around one, on a new driver and on a program started without being
+  listed there.
 - A probe declares the facets it fills in `Access.Facets`; `wassup validate`
   checks a binding by facet. A probe never emits a metric key or condition
   the facet does not know.
 - Credentials come from env vars named in the spec (`*_env`) or the
-  kubeconfig, never from `.wassup/`.
+  kubeconfig. The one file that may hold them is `.wassup/local.env`, the
+  settings of one machine: the CLI loads it into the environment before a
+  command runs, git ignores it, and wassup adds the ignore line itself
+  before it reads the file. Nothing else in `.wassup/` holds a credential.
+  Discovery writes the names of variables and the hosts they resolve to,
+  never the value of a credential and no URL with its userinfo. Probes do
+  not read Secrets unless the binding opts in.
+- A connection is named by its parts (`host`, `port`, `user`, `database`,
+  `password_env`) or by `dsn_env`. Nobody should have to build a URL or
+  encode a password to bind a probe.
+- A read that costs (a bucket listing, an Electric shape) is opt-in and
+  says what it costs.
+- A probe declares its tier in `Access.Tier` (0 kubeconfig and network, 1 a
+  token, 2 a data store) and what it reads in the cluster in `Access.RBAC`.
+  `wassup probe --tier` and `wassup access` are built from those; neither
+  keeps a list of probe kinds.
+- An error says what to do next. A detail whose key ends in `_note` is
+  advice about the probe's own reading, and `wassup probe` prints it.
+- A probe that holds a connection releases it in order (`probe.Closer`,
+  `probe.RoundContext`): a connection that is cut takes a port-forward down.
+- A probe reaches into the cluster through `probe.OpenTunnel`; the provider
+  registers the opener, the probe never imports the provider.
 - Probes re-emit every tick even when nothing changed, so stale can be told
   from idle. On read errors they send `Observation{Err}` and degrade their
   health; they never keep reporting yesterday's numbers as today's.
@@ -121,6 +156,15 @@ and bindings. The runtime (`internal/app`) wires it all and hot-reloads
 - `wassup discover --propose --write` proposes; it never edits `.wassup/`.
   Every proposed component and edge cites `file:line`. Unresolved hosts are
   listed, not guessed.
+- Which cluster and which environment are the user's to say. A command
+  names the cluster before it reads it (kubeconfig, context, server, node
+  count). `discover` asks when nobody chose, and without a person to ask it
+  exits 5 with the flags that answer; it never falls back to the default
+  context in silence.
+- What the cluster proves and what the repository hints at are kept apart:
+  every proposed component and edge has a confidence and says what it
+  rests on. `review.md` is the file a person reviews; `evidence.json` is
+  the record behind it.
 - `wassup sync` diffs; `--apply` adds components, edges and bindings and
   leaves labels, groups, notes and layout alone; `--prune` is the only thing
   that removes. Match existing components by id, then by label, then by
@@ -133,7 +177,7 @@ and bindings. The runtime (`internal/app`) wires it all and hot-reloads
 
 **Add a provider or data source.** Write a probe under `internal/probe/<name>`
 (one package per family), fill the matching facet, register in `init()` with
-`Access{Facets: ...}`, import it from `internal/probe/all`. Tests use
+`Access{Facets: ..., Tier: ..., RBAC: ...}`, import it from `internal/probe/all`. Tests use
 `httptest` or fake clients, never a live service. Add the kind to the type's
 `Probes` list in `internal/model/catalog.go` (documentation) and regenerate
 `skill/wassup/reference/probes.md` with `wassup probes --markdown`.
@@ -155,8 +199,8 @@ diagram must say. The same fixtures feed `wassup demo` and the screenshots
 (`WASSUP_SHOTS=<dir> go test ./internal/render/ -run TestShots`).
 
 **Add a CLI verb.** `cmd/wassup/commands.go`, accept `--json`, exit non-zero
-with a machine-readable list on validation errors, update the README table and
-`skill/wassup/SKILL.md` when Claude Code should use it.
+with a machine-readable list on validation errors, update the table in
+`docs/commands.md` and `skill/wassup/SKILL.md` when Claude Code should use it.
 
 ## Working agreements
 

@@ -26,6 +26,7 @@ func init() {
 		Needs:       "get/list/watch on persistentvolumeclaims and pods in the namespace; get on nodes/proxy for usage (optional)",
 		Implemented: true,
 		Facets:      []string{facet.NameStorage},
+		RBAC:        []probe.Rule{probe.Reads("", "persistentvolumeclaims", "pods")},
 	}, func() probe.Probe { return &pvcProbe{base: base{kind: kindPVC}} })
 }
 
@@ -68,8 +69,7 @@ func (p *pvcProbe) Start(ctx context.Context, spec map[string]any, out chan<- pr
 	}, notify)
 
 	go func() {
-		if err := p.syncOrFail(ctx, c, pvcInf, inf.pods); err != nil {
-			probe.Send(ctx, out, probe.Observation{Target: target, Probe: kindPVC, At: time.Now(), Err: err.Error()})
+		if err := p.await(ctx, c, out, target, pvcInf, inf.pods); err != nil {
 			return
 		}
 		runLoop(ctx, tickOf(spec), kick, func() {

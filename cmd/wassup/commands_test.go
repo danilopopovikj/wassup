@@ -1,6 +1,9 @@
 package main
 
 import (
+	"encoding/json"
+	"reflect"
+	"runtime/debug"
 	"strings"
 	"testing"
 	"time"
@@ -69,7 +72,7 @@ func TestProbeRowsEdgeWithFailedProbeIsUnbound(t *testing.T) {
 	if r.Bound {
 		t.Errorf("an edge whose only probe failed must not read bound: %+v", r)
 	}
-	if !strings.HasPrefix(r.Label, "unbound, ") || !strings.Contains(r.Label, "pg.pool") || !strings.Contains(r.Label, "connection refused") {
+	if !strings.HasPrefix(r.Label, "no data, ") || !strings.Contains(r.Label, "pg.pool") || !strings.Contains(r.Label, "connection refused") {
 		t.Errorf("the label should say which probe failed and why, got %q", r.Label)
 	}
 	if r.State != string(model.Idle) {
@@ -90,7 +93,7 @@ func TestProbeRowsEdgeWhoseProbeNeverStartedIsUnbound(t *testing.T) {
 	if r.Bound {
 		t.Errorf("an edge whose probe never reported must not read bound: %+v", r)
 	}
-	if want := "unbound, pg.pool: environment variable POOL_DSN (dsn_env) is not set"; r.Label != want {
+	if want := "no data, pg.pool: environment variable POOL_DSN (dsn_env) is not set"; r.Label != want {
 		t.Errorf("label = %q, want %q", r.Label, want)
 	}
 }
@@ -112,13 +115,13 @@ func TestProbeRowsBoundWhenOneProbeDelivers(t *testing.T) {
 	}
 }
 
-func TestProbeRowsComponentKeepsTheEngineLabel(t *testing.T) {
+func TestProbeRowsComponentWithFailedProbe(t *testing.T) {
 	obs := []probe.Observation{
 		bookstoreUp[0], bookstoreUp[2],
 		{Target: "db", Probe: "pg.stats", Err: "connection refused"},
 	}
 	rows := probeRun(t, bookstoreBindings, nil, obs...)
-	if r := rows["db"]; r.Bound || r.Label != "unbound, connection refused" {
+	if r := rows["db"]; r.Bound || r.Label != "no data, pg.stats: connection refused" {
 		t.Errorf("db = %+v", r)
 	}
 	if r := rows["api->db"]; r.Bound {
@@ -142,5 +145,89 @@ func TestProbeCounts(t *testing.T) {
 	}
 	if all := countProbeRows(rows[:1]); all.unbound() {
 		t.Errorf("everything bound: %+v", all)
+	}
+}
+
+// With several probes on an element and one of them failing, the element
+// stays bound and the report names the probe that failed and why.
+func TestProbeRowsNameTheProbeThatFailed(t *testing.T) {
+	bindings := model.Bindings{
+		Components: map[string][]model.ProbeSpec{
+			"api":   {{"probe": "k8s.workload"}},
+			"db":    {{"probe": "cnpg.cluster"}, {"probe": "pg.stats"}, {"probe": "k8s.pvc"}},
+			"cache": {{"probe": "redis.info"}},
+		},
+	}
+	inst := []app.Instance{
+		{Kind: "k8s.pvc", Target: "db", Health: string(probe.HealthDegraded), Message: "no data yet"},
+	}
+	obs := []probe.Observation{
+		bookstoreUp[0], bookstoreUp[2],
+		{Target: "db", Probe: "cnpg.cluster", Metrics: map[string]float64{"replicas_ready": 2, "replicas_desired": 2}},
+		{Target: "db", Probe: "pg.stats", Err: "permission denied for view pg_stat_replication"},
+	}
+	r := probeRun(t, bindings, inst, obs...)["db"]
+	if !r.Bound {
+		t.Fatalf("one probe delivered, db is bound: %+v", r)
+	}
+	want := []probeResult{
+		{Probe: "cnpg.cluster", Status: "ok", Metrics: map[string]float64{"replicas_ready": 2, "replicas_desired": 2}},
+		{Probe: "pg.stats", Status: "error", Error: "permission denied for view pg_stat_replication"},
+		{Probe: "k8s.pvc", Status: "silent", Error: "no data yet"},
+	}
+	if !reflect.DeepEqual(r.Results, want) {
+		t.Errorf("results = %+v\nwant      %+v", r.Results, want)
+	}
+	if f := r.failed(); len(f) != 2 || f[0].Probe != "pg.stats" {
+		t.Errorf("failed = %+v", f)
+	}
+	// The JSON form carries status, error and metrics per probe.
+	b, err := json.Marshal(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, part := range []string{`"probe_results":[`, `"status":"error"`, `"error":"permission denied for view pg_stat_replication"`, `"metrics":{"replicas_desired":2,"replicas_ready":2}`} {
+		if !strings.Contains(string(b), part) {
+			t.Errorf("json misses %s: %s", part, b)
+		}
+	}
+}
+
+// Idle is only said where a rate was read. With nothing measuring traffic
+// the report says so instead.
+func TestProbeRowsIdleNeedsARate(t *testing.T) {
+	rows := probeRun(t, bookstoreBindings, nil, append([]probe.Observation{
+		{Target: "api->db", Probe: "pg.pool", Metrics: map[string]float64{"rate": 0, "pool_used": 0, "pool_max": 20}},
+	}, bookstoreUp...)...)
+	if r := rows["api->db"]; r.Label != "idle" || r.Note != "" {
+		t.Errorf("a rate of 0 was read, the edge is idle: %+v", r)
+	}
+	if r := rows["db"]; r.Label != "idle" {
+		t.Errorf("db has an edge with a rate: %+v", r)
+	}
+	if r := rows["api->cache"]; r.Label != noRate || r.Note == "" || r.State != string(model.Idle) {
+		t.Errorf("nothing measures api->cache: %+v", r)
+	}
+	if r := rows["cache"]; r.Label != noRate {
+		t.Errorf("nothing measures the traffic of cache: %+v", r)
+	}
+}
+
+func TestVersionFromBuildInfo(t *testing.T) {
+	installed := &debug.BuildInfo{Main: debug.Module{Version: "v0.4.2"}}
+	if got := versionFrom("dev", installed); got != "v0.4.2" {
+		t.Errorf("go install ...@v0.4.2 should print the module version, got %q", got)
+	}
+	if got := versionFrom("v0.5.0", installed); got != "v0.5.0" {
+		t.Errorf("a version set at link time wins, got %q", got)
+	}
+	local := &debug.BuildInfo{Main: debug.Module{Version: "(devel)"}, Settings: []debug.BuildSetting{
+		{Key: "vcs.revision", Value: "313299b0a1b2c3d4e5f6"}, {Key: "vcs.modified", Value: "true"},
+	}}
+	if got := versionFrom("dev", local); got != "dev-313299b0a1b2-dirty" {
+		t.Errorf("a local build names its commit, got %q", got)
+	}
+	if got := versionFrom("dev", &debug.BuildInfo{}); got != "dev" {
+		t.Errorf("nothing known: %q", got)
 	}
 }

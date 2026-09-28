@@ -3,6 +3,7 @@ package discover
 import (
 	"bufio"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -21,6 +22,16 @@ var (
 	refRe      = regexp.MustCompile(`\b([a-z][a-z0-9_]*_[a-z0-9_]+)\.([a-zA-Z0-9_-]+)\b`)
 	setNameRe  = regexp.MustCompile(`^\s*name\s*=\s*"([^"]+)"`)
 	setValueRe = regexp.MustCompile(`^\s*value\s*=\s*"([^"]*)"`)
+	variableRe = regexp.MustCompile(`^\s*variable\s+"([a-zA-Z0-9_-]+)"\s*\{`)
+	localsRe   = regexp.MustCompile(`^\s*locals\s*\{`)
+	defaultRe  = regexp.MustCompile(`(?:^|\s)default\s*=\s*"([^"]*)"`)
+	// exprRe reads "name = expression" where the expression is not a quoted
+	// literal: a reference such as var.bucket or local.prefix.
+	exprRe = regexp.MustCompile(`^\s*([a-zA-Z0-9_]+)\s*=\s*([a-zA-Z][a-zA-Z0-9_.-]*)\s*(?:#.*|//.*)?$`)
+	// interpRe finds ${var.x} and ${local.y} inside a string.
+	interpRe = regexp.MustCompile(`\$\{\s*((?:var|local)\.[a-zA-Z0-9_-]+)\s*\}`)
+	// tfRefRe is a bare var.x or local.y.
+	tfRefRe = regexp.MustCompile(`^(?:var|local)\.[a-zA-Z0-9_-]+$`)
 )
 
 type tfResource struct {
@@ -28,8 +39,10 @@ type tfResource struct {
 	File       string
 	Line       int
 	Attrs      map[string]string
-	Refs       []string // "type.name"
-	Body       []string
+	// Exprs holds the attributes whose value is a reference, not a literal.
+	Exprs map[string]string
+	Refs  []string // "type.name"
+	Body  []string
 }
 
 // tfTypeMap maps terraform resource types to catalog types.
@@ -68,15 +81,50 @@ func scanTerraform(a *accumulator, path, rel string) {
 	depth := 0
 	line := 0
 	inModule := false
+	scope, scopeDepth := "", 0 // "var.<name>" or "local" while inside such a block
 	for sc.Scan() {
 		line++
 		text := sc.Text()
 		if m := providerRe.FindStringSubmatch(text); m != nil {
 			a.provider(m[1])
 		}
+		if scope != "" {
+			// inside a variable or a locals block: keep what resolves
+			if scope == "local" {
+				if m := attrRe.FindStringSubmatch(text); m != nil && scopeDepth == 1 {
+					a.tfValue("local."+m[1], m[2])
+				} else if m := exprRe.FindStringSubmatch(text); m != nil && scopeDepth == 1 {
+					a.tfValue("local."+m[1], m[2])
+				}
+			} else if m := defaultRe.FindStringSubmatch(text); m != nil && scopeDepth == 1 {
+				a.tfValue(scope, m[1])
+			}
+			scopeDepth += strings.Count(text, "{") - strings.Count(text, "}")
+			if scopeDepth <= 0 {
+				scope = ""
+			}
+			continue
+		}
 		if cur == nil {
+			if m := variableRe.FindStringSubmatch(text); m != nil {
+				scope, scopeDepth = "var."+m[1], strings.Count(text, "{")-strings.Count(text, "}")
+				if scopeDepth <= 0 { // variable "x" { default = "y" } on one line
+					if d := defaultRe.FindStringSubmatch(text); d != nil {
+						a.tfValue(scope, d[1])
+					}
+					scope = ""
+				}
+				continue
+			}
+			if localsRe.MatchString(text) {
+				scope, scopeDepth = "local", strings.Count(text, "{")-strings.Count(text, "}")
+				if scopeDepth <= 0 {
+					scope = ""
+				}
+				continue
+			}
 			if m := resourceRe.FindStringSubmatch(text); m != nil {
-				cur = &tfResource{Type: m[1], Name: m[2], File: rel, Line: line, Attrs: map[string]string{}}
+				cur = &tfResource{Type: m[1], Name: m[2], File: rel, Line: line, Attrs: map[string]string{}, Exprs: map[string]string{}}
 				depth = strings.Count(text, "{") - strings.Count(text, "}")
 				if depth <= 0 {
 					resources = append(resources, cur)
@@ -87,7 +135,7 @@ func scanTerraform(a *accumulator, path, rel string) {
 			if m := moduleRe.FindStringSubmatch(text); m != nil {
 				inModule = true
 				depth = strings.Count(text, "{") - strings.Count(text, "}")
-				cur = &tfResource{Type: "module", Name: m[1], File: rel, Line: line, Attrs: map[string]string{}}
+				cur = &tfResource{Type: "module", Name: m[1], File: rel, Line: line, Attrs: map[string]string{}, Exprs: map[string]string{}}
 				continue
 			}
 			continue
@@ -96,6 +144,10 @@ func scanTerraform(a *accumulator, path, rel string) {
 		if m := attrRe.FindStringSubmatch(text); m != nil {
 			if _, ok := cur.Attrs[m[1]]; !ok {
 				cur.Attrs[m[1]] = m[2]
+			}
+		} else if m := exprRe.FindStringSubmatch(text); m != nil {
+			if _, ok := cur.Exprs[m[1]]; !ok {
+				cur.Exprs[m[1]] = m[2]
 			}
 		}
 		for _, m := range refRe.FindAllStringSubmatch(text, -1) {
@@ -118,6 +170,77 @@ func scanTerraform(a *accumulator, path, rel string) {
 		}
 	}
 	a.tf = append(a.tf, resources...)
+}
+
+// tfValue records what a variable or a local resolves to. A variable's
+// default gives way to a value from a tfvars file.
+func (a *accumulator) tfValue(ref, value string) {
+	if _, ok := a.tfValues[ref]; !ok {
+		a.tfValues[ref] = value
+	}
+}
+
+// scanTerraformVars reads terraform.tfvars and *.auto.tfvars, the files
+// Terraform loads without being asked: their values override the defaults.
+// Other tfvars files belong to one environment among several and are not
+// read. The values stay in memory; only a resolved bucket name is kept.
+func scanTerraformVars(a *accumulator, path string) {
+	base := filepath.Base(path)
+	if base != "terraform.tfvars" && !strings.HasSuffix(base, ".auto.tfvars") {
+		return
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if m := attrRe.FindStringSubmatch(line); m != nil {
+			a.tfOverride["var."+m[1]] = m[2]
+		}
+	}
+}
+
+// tfResolve resolves an attribute to a literal: the literal itself, a
+// reference to a variable's default or to a local, or a string that
+// interpolates those. It reports false when something in it stays unknown.
+func (a *accumulator) tfResolve(r *tfResource, attr string) (string, bool) {
+	value := func(ref string) (string, bool) {
+		if v, ok := a.tfOverride[ref]; ok {
+			return v, true
+		}
+		v, ok := a.tfValues[ref]
+		return v, ok
+	}
+	var resolve func(text string, depth int) (string, bool)
+	resolve = func(text string, depth int) (string, bool) {
+		if depth > 4 {
+			return "", false
+		}
+		if tfRefRe.MatchString(text) { // a bare reference
+			v, ok := value(text)
+			if !ok {
+				return "", false
+			}
+			return resolve(v, depth+1)
+		}
+		known := true
+		text = interpRe.ReplaceAllStringFunc(text, func(m string) string {
+			v, ok := value(interpRe.FindStringSubmatch(m)[1])
+			if ok {
+				v, ok = resolve(v, depth+1)
+			}
+			known = known && ok
+			return v
+		})
+		return text, known && text != "" && !hasPlaceholder(text)
+	}
+	if v, ok := r.Attrs[attr]; ok {
+		return resolve(v, 0)
+	}
+	if e, ok := r.Exprs[attr]; ok && tfRefRe.MatchString(e) {
+		return resolve(e, 0)
+	}
+	return "", false
 }
 
 // emitTerraform turns collected resources into candidates and links. It
@@ -217,28 +340,22 @@ func terraformResource(a *accumulator, r *tfResource, addr map[string]string) {
 		ns := r.Attrs["namespace"]
 		c := Candidate{ID: model.SlugifyID(name), Type: typ, Label: labelFor(name), Namespace: ns, Name: name, Evidence: []Evidence{ev}, Env: map[string]string{}, Extra: map[string]string{"chart": chart}}
 		c.Addresses = serviceAddresses(name, ns)
-		// set { name = "X" value = "Y" } pairs carry env-like config
+		// set { name = "X" value = "Y" } pairs carry env-like config; of a
+		// value only the host it points at is kept
 		var pendingName string
-		for i, l := range r.Body {
+		for _, l := range r.Body {
 			if m := setNameRe.FindStringSubmatch(l); m != nil {
 				pendingName = m[1]
 				continue
 			}
 			if m := setValueRe.FindStringSubmatch(l); m != nil && pendingName != "" {
-				c.Env[pendingName] = m[1]
-				for _, d := range dsnRe.FindAllString(m[1], -1) {
-					if h, ok := parseDSN(d); ok {
-						l := Link{From: c.ID, Host: h.Host, Kind: edgeKindFor(h.Scheme, ""), Evidence: []Evidence{{Source: "terraform", File: r.File, Line: r.Line + i + 1, Note: pendingName + " in helm_release " + r.Name}}}
-						if typ == "syncengine" && l.Kind == "sql" {
-							l.Kind, l.Reverse = "replication", true
-						}
-						a.link(l)
-					}
-				}
+				c.Env[pendingName] = envValue(pendingName, m[1])
 				pendingName = ""
 			}
 		}
-		a.add(c)
+		if added := a.add(c); added != nil {
+			a.deriveLinks(added.ID, nil, "terraform", r.File, r.Line)
+		}
 		return
 	case r.Type == "module":
 		if src := r.Attrs["source"]; src != "" {
@@ -281,15 +398,21 @@ func terraformResource(a *accumulator, r *tfResource, addr map[string]string) {
 			c.Addresses = append(c.Addresses, host)
 		}
 	case "dns":
-		host := r.Attrs["name"]
-		if zone := r.Attrs["zone_name"]; zone != "" && !strings.HasSuffix(host, zone) {
+		// A record is only a component when its name is known: a name
+		// that interpolates a variable without a default names nothing.
+		host, ok := a.tfResolve(r, "name")
+		if zone, zok := a.tfResolve(r, "zone_name"); zok && ok && !strings.HasSuffix(host, zone) {
 			host = host + "." + zone
+		} else if !zok && (r.Attrs["zone_name"] != "" || r.Exprs["zone_name"] != "") {
+			ok = false
 		}
-		if host != "" {
-			c.ID = model.SlugifyID(host)
-			c.Label = host
-			c.Addresses = append(c.Addresses, host)
+		if !ok || !usableHost(host) {
+			a.note("terraform %s.%s: the name of the record does not resolve to a host and was left out", r.Type, r.Name)
+			return
 		}
+		c.ID = model.SlugifyID(host)
+		c.Label = host
+		c.Addresses = append(c.Addresses, host)
 	case "loadbalancer":
 		if r.Attrs["location"] != "" {
 			c.Extra["location"] = r.Attrs["location"]
@@ -299,7 +422,20 @@ func terraformResource(a *accumulator, r *tfResource, addr map[string]string) {
 		// type says which store it lives in.
 		switch {
 		case strings.HasSuffix(r.Type, "_s3_bucket") || r.Type == "digitalocean_spaces_bucket" || r.Type == "google_storage_bucket":
-			c.Extra["bucket"] = firstNonEmpty(r.Attrs["bucket"], r.Attrs["name"], r.Name)
+			// The name of the resource in Terraform is not the name of the
+			// bucket. The bucket is what the attribute resolves to; when it
+			// does not resolve, the component stays unbound.
+			attr := "bucket"
+			if r.Attrs["bucket"] == "" && r.Exprs["bucket"] == "" {
+				attr = "name"
+			}
+			if bucket, ok := a.tfResolve(r, attr); ok {
+				c.Extra["bucket"] = bucket
+				c.ID, c.Name, c.Label = bucketID(bucket), bucket, bucket+" bucket"
+			} else {
+				expr := firstNonEmpty(r.Attrs[attr], r.Exprs[attr], "not set")
+				a.note("terraform %s.%s: the bucket name (%s) does not resolve to a literal; the component is left unbound, bind s3.bucket by hand", r.Type, r.Name, expr)
+			}
 			if reg := r.Attrs["region"]; reg != "" {
 				c.Extra["region"] = reg
 			}

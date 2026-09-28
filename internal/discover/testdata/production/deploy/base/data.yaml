@@ -1,0 +1,127 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: bookstore-db
+spec:
+  instances: 2
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: cache
+spec:
+  selector:
+    matchLabels:
+      app: cache
+  template:
+    metadata:
+      labels:
+        app: cache
+    spec:
+      containers:
+        - name: cache
+          image: valkey/valkey:8
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: cache
+spec:
+  selector:
+    app: cache
+  ports:
+    - port: 6379
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bookstore-electric
+spec:
+  selector:
+    matchLabels:
+      app: bookstore-electric
+  template:
+    metadata:
+      labels:
+        app: bookstore-electric
+    spec:
+      containers:
+        - name: electric
+          image: electricsql/electric:1.0.0
+          env:
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: bookstore-db-app
+                  key: username
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: bookstore-db-app
+                  key: password
+            - name: DATABASE_URL
+              value: postgresql://$(PGUSER):$(PGPASSWORD)@bookstore-db-rw:5432/bookstore?sslmode=disable
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: electric
+spec:
+  selector:
+    app: bookstore-electric
+  ports:
+    - port: 3000
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hatchet-engine
+spec:
+  selector:
+    matchLabels:
+      app: hatchet-engine
+  template:
+    metadata:
+      labels:
+        app: hatchet-engine
+    spec:
+      containers:
+        - name: engine
+          image: ghcr.io/hatchet-dev/hatchet-engine:v0.62.1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hatchet-engine
+spec:
+  selector:
+    app: hatchet-engine
+  ports:
+    - port: 7070
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hatchet-api
+spec:
+  selector:
+    matchLabels:
+      app: hatchet-api
+  template:
+    metadata:
+      labels:
+        app: hatchet-api
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/hatchet-dev/hatchet-api:v0.62.1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hatchet-api
+spec:
+  selector:
+    app: hatchet-api
+  ports:
+    - port: 8080

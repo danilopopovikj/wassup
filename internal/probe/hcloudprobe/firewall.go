@@ -111,6 +111,7 @@ var firewallAccess = probe.Access{
 	SpecFields:  []string{"name", "id", "token_env", "port", "protocol", "interval", "endpoint"},
 	Needs:       "a read-only Cloud API token in the environment variable named by token_env (default HCLOUD_TOKEN)",
 	Implemented: true,
+	Tier:        probe.TierToken,
 	Facets:      []string{facet.NameFirewall, facet.NameTraffic},
 }
 

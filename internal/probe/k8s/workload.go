@@ -38,6 +38,11 @@ func init() {
 		Needs:       "get/list/watch on pods, replicasets, deployments, statefulsets, daemonsets and events in the namespace; get/list on pods.metrics.k8s.io",
 		Implemented: true,
 		Facets:      []string{facet.NameWorkload},
+		RBAC: []probe.Rule{
+			probe.Reads("", "pods", "events"),
+			probe.Reads("apps", "deployments", "statefulsets", "daemonsets", "replicasets"),
+			probe.Reads("metrics.k8s.io", "pods"),
+		},
 	}, func() probe.Probe { return &workloadProbe{base: base{kind: kindWorkload}} })
 }
 
@@ -162,8 +167,7 @@ func (w *workloadProbe) Start(ctx context.Context, spec map[string]any, out chan
 	watch(ctx, dsInf, ownerMatch, notify)
 
 	go func() {
-		if err := w.syncOrFail(ctx, c, podInf, depInf, stsInf, dsInf, rsInf, evInf); err != nil {
-			probe.Send(ctx, out, probe.Observation{Target: target, Probe: kindWorkload, At: time.Now(), Err: err.Error()})
+		if err := w.await(ctx, c, out, target, podInf, depInf, stsInf, dsInf, rsInf, evInf); err != nil {
 			return
 		}
 		runLoop(ctx, tickOf(spec), kick, func() {

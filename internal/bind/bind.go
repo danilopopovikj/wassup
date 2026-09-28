@@ -22,6 +22,18 @@ type Joined struct {
 	Detail     map[string]any
 	Probes     []string
 	Errors     []string
+	// Sources is what each probe delivered on its own, in the order of
+	// Probes, so a report can say which probe failed and which number came
+	// from where.
+	Sources []Source
+}
+
+// Source is the latest observation of one probe about one element.
+type Source struct {
+	Probe   string
+	At      time.Time
+	Err     string
+	Metrics map[string]float64
 }
 
 // Binder is safe for concurrent use.
@@ -128,6 +140,7 @@ func (b *Binder) join(target string) *Joined {
 	for _, k := range keys {
 		o := m[k]
 		j.Probes = append(j.Probes, k)
+		j.Sources = append(j.Sources, Source{Probe: k, At: o.At, Err: o.Err, Metrics: o.Metrics})
 		if o.Err != "" {
 			j.Errors = append(j.Errors, k+": "+o.Err)
 			continue
