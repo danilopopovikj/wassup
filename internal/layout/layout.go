@@ -70,6 +70,9 @@ type Options struct {
 	Collapsed map[string]bool
 	// Compact reduces box height to label plus state, for small terminals.
 	Compact bool
+	// Detail is minimal, normal or full (see model.DetailLevel). Normal shows
+	// at most three gauges and one line of notes; full shows everything.
+	Detail string
 }
 
 // DefaultOptions are the documented defaults.
@@ -326,14 +329,27 @@ func Compute(t *model.Topology, l model.Layout, opts Options) *Graph {
 		if w < 25 && gauges > 0 {
 			w = 25
 		}
-		// border(2) + label + state + gauges + note
-		h = 2 + 1 + 1 + gauges + 1
-		if c.Type == "node" {
-			hosted := len(t.Hosted(c.ID))
-			if hosted > 4 {
-				hosted = 4
+		switch opts.Detail {
+		case model.DetailMinimal:
+			// border(2) + label + state + one note line
+			h = 2 + 1 + 1 + 1
+		case model.DetailFull:
+			// border(2) + label + state + gauges + note lines
+			h = 2 + 1 + 1 + gauges + 2
+			if c.Type == "node" {
+				hosted := len(t.Hosted(c.ID))
+				if hosted > 4 {
+					hosted = 4
+				}
+				h += hosted
 			}
-			h += hosted
+		default:
+			if gauges > 3 {
+				gauges = 3
+			}
+			// border(2) + label + state + up to three gauges + one line for
+			// hosted workloads or a change stamp
+			h = 2 + 1 + 1 + gauges + 1
 		}
 		if opts.Compact {
 			h = 2 + 1 + 1 + 1

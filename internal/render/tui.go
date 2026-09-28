@@ -131,6 +131,7 @@ func (m *Model) relayout() {
 	if m.height > 0 && m.height < 30 {
 		opts.Compact = true
 	}
+	opts.Detail = m.cfg.Layout.DetailLevel()
 	m.graph = layout.Compute(&m.cfg.Topology, m.cfg.Layout, opts)
 	if m.selected == "" {
 		if len(m.graph.Order) > 0 {
@@ -550,6 +551,12 @@ func (m *Model) onKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		}
 	case "g":
 		m.toggleCollapse(m.selected)
+	case "d":
+		next := map[string]string{model.DetailMinimal: model.DetailNormal, model.DetailNormal: model.DetailFull, model.DetailFull: model.DetailMinimal}
+		m.cfg.Layout.Detail = next[m.cfg.Layout.DetailLevel()]
+		m.relayout()
+		m.markLayoutDirty()
+		m.setToast("detail: " + m.cfg.Layout.DetailLevel() + " (d cycles, enter opens the full panel)")
 	case "pgdown":
 		m.panelScroll += 10
 	case "pgup":
@@ -905,7 +912,7 @@ func (m *Model) export() tea.Cmd {
 // ---- view -----------------------------------------------------------------
 
 func (m *Model) drawOpts() DrawOptions {
-	opts := DrawOptions{Selected: m.selected, Frame: m.frame, Topology: &m.cfg.Topology, Snapshot: m.view, Animate: m.animate && !m.scrubbing}
+	opts := DrawOptions{Selected: m.selected, Frame: m.frame, Topology: &m.cfg.Topology, Snapshot: m.view, Animate: m.animate && !m.scrubbing, Detail: m.cfg.Layout.DetailLevel()}
 	if m.lensOn {
 		opts.Lens = m.currentIssue()
 	}
@@ -1041,8 +1048,11 @@ func (m *Model) drawStatus(c *Canvas) {
 	if m.lensOn {
 		if is := m.currentIssue(); is != nil {
 			lbl := fmt.Sprintf(" lens %d/%d · cause: %s ", m.issueIdx+1, len(m.view.Issues), m.cfg.Topology.LabelOf(is.Cause))
-			c.Text(x+1, 0, lbl, Style{Fg: ColAmber, Inverse: true, Bold: true}, m.width-x-1)
+			x += c.Text(x+1, 0, lbl, Style{Fg: ColAmber, Inverse: true, Bold: true}, m.width-x-1) + 1
 		}
+	}
+	if lvl := m.cfg.Layout.DetailLevel(); lvl != model.DetailNormal {
+		c.Text(x+1, 0, " detail: "+lvl+" ", Style{Inverse: true, Dim: true}, m.width-x-1)
 	}
 	clock := " " + m.rt.Now().Format("15:04:05") + " "
 	c.Text(m.width-len(clock), 0, clock, Style{Inverse: true}, len(clock))

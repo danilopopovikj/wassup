@@ -591,8 +591,8 @@ func (c *ctx) incidentFlow(id string) (float64, string, bool) {
 		es := c.snap.Edges[e.ID()]
 		if es.State == model.Flowing {
 			flowing = true
-			if e.Kind == "replication" {
-				continue // lag is not a rate
+			if e.Kind == "replication" || e.Kind == "tcp" {
+				continue // lag and health-check connections are not a rate worth a label
 			}
 			if es.Rate > best {
 				best = es.Rate
@@ -816,7 +816,10 @@ func (c *ctx) gauges(comp model.Component, es model.ElementState) []model.Gauge 
 	var out []model.Gauge
 	trends := c.in.Trends[comp.ID]
 	for _, g := range spec.Gauges {
-		gauge := model.Gauge{Name: g.Name, Pct: -1, Level: "none"}
+		gauge := model.Gauge{Name: g.Name, Short: g.Short, Pct: -1, Level: "none"}
+		if gauge.Short == "" {
+			gauge.Short = g.Name
+		}
 		switch {
 		case g.Used != "" && g.Max != "":
 			u, ok1 := es.Metrics[g.Used]

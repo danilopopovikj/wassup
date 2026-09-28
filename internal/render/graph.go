@@ -2,6 +2,7 @@ package render
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/danilopopovikj/wassup/internal/layout"
@@ -50,6 +51,60 @@ type DrawOptions struct {
 	Snapshot    *model.Snapshot
 	Collapsed   map[string]bool
 	Animate     bool
+	// Detail is minimal, normal or full (model.DetailLevel).
+	Detail string
+}
+
+// primaryGauges lists, per type, the gauges an engineer wants at a glance.
+// Anything amber or red is promoted regardless; zero rate-only gauges hide.
+var primaryGauges = map[string][]string{
+	"node":          {"cpu", "ram", "disk"},
+	"workload":      {"ready", "cpu", "ram"},
+	"lb":            {"targets"},
+	"ingress":       {"errors", "cert"},
+	"job":           {"running", "ok 24h", "failed"},
+	"queue":         {"depth", "oldest"},
+	"cache":         {"mem", "hits"},
+	"db":            {"conns", "cpu", "disk"},
+	"storage":       {"used"},
+	"observability": {"ingest", "disk"},
+	"external":      {"latency", "errors"},
+	"firewall":      {},
+}
+
+// visibleGauges picks what a box shows at the given detail level.
+func visibleGauges(comp model.Component, es model.ElementState, level string) []model.Gauge {
+	if level == model.DetailMinimal {
+		return nil
+	}
+	if level == model.DetailFull {
+		return es.Gauges
+	}
+	primary := map[string]bool{}
+	for _, n := range primaryGauges[comp.Type] {
+		primary[n] = true
+	}
+	var out []model.Gauge
+	// promoted first: amber and red gauges are the signal
+	for _, g := range es.Gauges {
+		if g.Level == "amber" || g.Level == "red" {
+			out = append(out, g)
+		}
+	}
+	for _, g := range es.Gauges {
+		if g.Level == "amber" || g.Level == "red" || !primary[g.Name] {
+			continue
+		}
+		// a zero rate-only gauge ("restarts 0") says nothing
+		if g.Pct < 0 && (g.Value == "0" || g.Value == "0%" || strings.HasPrefix(g.Value, "0 ")) {
+			continue
+		}
+		out = append(out, g)
+	}
+	if len(out) > 3 {
+		out = out[:3]
+	}
+	return out
 }
 
 // Draw paints the whole graph on a canvas sized to the layout.
@@ -95,11 +150,7 @@ func DrawOn(c *Canvas, g *layout.Graph, opts DrawOptions) {
 			st.Dim = true
 		}
 		c.Box(gf.X, gf.Y, gf.W, gf.H, BorderDouble, st)
-		title := " " + gf.Label + " "
-		if gf.Kind != "" && gf.Kind != "db" {
-			title = " " + gf.Label + " · " + gf.Kind + " "
-		}
-		c.Text(gf.X+2, gf.Y, title, Style{Fg: ColGray, Bold: true}, gf.W-4)
+		c.Text(gf.X+2, gf.Y, groupTitle(gf, opts), Style{Fg: ColGray, Bold: true}, gf.W-4)
 	}
 	var labels []func()
 	for _, id := range sortedRouteIDs(g.Routes) {
@@ -114,11 +165,7 @@ func DrawOn(c *Canvas, g *layout.Graph, opts DrawOptions) {
 	}
 	// Frame titles again, on top of any route that crossed them.
 	for _, gf := range g.Groups {
-		title := " " + gf.Label + " "
-		if gf.Kind != "" && gf.Kind != "db" {
-			title = " " + gf.Label + " · " + gf.Kind + " "
-		}
-		c.Text(gf.X+2, gf.Y, title, Style{Fg: ColGray, Bold: true}, gf.W-4)
+		c.Text(gf.X+2, gf.Y, groupTitle(gf, opts), Style{Fg: ColGray, Bold: true}, gf.W-4)
 	}
 	for _, id := range g.Order {
 		b := g.Boxes[id]
@@ -163,6 +210,13 @@ func DrawOn(c *Canvas, g *layout.Graph, opts DrawOptions) {
 		c.Box(x, y, w, 3, BorderRounded, Style{Fg: ColAccent})
 		c.Text(x+2, y+1, note, Style{Fg: ColAccent}, w-4)
 	}
+}
+
+func groupTitle(gf layout.GroupFrame, opts DrawOptions) string {
+	if opts.Detail == model.DetailFull && gf.Kind != "" && gf.Kind != "db" {
+		return " " + gf.Label + " · " + gf.Kind + " "
+	}
+	return " " + gf.Label + " "
 }
 
 func sortedRouteIDs(m map[string]*layout.Route) []string {
@@ -260,12 +314,15 @@ func drawBox(c *Canvas, g *layout.Graph, b *layout.Box, snap *model.Snapshot, op
 	c.Text(x, y, glyph+" ", tst, 2)
 	c.Text(x+2, y, ellipsis(label, inner-2), Style{Bold: true}, inner-2)
 	// Type hint on the right of the title when there is room.
-	hint := comp.Type
-	if comp.Type == "db" && comp.Notes != "" && comp.Parent != "" {
-		hint = comp.Notes // primary / replica
+	hint := ""
+	if opts.Detail == model.DetailFull {
+		hint = comp.Type
+		if b.Lane == "side" && comp.Group != "" {
+			hint = comp.Group
+		}
 	}
-	if b.Lane == "side" && comp.Group != "" {
-		hint = comp.Group
+	if comp.Type == "db" && comp.Notes != "" && comp.Parent != "" {
+		hint = comp.Notes // primary / replica: always worth knowing
 	}
 	if hint != "" && inner-len([]rune(label))-3 >= len([]rune(hint)) {
 		c.Text(b.Right()-2-len([]rune(hint)), y, hint, Style{Fg: ColGray, Dim: true}, len([]rune(hint)))
@@ -282,44 +339,51 @@ func drawBox(c *Canvas, g *layout.Graph, b *layout.Box, snap *model.Snapshot, op
 	c.Text(x, y, ellipsis(lab, inner), Style{Fg: col}, inner)
 	y++
 	// Gauges.
-	for _, gg := range es.Gauges {
+	for _, gg := range visibleGauges(comp, es, opts.Detail) {
 		if y >= b.Bottom()-1 {
 			break
 		}
 		drawGauge(c, x, y, inner, gg)
 		y++
 	}
-	// Hosted workloads for nodes.
-	if comp.Type == "node" {
-		if hosted, ok := es.Detail["hosted"].([]string); ok {
+	// Hosted workloads for nodes: one line normally, one per row in full.
+	if comp.Type == "node" && opts.Detail != model.DetailMinimal {
+		hosted := hostedList(es)
+		if opts.Detail == model.DetailFull {
 			for _, h := range hosted {
 				if y >= b.Bottom()-1 {
 					break
 				}
-				id, stt, _ := strings.Cut(h, ":")
-				ws := model.State(stt)
-				c.Text(x, y, ws.Glyph()+" "+id, Style{Fg: StateColor(ws)}, inner)
+				c.Text(x, y, h.state.Glyph()+" "+h.id, Style{Fg: StateColor(h.state)}, inner)
 				y++
 			}
-		} else if hostedAny, ok := es.Detail["hosted"].([]any); ok {
-			for _, hv := range hostedAny {
-				if y >= b.Bottom()-1 {
+		} else if len(hosted) > 0 && y < b.Bottom()-1 {
+			// failing workloads first so they survive the clipping
+			sort.SliceStable(hosted, func(i, j int) bool { return stateRank(hosted[i].state) > stateRank(hosted[j].state) })
+			xx := x
+			for _, h := range hosted {
+				if xx-x+len([]rune(h.id))+2 > inner {
 					break
 				}
-				h, _ := hv.(string)
-				id, stt, _ := strings.Cut(h, ":")
-				ws := model.State(stt)
-				c.Text(x, y, ws.Glyph()+" "+id, Style{Fg: StateColor(ws)}, inner)
-				y++
+				xx += c.Text(xx, y, h.state.Glyph()+" "+h.id+" ", Style{Fg: StateColor(h.state)}, inner-(xx-x))
 			}
+			y++
 		}
 	}
-	// Notes: change stamps, target health, cert countdown.
+	// Notes: change stamps always (that is "what changed"); the rest only when
+	// the component is in trouble or the level is full.
 	for _, n := range es.Notes {
 		if y >= b.Bottom()-1 {
 			break
 		}
-		c.Text(x, y, ellipsis(n, inner), Style{Fg: ColGray}, inner)
+		if opts.Detail != model.DetailFull && es.Severity < model.Warn && !isStamp(n) {
+			continue
+		}
+		st := Style{Fg: ColGray}
+		if isStamp(n) {
+			st = Style{Fg: ColCyan}
+		}
+		c.Text(x, y, ellipsis(n, inner), st, inner)
 		y++
 	}
 	// Waiting pile in the corner.
@@ -346,6 +410,42 @@ func ellipsis(s string, w int) string {
 	return string(r[:w-1]) + "…"
 }
 
+type hostedEntry struct {
+	id    string
+	state model.State
+}
+
+func hostedList(es model.ElementState) []hostedEntry {
+	var out []hostedEntry
+	add := func(h string) {
+		id, stt, _ := strings.Cut(h, ":")
+		out = append(out, hostedEntry{id: id, state: model.State(stt)})
+	}
+	switch v := es.Detail["hosted"].(type) {
+	case []string:
+		for _, h := range v {
+			add(h)
+		}
+	case []any:
+		for _, h := range v {
+			if s, ok := h.(string); ok {
+				add(s)
+			}
+		}
+	}
+	return out
+}
+
+// isStamp reports whether a note is a change marker ("deploy 09:48 b7e9f21").
+func isStamp(n string) bool {
+	for _, k := range []string{"deploy ", "terraform ", "node ", "cert ", "scale ", "switchover ", "eviction ", "job "} {
+		if strings.HasPrefix(n, k) && len(n) > len(k)+4 && n[len(k)+2] == ':' {
+			return true
+		}
+	}
+	return false
+}
+
 func stateRank(s model.State) int {
 	switch s {
 	case model.Failing:
@@ -364,7 +464,10 @@ func stateRank(s model.State) int {
 
 // drawGauge paints "name ▓▓▓▓░░░░ 84%" in inner cells.
 func drawGauge(c *Canvas, x, y, inner int, g model.Gauge) {
-	name := g.Name
+	name := g.Short
+	if name == "" {
+		name = g.Name
+	}
 	if len(name) > 4 {
 		name = name[:4]
 	}
@@ -527,8 +630,42 @@ func drawRoute(c *Canvas, g *layout.Graph, r *layout.Route, snap *model.Snapshot
 			c.Set(p.X, p.Y, '•', Style{Fg: ColAmber, Bold: true})
 		}
 	}
-	// Label at the midpoint, drawn later.
+	// Label at the midpoint, drawn later. Off the lit path, and on healthy
+	// plumbing edges (tcp health checks, replication), a label is noise.
+	if opts.Lens != nil && !isLit {
+		return nil
+	}
+	if !edgeLabelWorthIt(g, r, es, opts) {
+		return nil
+	}
 	return func() { labelRoute(c, g, r, es, st, opts) }
+}
+
+// edgeLabelWorthIt decides whether a flowing edge deserves a rate label.
+func edgeLabelWorthIt(g *layout.Graph, r *layout.Route, es model.ElementState, opts DrawOptions) bool {
+	if opts.Detail == model.DetailFull {
+		return true
+	}
+	if es.Marker == model.MarkerUnbound {
+		return false // the dashed line says it
+	}
+	if es.State != model.Flowing || es.Marker != "" {
+		return true // anything not plainly flowing is signal
+	}
+	if opts.Detail == model.DetailMinimal {
+		return false
+	}
+	kind := ""
+	if opts.Topology != nil {
+		if e, ok := opts.Topology.Edge(r.ID); ok {
+			kind = e.Kind
+		}
+	}
+	switch kind {
+	case "tcp", "replication":
+		return false
+	}
+	return true
 }
 
 // Point alias for readability.
@@ -704,7 +841,7 @@ func shortEdgeLabel(es model.ElementState) string {
 			s := state.Num(es.Rate) + " " + es.Unit
 			if strings.Contains(es.Label, "miss") {
 				parts := strings.Split(es.Label, ", ")
-				s += ", " + parts[len(parts)-1]
+				s += " · " + strings.Replace(parts[len(parts)-1], " percent", "%", 1)
 			}
 			if strings.Contains(es.Label, "double normal") {
 				s += " ×2"

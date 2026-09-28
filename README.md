@@ -87,7 +87,8 @@ TUI:
 issue · `t` scrub the timeline, `[` `]` step, `esc` live · `c` copy the
 `wassup://` ref, `C` ref plus summary, `y` the panel · `f` findings · `e`
 changes · `a` annotations · `x`/`X` clear annotations · `s` export svg/png/txt
-· `g` collapse group · `r`/`R` reset layout · `/` filter · `?` all keys.
+· `g` collapse group · `d` detail level (minimal, normal, full) · `r`/`R`
+reset layout · `/` filter · `?` all keys.
 Mouse: click selects, drag moves, drag a corner resizes, click a group title
 collapses it.
 

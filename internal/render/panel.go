@@ -413,6 +413,7 @@ func helpLines() []string {
 		"  x X          clear selected / all annotations",
 		"  s            export svg/png/txt, copies the png path",
 		"  g            collapse or expand the selected group",
+		"  d            detail level: minimal · normal · full (boxes and edge labels)",
 		"  r R          reset layout of selection / everything",
 		"  / text       filter by name",
 		"  + -          resize the panel split",

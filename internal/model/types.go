@@ -244,6 +244,24 @@ type Layout struct {
 	Collapsed  []string             `json:"collapsed,omitempty"`
 	Waypoints  map[string][][2]int  `json:"waypoints,omitempty"`
 	GraphSplit int                  `json:"graph_split,omitempty"` // percent of width for the graph
+	// Detail is the box detail level: minimal, normal (default) or full.
+	Detail string `json:"detail,omitempty"`
+}
+
+// Detail levels for the diagram.
+const (
+	DetailMinimal = "minimal"
+	DetailNormal  = "normal"
+	DetailFull    = "full"
+)
+
+// DetailLevel returns the effective level.
+func (l Layout) DetailLevel() string {
+	switch l.Detail {
+	case DetailMinimal, DetailFull:
+		return l.Detail
+	}
+	return DetailNormal
 }
 
 // Annotation is one highlighted path with a note.
@@ -338,6 +356,7 @@ type ElementState struct {
 // Gauge is one horizontal bar inside a box.
 type Gauge struct {
 	Name   string  `json:"name"`
+	Short  string  `json:"short,omitempty"`
 	Pct    float64 `json:"pct"`             // 0..100, -1 when unknown
 	Value  string  `json:"value"`           // "84%" or "92/100"
 	Level  string  `json:"level"`           // ok, amber, red, none
