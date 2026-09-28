@@ -944,6 +944,17 @@ func (m *Model) View() tea.View {
 		v.AltScreen = true
 		return v
 	}
+	screen := m.Screen()
+	v := tea.NewView(screen.String())
+	v.AltScreen = true
+	v.MouseMode = tea.MouseModeCellMotion
+	v.WindowTitle = "wassup · " + m.cfg.Topology.Name
+	return v
+}
+
+// Screen paints the whole terminal frame: status line, graph viewport,
+// panel and the timeline or story strip. Export and tests use it too.
+func (m *Model) Screen() *Canvas {
 	screen := NewCanvas(m.width, m.height)
 	screen.NoColor = m.opts.NoColor
 	m.drawStatus(screen)
@@ -985,11 +996,7 @@ func (m *Model) View() tea.View {
 		t := " /" + m.filter + "_ "
 		screen.Text(0, m.height-m.stripRows()-1, t, Style{Fg: ColCyan, Inverse: true}, m.width)
 	}
-	v := tea.NewView(screen.String())
-	v.AltScreen = true
-	v.MouseMode = tea.MouseModeCellMotion
-	v.WindowTitle = "wassup · " + m.cfg.Topology.Name
-	return v
+	return screen
 }
 
 func (m *Model) drawStatus(c *Canvas) {

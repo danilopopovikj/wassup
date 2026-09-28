@@ -39,27 +39,35 @@ func (c *Canvas) SVG() string {
 		x := 0
 		for x < c.W {
 			cell := c.Get(x, y)
+			// One element per run of non-space cells sharing a style, pinned to
+			// the cell grid with textLength; renderers collapse whitespace, so
+			// spaces never go inside an element.
+			if cell.Ch == ' ' && !cell.St.Inverse {
+				x++
+				continue
+			}
 			run := []rune{cell.Ch}
 			j := x + 1
-			for j < c.W && c.Get(j, y).St == cell.St {
+			for j < c.W && c.Get(j, y).St == cell.St && (c.Get(j, y).Ch != ' ' || cell.St.Inverse) {
 				run = append(run, c.Get(j, y).Ch)
 				j++
 			}
+			col := svgColors[cell.St.Fg]
+			if cell.St.Dim {
+				col = dimHex(col)
+			}
+			px, py := x*svgCellW, y*svgCellH
+			if cell.St.Inverse {
+				fmt.Fprintf(&b, `<rect x="%d" y="%d" width="%d" height="%d" fill="%s"/>`, px, py, len(run)*svgCellW, svgCellH, col)
+				col = "#0d1117"
+			}
 			text := strings.TrimRight(string(run), " ")
 			if text != "" {
-				col := svgColors[cell.St.Fg]
-				if cell.St.Dim {
-					col = dimHex(col)
-				}
-				attrs := fmt.Sprintf(`x="%d" y="%d" fill="%s"`, x*svgCellW, y*svgCellH+12, col)
+				attrs := fmt.Sprintf(`x="%d" y="%d" fill="%s" textLength="%d" lengthAdjust="spacingAndGlyphs"`, px, py+12, col, len([]rune(text))*svgCellW)
 				if cell.St.Bold {
 					attrs += ` font-weight="bold"`
 				}
-				if cell.St.Inverse {
-					fmt.Fprintf(&b, `<rect x="%d" y="%d" width="%d" height="%d" fill="%s"/>`, x*svgCellW, y*svgCellH, len(run)*svgCellW, svgCellH, col)
-					attrs = fmt.Sprintf(`x="%d" y="%d" fill="#0d1117"`, x*svgCellW, y*svgCellH+12)
-				}
-				fmt.Fprintf(&b, `<text %s>%s</text>`, attrs, html.EscapeString(string(run)))
+				fmt.Fprintf(&b, `<text %s>%s</text>`, attrs, html.EscapeString(text))
 			}
 			x = j
 		}

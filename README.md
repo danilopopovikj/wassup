@@ -24,6 +24,12 @@ diagnoses with Claude Code in the neighbouring tmux pane.
  ▸ database is at 100 of 100 connections, CPU 35 percent, so the pool is the limit, not the database
 ```
 
+![connection pool exhausted: the lens lights the path from the load balancer to the database, the panel explains the edge](docs/screenshots/02-pool-exhausted-panel.png)
+
+More frames from the recorded scenarios: [node out of memory](docs/screenshots/04-node-memory-lens.png),
+[node dropped from the load balancer, timeline strip](docs/screenshots/07-node-dropped-timeline.png).
+`WASSUP_SHOTS=<dir> go test ./internal/render/ -run TestShots` regenerates them as SVG.
+
 wassup is not an agent, not a dashboard and not a kubectl replacement.
 Claude Code writes its configuration, reads its snapshots and draws on it;
 wassup itself needs no AI to run. MIT, single binary, runs in tmux, no daemon.
