@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"net"
 	"sort"
@@ -13,7 +14,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -187,7 +188,7 @@ func (g *ingressProbe) observe(ctx context.Context, c *Clients, ingresses networ
 	now := time.Now()
 	ing, err := ingresses.Ingresses(ns).Get(name)
 	if err != nil {
-		if errors.IsNotFound(err) {
+		if apierrors.IsNotFound(err) {
 			return probe.Observation{}, fmt.Errorf("ingress %s/%s not found", ns, name)
 		}
 		return probe.Observation{}, err
@@ -241,7 +242,7 @@ func (g *ingressProbe) observe(ctx context.Context, c *Clients, ingresses networ
 					managed[secret] = managedCertOf(cert)
 				}
 			}
-		} else if !errors.IsNotFound(err) && !isNoMatch(err) {
+		} else if !apierrors.IsNotFound(err) && !isNoMatch(err) {
 			o.Detail["cert_manager_error"] = err.Error()
 		}
 	}
@@ -467,23 +468,33 @@ func leafByHandshake(ctx context.Context, dial dialFunc, host string) (*x509.Cer
 		return nil, fmt.Errorf("handshake with %s: %w", addr, err)
 	}
 	defer raw.Close()
-	// InsecureSkipVerify is deliberate: only the expiry date of the leaf is
-	// read, and an expired or self-signed certificate is exactly the one
-	// whose date must be reported. With verification on, the handshake
-	// would abort before the certificate could be seen. Nothing is sent
-	// over the connection and nothing read from it is trusted.
-	conn := tls.Client(raw, &tls.Config{
-		ServerName:         host,
-		InsecureSkipVerify: true, //nolint:gosec // see comment above
-	})
-	if err := conn.HandshakeContext(hctx); err != nil {
+	// Verification stays on. An expired or self-signed certificate is
+	// exactly the one whose date must be reported, and the handshake that
+	// refuses it hands over the chain it refused. Nothing is sent over the
+	// connection and nothing read from it is trusted.
+	conn := tls.Client(raw, &tls.Config{ServerName: host})
+	chain, err := presentedChain(hctx, conn)
+	if err != nil {
 		return nil, fmt.Errorf("handshake with %s: %w", addr, err)
 	}
-	chain := conn.ConnectionState().PeerCertificates
 	if len(chain) == 0 {
 		return nil, fmt.Errorf("handshake with %s: no certificate presented", addr)
 	}
 	return chain[0], nil
+}
+
+// presentedChain completes the handshake and returns the certificates the
+// server presented, whether or not they passed verification.
+func presentedChain(ctx context.Context, conn *tls.Conn) ([]*x509.Certificate, error) {
+	err := conn.HandshakeContext(ctx)
+	var refused *tls.CertificateVerificationError
+	if errors.As(err, &refused) {
+		return refused.UnverifiedCertificates, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return conn.ConnectionState().PeerCertificates, nil
 }
 
 // describeLeaf copies what the panel shows of a certificate.
