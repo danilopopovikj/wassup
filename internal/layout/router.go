@@ -2,9 +2,6 @@ package layout
 
 import (
 	"container/heap"
-	"sort"
-
-	"github.com/danilopopovikj/wassup/internal/model"
 )
 
 // Costs of the orthogonal A* router.
@@ -26,117 +23,10 @@ const (
 	sideRight
 )
 
-type pending struct {
-	id       string
-	edge     string // the logical edge this route draws
-	from, to string
-	both     bool
-	merged   []string
-	dist     int
-}
-
-// endpoints returns the boxes an element is drawn by: its instances when it
-// runs inside nodes, otherwise its one box.
-func (g *Graph) endpoints(id string) []string {
-	if inst := g.Instances[id]; len(inst) > 0 {
-		return inst
-	}
-	b := g.BoxOf[id]
-	if b == "" || g.Boxes[b] == nil {
-		return nil
-	}
-	return []string{b}
-}
-
-// pairsOf expands a logical edge into the box pairs that draw it. Between
-// two components that both run inside nodes the edge is drawn within each
-// node they share (the ingress on a node hands to the api on that node);
-// otherwise every instance connects to the other end.
-func (g *Graph) pairsOf(e model.Edge) [][2]string {
-	F, T := g.endpoints(e.From), g.endpoints(e.To)
-	if len(F) == 0 || len(T) == 0 {
-		return nil
-	}
-	var out [][2]string
-	if len(g.Instances[e.From]) > 0 && len(g.Instances[e.To]) > 0 {
-		for _, f := range F {
-			for _, t := range T {
-				if g.Boxes[f].Node == g.Boxes[t].Node {
-					out = append(out, [2]string{f, t})
-				}
-			}
-		}
-		if len(out) > 0 {
-			return out
-		}
-	}
-	for _, f := range F {
-		for _, t := range T {
-			if f != t {
-				out = append(out, [2]string{f, t})
-			}
-		}
-	}
-	return out
-}
-
-// routeAll routes every edge, shortest first. Opposite and parallel edges
-// between the same two boxes share one route; the instance routes of one
-// logical edge share their trunk, so an api on three nodes reaches the
-// database as one bundle with one arrowhead.
-func routeAll(t *model.Topology, g *Graph, l model.Layout) {
-	byPair := map[string]*pending{}
-	var list []*pending
-	for _, e := range t.Edges {
-		id := e.ID()
-		for _, pr := range g.pairsOf(e) {
-			from, to := pr[0], pr[1]
-			if p, ok := byPair[from+"|"+to]; ok {
-				if !contains(p.merged, id) {
-					p.merged = append(p.merged, id)
-				}
-				continue
-			}
-			if p, ok := byPair[to+"|"+from]; ok {
-				p.both = true
-				if !contains(p.merged, id) {
-					p.merged = append(p.merged, id)
-				}
-				continue
-			}
-			rid := id
-			if g.Boxes[from].Instance != "" || g.Boxes[to].Instance != "" {
-				rid = id + "@" + from + ">" + to
-			}
-			p := &pending{id: rid, edge: id, from: from, to: to, merged: []string{id}}
-			fb, tb := g.Boxes[from], g.Boxes[to]
-			fx, fy := fb.Center()
-			tx, ty := tb.Center()
-			p.dist = abs(fx-tx) + abs(fy-ty)
-			byPair[from+"|"+to] = p
-			list = append(list, p)
-		}
-	}
-	sort.SliceStable(list, func(i, j int) bool {
-		if list[i].dist != list[j].dist {
-			return list[i].dist < list[j].dist
-		}
-		return list[i].id < list[j].id
-	})
-	grid := newGrid(g)
-	// Count how many routes leave/enter each box side to spread ports; the
-	// routes of one logical edge into one box share a port so they merge.
-	portUse := map[string]map[side]int{}
-	shared := map[string]Point{}
-	portFor := func(edge string, b *Box, s side, other string) Point {
-		k := edge + "|" + b.ID + "|" + string(rune('0'+int(s)))
-		if p, ok := shared[k]; ok {
-			return p
-		}
-		p := grid.port(b, s, portUse, other)
-		shared[k] = p
-		return p
-	}
+// route finds the way from one box to another around everything that is in
+// the way, through the waypoints somebody set if there are any. Cells in
+// bundle are free to ride, so the routes of one edge share a trunk.
+func (g *grid) route(fb, tb *Box, waypoints [][2]int, bundle map[int]bool, portFor func(b *Box, s side, other string) Point) []Point {
 	// outward is the cell one step away from a port, so a route leaves and
 	// arrives perpendicular to the box side and the arrowhead points in.
 	outward := func(p Point, s side) Point {
@@ -150,66 +40,52 @@ func routeAll(t *model.Topology, g *Graph, l model.Layout) {
 		}
 		return Point{p.X + 1, p.Y}
 	}
-	bundles := map[string]map[int]bool{} // logical edge -> cells of its routes so far
-	for _, p := range list {
-		fb, tb := g.Boxes[p.from], g.Boxes[p.to]
-		fs, ts := sides(fb, tb)
-		start := portFor(p.edge, fb, fs, p.to)
-		end := portFor(p.edge, tb, ts, p.from)
-		bundle := bundles[p.edge]
-		var cells []Point
-		s0, e0 := outward(start, fs), outward(end, ts)
-		if s0 == end || e0 == start || heuristic(start, end) <= 2 {
-			// neighbours: no room for a run-up
-			s0, e0 = start, end
-		}
-		if grid.isBox(s0.X, s0.Y) {
-			s0 = start
-		}
-		if grid.isBox(e0.X, e0.Y) {
-			e0 = end
-		}
-		if wps, ok := l.Waypoints[p.edge]; ok && len(wps) > 0 {
-			cur := s0
-			for _, wp := range wps {
-				seg := grid.astar(cur, Point{wp[0], wp[1]}, bundle)
-				if len(seg) == 0 {
-					break
-				}
-				if len(cells) > 0 {
-					seg = seg[1:]
-				}
-				cells = append(cells, seg...)
-				cur = Point{wp[0], wp[1]}
+	fs, ts := sides(fb, tb)
+	start := portFor(fb, fs, tb.ID)
+	end := portFor(tb, ts, fb.ID)
+	var cells []Point
+	s0, e0 := outward(start, fs), outward(end, ts)
+	if s0 == end || e0 == start || heuristic(start, end) <= 2 {
+		// neighbours: no room for a run-up
+		s0, e0 = start, end
+	}
+	if g.isBox(s0.X, s0.Y) {
+		s0 = start
+	}
+	if g.isBox(e0.X, e0.Y) {
+		e0 = end
+	}
+	if len(waypoints) > 0 {
+		cur := s0
+		for _, wp := range waypoints {
+			seg := g.astar(cur, Point{wp[0], wp[1]}, bundle)
+			if len(seg) == 0 {
+				break
 			}
-			seg := grid.astar(cur, e0, bundle)
-			if len(cells) > 0 && len(seg) > 0 {
+			if len(cells) > 0 {
 				seg = seg[1:]
 			}
 			cells = append(cells, seg...)
-		} else {
-			cells = grid.astar(s0, e0, bundle)
+			cur = Point{wp[0], wp[1]}
 		}
-		if len(cells) == 0 {
-			cells = []Point{s0, e0}
+		seg := g.astar(cur, e0, bundle)
+		if len(cells) > 0 && len(seg) > 0 {
+			seg = seg[1:]
 		}
-		if s0 != start {
-			cells = append([]Point{start}, cells...)
-		}
-		if e0 != end {
-			cells = append(cells, end)
-		}
-		grid.occupy(cells)
-		if bundles[p.edge] == nil {
-			bundles[p.edge] = map[int]bool{}
-		}
-		for _, c := range cells {
-			if grid.in(c.X, c.Y) {
-				bundles[p.edge][grid.idx(c.X, c.Y)] = true
-			}
-		}
-		g.Routes[p.id] = &Route{ID: p.id, Edge: p.edge, From: p.from, To: p.to, Cells: cells, Both: p.both, Merged: p.merged}
+		cells = append(cells, seg...)
+	} else {
+		cells = g.astar(s0, e0, bundle)
 	}
+	if len(cells) == 0 {
+		cells = []Point{s0, e0}
+	}
+	if s0 != start {
+		cells = append([]Point{start}, cells...)
+	}
+	if e0 != end {
+		cells = append(cells, end)
+	}
+	return cells
 }
 
 func contains(list []string, s string) bool {

@@ -102,7 +102,7 @@ func (m *Model) detailLines(width int) []string {
 			out = append(out, stateLine(es))
 			out = append(out, fmt.Sprintf("..severity %s · since %s", es.Severity, sinceText(now, es.Since)))
 			if es.Rate > 0 {
-				out = append(out, fmt.Sprintf("rate      %s %s", state.Num(es.Rate), es.Unit))
+				out = append(out, "rate      "+state.Rate(es.Rate, es.Unit))
 			}
 			if es.Queued > 0 {
 				out = append(out, fmt.Sprintf("queued    %s", state.Num(es.Queued)))

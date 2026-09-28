@@ -82,5 +82,11 @@ func TestShots(t *testing.T) {
 		if err := os.WriteFile(filepath.Join(out, sh.name+".svg"), []byte(c.SVG()), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		// The whole diagram as well, which no window shows at once: it is
+		// what a change to the layout is judged by.
+		whole := Draw(m.graph, m.drawOpts())
+		if err := os.WriteFile(filepath.Join(out, sh.name+"-whole.svg"), []byte(whole.SVG()), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
