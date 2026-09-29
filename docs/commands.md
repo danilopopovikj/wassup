@@ -6,7 +6,7 @@ one command.
 | Command | Does |
 | --- | --- |
 | `wassup` | runs the TUI; first run prints the setup prompt |
-| `wassup init [--print-prompt]` | creates `.wassup/` or prints the prompt |
+| `wassup init [--print-prompt]` | creates `.wassup/` or prints the setup guide an agent follows |
 | `wassup discover [--propose --write] [--environment <name>] [--yes]` | evidence from Terraform, manifests, Helm values, network policies, code and the cluster; `--propose` drafts topology and bindings with every edge cited, and a `review.md` with one line per component and edge. Names the cluster before it reads it and asks when nobody chose it |
 | `wassup sync [--apply] [--prune] [--check]` | re-discovers and diffs against `.wassup/`; merges additions, prunes what vanished, or fails CI on drift |
 | `wassup validate` | schemas plus id cross-checks |
