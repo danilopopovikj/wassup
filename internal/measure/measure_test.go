@@ -227,3 +227,23 @@ func TestDomain(t *testing.T) {
 		}
 	}
 }
+
+func TestAPoolerIsCountedByTheTransactionsItPassesOn(t *testing.T) {
+	cfg := bookstore()
+	cfg.Topology.Components = append(cfg.Topology.Components, model.Component{ID: "pool", Type: "workload", Label: "Pool"})
+	cfg.Topology.Edges = append(cfg.Topology.Edges, model.Edge{From: "pool", To: "db", Kind: "sql"})
+	cfg.Bindings.Components["pool"] = []model.ProbeSpec{{"probe": "k8s.workload", "namespace": "shop", "selector": "cnpg.io/poolerName=shop-db-pooler-rw"}}
+	src := sources()
+	src.Survey.Pooled = []signoz.Call{
+		{Service: "shop-db-pooler-rw-7c9-abc", Address: "shop", Count: 7000, Last: last},
+		{Service: "shop-db-pooler-rw-7c9-abc", Address: "pgbouncer", Count: 120, Last: last},
+	}
+	e := verdicts(Plan(cfg, src))["pool->db"]
+	if e.Status != Found || e.Binding["metric"] != signoz.MetricPooled || e.Binding["unit"] != "tx" {
+		t.Fatalf("pool->db = %+v", e)
+	}
+	m := e.Binding["match"].(map[string]any)
+	if m["database"] != "shop" || m["k8s.pod.name"] != `shop-db-pooler-rw-.*` {
+		t.Errorf("match = %v: PgBouncer's own database is left out", m)
+	}
+}

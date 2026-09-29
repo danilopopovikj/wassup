@@ -28,6 +28,8 @@ type row struct {
 	count  float64
 	value  float64
 	last   time.Time
+	// dropped counts the steps left out as a counter that started over
+	dropped int
 }
 
 // table is one answer of SigNoz: the rate of every series of a metric over
@@ -286,33 +288,71 @@ func tableOf(a queryAnswer, by []string, window time.Duration, end time.Time, st
 				r.labels[l] = "" // a series without the label has none
 			}
 		}
-		known := false
+		var counts []float64
+		var stamps []int64
 		for _, v := range s.Values {
-			n, ok := number(v.Value)
-			if !ok {
+			if n, ok := number(v.Value); ok {
+				counts, stamps = append(counts, n), append(stamps, v.Timestamp)
+			}
+		}
+		if len(counts) == 0 {
+			continue // SigNoz knows nothing of it
+		}
+		restarted := startedOver(counts)
+		for i, n := range counts {
+			if restarted[i] {
+				r.dropped++
 				continue
 			}
-			known = true
 			r.count += n
 			if n > 0 {
-				if at := time.UnixMilli(v.Timestamp).Add(time.Duration(stepS) * time.Second); at.After(r.last) {
+				if at := time.UnixMilli(stamps[i]).Add(time.Duration(stepS) * time.Second); at.After(r.last) {
 					r.last = at
 				}
 			}
 		}
-		if !known {
-			continue // SigNoz knows nothing of it
-		}
 		if r.last.After(end) {
 			r.last = end
 		}
-		if window > 0 {
-			r.value = r.count / window.Seconds()
+		if held := window - time.Duration(r.dropped*stepS)*time.Second; held > 0 {
+			r.value = r.count / held.Seconds()
 		}
 		t.rows = append(t.rows, r)
 	}
 	t.full = len(all) >= rowLimit
 	return t, nil
+}
+
+// A counter that a collector scrapes starts over when the collector does,
+// and SigNoz then reads its whole count since the pod started as the
+// increase of one step: 45 million transactions in a minute of a pooler
+// that passes 800. Such a step is left out, and the window with it. It is
+// told from a burst by its size against the series' own steps: a thousand
+// times their median, and a hundred thousand at once.
+const (
+	restartFactor = 1000
+	restartFloor  = 100000
+)
+
+// startedOver marks the steps of a series that are a counter starting over.
+// A series needs three steps that counted something to say what is usual.
+func startedOver(counts []float64) []bool {
+	out := make([]bool, len(counts))
+	var pos []float64
+	for _, n := range counts {
+		if n > 0 {
+			pos = append(pos, n)
+		}
+	}
+	if len(pos) < 3 {
+		return out
+	}
+	sort.Float64s(pos)
+	median := pos[len(pos)/2]
+	for i, n := range counts {
+		out[i] = n > restartFloor && n > restartFactor*median
+	}
+	return out
 }
 
 // number reads a value of the answer.
