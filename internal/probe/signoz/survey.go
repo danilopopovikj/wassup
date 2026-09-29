@@ -30,6 +30,11 @@ type Survey struct {
 	// Served lists, per service, the HTTP requests it answered, as the
 	// OpenTelemetry HTTP server instrumentation counts them.
 	Served []Call `json:"served,omitempty"`
+	// Pooled lists the transactions each PgBouncer pod of a CloudNativePG
+	// pooler passed on over PooledOver, per database: Service is the pod,
+	// Address the database.
+	Pooled     []Call        `json:"pooled,omitempty"`
+	PooledOver time.Duration `json:"pooled_over,omitempty"`
 	// Quiet names the services that sent metrics of their outgoing calls
 	// but no span: SigNoz cannot say where their calls went.
 	Quiet []string `json:"quiet,omitempty"`
@@ -44,10 +49,13 @@ const (
 	metricSpans      = "signoz_calls_total"
 	metricClientHTTP = "http.client.duration.count"
 	metricServerHTTP = "http.server.duration.count"
+	// MetricPooled is what CloudNativePG's pooler exporter counts of the
+	// transactions PgBouncer passes on.
+	MetricPooled = "cnpg_pgbouncer_stats_total_xact_count"
 )
 
 // Surveyed reads a survey from the SigNoz a spec names (url and the
-// credentials of a signoz.edge binding), five queries over the lookback.
+// credentials of a signoz.edge binding), six queries over the lookback.
 func Surveyed(ctx context.Context, spec map[string]any, lookback time.Duration) (Survey, error) {
 	cfg, err := edgeConfigOf(withMetric(spec))
 	if err != nil {
@@ -77,6 +85,18 @@ func Surveyed(ctx context.Context, spec map[string]any, lookback time.Duration) 
 	// metrics has no requests served to say, and no quiet services to name.
 	if rows, err = read(metricServerHTTP, "service.name"); err == nil {
 		s.Served = callsOf(rows, "")
+	}
+	// A counter the collector scrapes reads its whole total as one step's
+	// increase when the collector restarts; over an hour of minutes that is
+	// told apart, over a week of hours it is not. The last hour says enough.
+	s.PooledOver = min(lookback, time.Hour)
+	if tab, err := ask(ctx, sess, MetricPooled, []string{"k8s.pod.name", "database"}, s.PooledOver, now); err == nil {
+		rows := tab.rows
+		for _, r := range rows {
+			if r.count > 0 {
+				s.Pooled = append(s.Pooled, Call{Service: r.labels["k8s.pod.name"], Address: r.labels["database"], Count: r.count, Last: r.last})
+			}
+		}
 	}
 	if rows, err = read(metricClientHTTP, "service.name"); err == nil {
 		traced := map[string]bool{}

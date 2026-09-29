@@ -50,7 +50,7 @@ func init() {
 		Delivers: "on an edge: rate (per second: what the series that match counted over the window, divided by the window) and error_rate (the percentage of it that the series matching errors make up); " +
 			"on a database: rate, its transactions per second; a rate of 0 when the series that match were counted within known (a week) and not within the window; " +
 			"no rate when no series matches in either; detail: the metric, the series matched, the window, count (what they counted in it), last_seen (the end of the last step that counted anything), unit",
-		SpecFields: []string{"url (required)", "metric (required)", "match", "errors", "window", "known", "unit", "interval", "user_env", "password_env", "token_env"},
+		SpecFields: []string{"url (required)", "metric (required)", "plus", "match", "errors", "window", "known", "unit", "interval", "user_env", "password_env", "token_env"},
 		Needs: "HTTP access to SigNoz, and a user with the viewer role: its name and password in the environment variables named by user_env and password_env " +
 			"(default SIGNOZ_USER, SIGNOZ_PASSWORD), or an API key in the one named by token_env. wassup signs in with a POST and asks with a POST; neither changes anything in SigNoz. " +
 			"A query costs SigNoz's database a read over the window, once per metric and interval, however many bindings use the metric; " +
@@ -66,6 +66,7 @@ type edgeConfig struct {
 	base     string
 	creds    credentials
 	metric   string
+	plus     []string // more counters of the same thing, added to metric
 	match    map[string]*regexp.Regexp
 	errors   map[string]*regexp.Regexp
 	labels   []string // the labels match and errors name, sorted
@@ -92,6 +93,9 @@ func edgeConfigOf(spec map[string]any) (edgeConfig, error) {
 	cfg.creds = credentialsOf(spec)
 	if cfg.metric = probe.Str(spec, "metric", ""); strings.ContainsAny(cfg.metric, "{ \t") {
 		return cfg, fmt.Errorf("metric is the name of a counter alone; its labels go into match")
+	}
+	if cfg.plus, err = plusOf(spec); err != nil {
+		return cfg, err
 	}
 	if cfg.match, err = probe.Matchers(spec, "match"); err != nil {
 		return cfg, err
@@ -209,6 +213,7 @@ type matched struct {
 	count         float64 // over the window
 	matched       int
 	last          time.Time
+	dropped       int // steps left out as a counter that started over
 }
 
 // sum adds up the series of a table that a binding means.
@@ -221,6 +226,7 @@ func sum(rows []row, cfg edgeConfig) matched {
 		m.matched++
 		m.total += r.value
 		m.count += r.count
+		m.dropped += r.dropped
 		if r.last.After(m.last) {
 			m.last = r.last
 		}
@@ -236,7 +242,7 @@ func sum(rows []row, cfg edgeConfig) matched {
 // first and then the whole of known: a series that was counted then is
 // known, its rate now is zero, and when it last counted is said.
 func (p *edgeProbe) observe(ctx context.Context, store *tableStore, sess *session, cfg edgeConfig, target string) (probe.Observation, error) {
-	tab, err := store.read(ctx, sess, cfg)
+	tab, err := readAll(ctx, store, sess, cfg)
 	if err != nil {
 		return probe.Observation{}, err
 	}
@@ -247,7 +253,7 @@ func (p *edgeProbe) observe(ctx context.Context, store *tableStore, sess *sessio
 		for _, back := range lookBack(cfg) {
 			past := cfg
 			past.window, past.interval = back, knownInterval
-			pt, err := store.read(ctx, sess, past)
+			pt, err := readAll(ctx, store, sess, past)
 			if err != nil {
 				if ctx.Err() != nil {
 					return probe.Observation{}, err
@@ -288,6 +294,9 @@ func (p *edgeProbe) observe(ctx context.Context, store *tableStore, sess *sessio
 		m.total, m.failed, m.count = 0, 0, 0
 	}
 	o.Detail["count"] = probe.Round(m.count, 2)
+	if m.dropped > 0 {
+		o.Detail["restart_note"] = fmt.Sprintf("%d %s left out: a counter counted its whole total at once, which is what a collector that restarted reads", m.dropped, plural(m.dropped, "step was", "steps were"))
+	}
 	if tab.full {
 		o.Detail["rows_note"] = fmt.Sprintf("SigNoz answered with %d series, which is all it was asked for: the rate may leave some out; match on fewer labels", len(tab.rows))
 	}
@@ -305,6 +314,56 @@ func (p *edgeProbe) observe(ctx context.Context, store *tableStore, sess *sessio
 	}
 	facet.EmitTraffic(&o, t, now)
 	return o, nil
+}
+
+// readAll reads the table of a binding's metric and of every counter plus
+// adds to it: their series are added up as one, the way the commits and
+// the rollbacks of a database are its transactions.
+func readAll(ctx context.Context, store *tableStore, sess *session, cfg edgeConfig) (table, error) {
+	tab, err := store.read(ctx, sess, cfg)
+	if err != nil || len(cfg.plus) == 0 {
+		return tab, err
+	}
+	all := table{at: tab.at, full: tab.full, rows: append([]row(nil), tab.rows...)}
+	for _, m := range cfg.plus {
+		more := cfg
+		more.metric, more.plus = m, nil
+		t, err := store.read(ctx, sess, more)
+		if err != nil {
+			return table{}, err
+		}
+		all.rows = append(all.rows, t.rows...)
+		all.full = all.full || t.full
+		if t.at.Before(all.at) {
+			all.at = t.at
+		}
+	}
+	return all, nil
+}
+
+// plusOf reads the counters a binding adds to its metric: a name or a list.
+func plusOf(spec map[string]any) ([]string, error) {
+	var names []string
+	switch v := spec["plus"].(type) {
+	case nil:
+		return nil, nil
+	case string:
+		names = []string{v}
+	case []any:
+		for _, n := range v {
+			names = append(names, fmt.Sprint(n))
+		}
+	case []string:
+		names = v
+	default:
+		return nil, fmt.Errorf("plus is a counter's name or a list of them")
+	}
+	for _, n := range names {
+		if n == "" || strings.ContainsAny(n, "{ \t") {
+			return nil, fmt.Errorf("plus names counters alone; their labels go into match")
+		}
+	}
+	return names, nil
 }
 
 // lookBack lists how far back a binding whose window holds nothing looks:
@@ -384,4 +443,12 @@ func minutes(d time.Duration) string {
 		return fmt.Sprintf("%d min", int(d.Minutes()))
 	}
 	return d.String()
+}
+
+// plural picks the word for n.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }

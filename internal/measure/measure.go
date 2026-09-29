@@ -231,6 +231,8 @@ func (p *planner) edge(e model.Edge) Edge {
 		return p.byRouter(out, e, to)
 	case to.Type == "external":
 		return p.byCalls(out, e, from, to)
+	case e.Kind == "sql" && poolerOf(p.cfg.Bindings.Components[from.ID]) != "":
+		return p.byPooler(out, from)
 	case e.Kind == "sql":
 		return p.byQueries(out, e, from)
 	case e.Kind == "http" || e.Kind == "grpc":
@@ -513,6 +515,59 @@ func (p *planner) byQueries(out Edge, e model.Edge, from model.Component) Edge {
 	return out
 }
 
+// poolerOf is the name of the CloudNativePG pooler a component's workload
+// binding selects, or "".
+func poolerOf(specs []model.ProbeSpec) string {
+	for _, s := range specs {
+		if s.Kind() != "k8s.workload" {
+			continue
+		}
+		for _, pair := range strings.Split(s.String("selector"), ",") {
+			if k, v, ok := strings.Cut(strings.TrimSpace(pair), "="); ok && k == "cnpg.io/poolerName" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
+// byPooler finds the counter of what a PgBouncer pooler passes on to its
+// database: the transactions the pooler's exporter counts, on the pods of
+// the pooler, for the databases that are not PgBouncer's own.
+func (p *planner) byPooler(out Edge, from model.Component) Edge {
+	s := p.src.Survey
+	if s == nil {
+		out.Status, out.Reason, out.Fix = Missing, "SigNoz was not read", signozFix
+		return out
+	}
+	name := poolerOf(p.cfg.Bindings.Components[from.ID])
+	var total float64
+	var dbs []string
+	for _, c := range s.Pooled {
+		if strings.HasPrefix(c.Service, name+"-") && c.Address != "pgbouncer" {
+			total += c.Count
+			dbs = append(dbs, c.Address)
+		}
+	}
+	if total == 0 {
+		out.Status = Missing
+		out.Reason = "SigNoz holds no transaction count of the pods of the pooler " + name + ": CloudNativePG's pooler metrics are not scraped"
+		out.Fix = "scrape the pooler's metrics port (9127) into SigNoz, then run wassup measure again"
+		return out
+	}
+	dbs = uniq(dbs)
+	sort.Strings(dbs)
+	quoted := make([]string, len(dbs))
+	for i, d := range dbs {
+		quoted[i] = regexp.QuoteMeta(d)
+	}
+	out.Status = Found
+	out.Binding = p.signozBinding(signoz.MetricPooled, map[string]any{"k8s.pod.name": regexp.QuoteMeta(name) + "-.*", "database": strings.Join(quoted, "|")})
+	out.Binding["unit"] = "tx"
+	out.Evidence = fmt.Sprintf("the pooler %s passed %s to %s in the last %s", name, countText(total, "transaction"), strings.Join(dbs, ", "), s.PooledOver)
+	return out
+}
+
 // caller is the service a component's calls are counted under, or why
 // there is none.
 func (p *planner) caller(c model.Component) (string, string) {
@@ -715,7 +770,7 @@ const (
 
 // spansFix says what would put a component's calls into SigNoz.
 func spansFix(c model.Component) string {
-	return "make " + c.DisplayLabel() + " send a span for every outgoing call (the OpenTelemetry HTTP client instrumentation), and keep spans that have no parent"
+	return "make " + c.DisplayLabel() + " send a span for every outgoing call (the OpenTelemetry client instrumentation), spans without a parent too; software you do not build rarely can, and its edge then stays without a rate"
 }
 
 func countText(n float64, what string) string {

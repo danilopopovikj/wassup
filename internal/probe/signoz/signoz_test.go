@@ -26,11 +26,12 @@ type fakeSigNoz struct {
 	signIns  int
 	queries  []queryRequest
 	others   []string
-	token    string   // the token a sign-in hands out
-	accepted string   // the token a query has to carry; "" accepts token
-	rows     []series // what SigNoz holds; an answer groups it by the labels of the query
-	day      []series // what it holds of the last day, when that is more; nil is rows
-	status   int      // the status of a query, when not 200
+	token    string              // the token a sign-in hands out
+	accepted string              // the token a query has to carry; "" accepts token
+	rows     []series            // what SigNoz holds; an answer groups it by the labels of the query
+	day      []series            // what it holds of the last day, when that is more; nil is rows
+	byMetric map[string][]series // what it holds per metric, when set
+	status   int                 // the status of a query, when not 200
 }
 
 // series is one series SigNoz holds, counting at an even rate over every
@@ -177,6 +178,9 @@ func (f *fakeSigNoz) serve(w http.ResponseWriter, r *http.Request) {
 
 // held is what SigNoz holds of the time a query asks for.
 func (f *fakeSigNoz) held(q queryRequest) []series {
+	if f.byMetric != nil {
+		return f.byMetric[q.CompositeQuery.Queries[0].Spec.Aggregations[0].MetricName]
+	}
 	if f.day != nil && time.Duration(q.End-q.Start)*time.Millisecond > time.Hour {
 		return f.day
 	}
@@ -872,5 +876,49 @@ func TestKnownCanBeTurnedOff(t *testing.T) {
 	}
 	if _, queries := f.counts(); queries != 1 {
 		t.Errorf("queries = %d", queries)
+	}
+}
+
+// The transactions of a database are its commits and its rollbacks: a
+// binding adds the second counter with plus.
+func TestPlusAddsTheSeriesOfMoreCounters(t *testing.T) {
+	f := newFake(t)
+	commits := []series{of(3.0, "k8s.pod.name", "bookstore-db-1")}
+	rollbacks := []series{of(11.0, "k8s.pod.name", "bookstore-db-1")}
+	f.byMetric = map[string][]series{"cnpg_pg_stat_database_xact_commit": commits, "cnpg_pg_stat_database_xact_rollback": rollbacks}
+	o := first(t, &edgeProbe{tables: newStore()}, f.spec("db-primary", map[string]any{
+		"metric": "cnpg_pg_stat_database_xact_commit", "plus": []any{"cnpg_pg_stat_database_xact_rollback"},
+		"match": map[string]any{"k8s.pod.name": "bookstore-db-1"},
+	}))
+	if o.Err != "" {
+		t.Fatal(o.Err)
+	}
+	if o.Metrics["rate"] != 14 {
+		t.Errorf("rate = %v, want 3 commits and 11 rollbacks a second", o.Metrics["rate"])
+	}
+}
+
+// When SigNoz's collector restarts, a counter it scrapes reads its whole
+// count since the pod started as the increase of one step. That step is
+// left out, and the window with it: the rate is what the other steps say.
+func TestAStepWhereACounterStartedOverIsLeftOut(t *testing.T) {
+	var a queryAnswer
+	raw := `{"data":{"results":[{"aggregations":[{"series":[{"labels":[],"values":[
+		{"timestamp":0,"value":800},{"timestamp":60000,"value":640},{"timestamp":120000,"value":45405716},
+		{"timestamp":180000,"value":840},{"timestamp":240000,"value":720}]}]}]}]}}`
+	if err := json.Unmarshal([]byte(raw), &a); err != nil {
+		t.Fatal(err)
+	}
+	tab, err := tableOf(a, nil, 5*time.Minute, time.UnixMilli(300000), 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := tab.rows[0]
+	if r.dropped != 1 || r.count != 3000 || r.value != 3000.0/240 {
+		t.Errorf("row = %+v, want 3000 over the four minutes that were read", r)
+	}
+	// a burst in a series that is usually quiet is not a restart
+	if got := startedOver([]float64{1, 2, 1, 900}); got[3] {
+		t.Error("a burst of 900 calls was taken for a counter that started over")
 	}
 }
