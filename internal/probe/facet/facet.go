@@ -230,6 +230,7 @@ type BackgroundWorkerFacet struct {
 	SlotsUsed, SlotsMax Num // concurrency
 	Active              Num // tasks running now
 	Backlog             Num // work waiting for this fleet (queued + pending)
+	Rate                Num // tasks finished per second, over the last hour
 	Running             []Task
 	TypicalDuration     time.Duration // p95 of recent task durations
 	LongTask            time.Duration // stuck threshold, default 10m
@@ -247,6 +248,7 @@ func EmitBackgroundWorker(o *probe.Observation, w BackgroundWorkerFacet, now tim
 	}
 	put(o, "active", w.Active)
 	put(o, "waiters", w.Backlog)
+	put(o, "rate", w.Rate)
 	if w.TypicalDuration > 0 {
 		metrics(o)["p95_s"] = w.TypicalDuration.Seconds()
 	}

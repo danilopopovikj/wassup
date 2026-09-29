@@ -256,3 +256,44 @@ func TestWorkersEmptyListConcludesNothing(t *testing.T) {
 		}
 	}
 }
+
+// Hatchet keeps the registration of a worker whose pod was replaced. A fleet
+// of one that restarted twice has one worker, online, not one of three; and
+// what it finished in the last hour is its rate.
+func TestWorkersGoneAreNotCountedAndFinishedTasksAreTheRate(t *testing.T) {
+	now := time.Now()
+	ts := func(d time.Duration) string { return now.Add(-d).Format(time.RFC3339Nano) }
+	var completed []map[string]any
+	for i := 0; i < 90; i++ {
+		completed = append(completed, map[string]any{"status": "COMPLETED", "startedAt": ts(time.Duration(i+1) * time.Minute), "finishedAt": ts(time.Duration(i) * 30 * time.Second)})
+	}
+	srv := serve(t, routes{
+		tenantPath("/worker"): rawJSON(`{"rows": [
+		  {"metadata": {"id": "now"}, "name": "shop-worker", "status": "ACTIVE", "lastHeartbeatAt": "` + ts(5*time.Second) + `", "slotConfig": {"default": {"available": 20, "limit": 20}}},
+		  {"metadata": {"id": "old-1"}, "name": "shop-worker", "status": "INACTIVE", "lastHeartbeatAt": "` + ts(47*time.Minute) + `"},
+		  {"metadata": {"id": "old-2"}, "name": "shop-worker", "status": "INACTIVE", "lastHeartbeatAt": "` + ts(14*time.Hour) + `"},
+		  {"metadata": {"id": "blip"}, "name": "shop-worker", "status": "INACTIVE", "lastHeartbeatAt": "` + ts(2*time.Minute) + `"}
+		]}`),
+		tenantPath("/task-stats"):    rawJSON(`{}`),
+		stablePath("/workflow-runs"): runsByStatus(map[string][]map[string]any{"COMPLETED": completed}),
+	})
+	p := &WorkersProbe{}
+	st, err := p.setup(specFor(t, srv, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := p.poll(context.Background(), st)
+	if o.Err != "" {
+		t.Fatal(o.Err)
+	}
+	// the one that went quiet two minutes ago may be down: it counts
+	if o.Metrics["workers_online"] != 1 || o.Metrics["workers_total"] != 2 {
+		t.Errorf("workers = %v of %v, want 1 of 2", o.Metrics["workers_online"], o.Metrics["workers_total"])
+	}
+	if gone, _ := o.Detail["gone_workers"].([]string); strings.Join(gone, ",") != "old-1,old-2" {
+		t.Errorf("gone_workers = %v", o.Detail["gone_workers"])
+	}
+	if r := o.Metrics["rate"]; r != 90.0/3600 {
+		t.Errorf("rate = %v, want 90 an hour", r)
+	}
+}

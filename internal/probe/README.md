@@ -147,7 +147,7 @@ are 0–100, rates are per second unless the key says otherwise.
 | Key | Meaning | Used by types |
 | --- | --- | --- |
 | `cpu_pct`, `mem_pct`, `disk_pct` | utilisation | node, workload, db, cache, storage, observability |
-| `rate` | requests, transactions, jobs or operations per second; for a job, the runs that finished over the counted window | edges, lb, ingress, db, queue, job |
+| `rate` | requests, transactions, jobs or operations per second; for a job, the runs that finished over the counted window; for a worker fleet, the tasks it finished over the last hour | edges, lb, ingress, db, queue, job, worker |
 | `error_rate`, `timeout_rate` | percent of requests | edges, ingress, external |
 | `p95_ms`, `latency_ms` | latency | edges, external, storage, syncengine |
 | `queued`, `waiters`, `pending` | units of work waiting at the destination | edges |

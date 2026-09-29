@@ -28,6 +28,11 @@ const (
 	maxLongTasks = 5
 	// runPage is the page size requested for run lists.
 	runPage = 200
+	// goneAfter is how long an inactive worker has not been heard from
+	// before it counts as gone rather than down: Hatchet keeps the
+	// registration of a worker whose pod was replaced, and a fleet of one
+	// that restarted twice would read one of three online.
+	goneAfter = 10 * time.Minute
 )
 
 var workersAccess = probe.Access{
@@ -149,11 +154,17 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 	if st.name != "" {
 		o.Detail["name"] = st.name
 	}
-	online := 0
+	online, counted := 0, 0
+	var gone []string
 	var poolUsed, poolMax float64
 	slotsKnown := false
 	list := make([]map[string]any, 0, len(workers))
 	for _, w := range workers {
+		if !w.active() && !w.LastHeartbeatAt.IsZero() && now.Sub(w.LastHeartbeatAt.Time) > goneAfter {
+			gone = append(gone, w.Metadata.ID)
+			continue
+		}
+		counted++
 		if w.active() {
 			online++
 		}
@@ -177,10 +188,18 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 		NotReadyDetail: "no active Hatchet workers",
 		Since:          func(key string, at time.Time) time.Time { return st.seen.mark(key, at) },
 	}
-	if len(workers) > 0 {
-		pool.Online, pool.Total = facet.NI(online), facet.NI(len(workers))
-	} else {
+	if len(gone) > 0 {
+		sort.Strings(gone)
+		o.Detail["gone_workers"] = gone
+		o.Detail["gone_note"] = fmt.Sprintf("%d inactive %s not heard from in over %s: a pod that was replaced, not a worker that is down", len(gone), plural(len(gone), "worker", "workers"), goneAfter)
+	}
+	if counted > 0 {
+		pool.Online, pool.Total = facet.NI(online), facet.NI(counted)
+	} else if len(workers) == 0 {
 		o.Detail["workers_note"] = noWorkersNote(st.name)
+	} else {
+		// every registration is old: none runs, and none was lost just now
+		pool.Online, pool.Total = facet.NI(0), facet.NI(0)
 	}
 	if slotsKnown {
 		pool.SlotsUsed, pool.SlotsMax = facet.N(poolUsed), facet.N(poolMax)
@@ -238,6 +257,11 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 			pool.TypicalDuration = time.Duration(percentile(durations, 95) * float64(time.Second))
 		}
 		o.Detail["completed_last_hour"] = len(done)
+		if len(done) < runPage {
+			pool.Rate = facet.N(float64(len(done)) / p95Window.Seconds())
+		} else {
+			o.Detail["rate_note"] = fmt.Sprintf("at least %d tasks finished in the last hour, as many as one page holds: no rate is said", runPage)
+		}
 	}
 
 	// The facet writes the canonical form: metrics, TaskRunning,
@@ -269,4 +293,12 @@ func noWorkersNote(name string) string {
 			"or the token may belong to another tenant than the workers'", name)
 	}
 	return "Hatchet lists no worker for this tenant; the token may belong to another tenant than the workers'"
+}
+
+// plural picks the word for n.
+func plural(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }
