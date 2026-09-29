@@ -29,109 +29,28 @@ again.
 
 Open your coding agent (Claude Code, or any agent that can run shell
 commands) in the repository that deploys your system and send it this
-prompt. It installs the binary, reads your infrastructure, drafts the
-diagram and checks it against live data.
+prompt. It installs the binary, then reads the setup guide that ships
+inside it (`wassup init --print-prompt`), so the steps always match the
+version it installed.
 
 ```text
 Install wassup and set it up for this repository.
 
-wassup is a terminal app that draws one live architecture diagram of a
-Kubernetes-hosted system and shows where it is stuck, since when, and what
-changed. It is configured by two files you will write in .wassup/:
-topology.yaml (the components and the edges between them) and bindings.yaml
-(the probes that attach each of them to live data).
-Source and docs: https://github.com/danilopopovikj/wassup
-
-1. Install the binary, unless `wassup version` already works. With Go 1.26
-   or newer, run
-   `go install github.com/danilopopovikj/wassup/cmd/wassup@latest`.
-   Without Go, take the archive for this OS and architecture from
-   https://github.com/danilopopovikj/wassup/releases, check it against
-   checksums.txt and put `wassup` in a directory of mine. Then run
-   `"$(go env GOPATH)/bin/wassup" version`: when the directory is not on my
-   PATH it prints the line to add to my shell profile. Show me that line;
-   the binary has to work in my terminal, not only in yours. Ask me before
-   installing Go or anything else system-wide.
-
-2. From the repository root, run `wassup skill install`. It copies the
-   wassup skill to .claude/skills/wassup/ (`--dir <path>` if your skills
-   live elsewhere). Read SKILL.md there in full and follow its Setup
-   workflow. The skill is the authority on the steps below; its reference/
-   folder has the catalog of component types, every probe with the access
-   it needs, the JSON Schemas and two complete examples.
-
-3. Ask me three questions before you read anything, and wait for my
-   answers:
-   - Which environment is this for? `wassup discover --no-cluster --json`
-     lists the ones the repository has.
-   - Which kubeconfig and which context? `wassup discover` names the
-     cluster it is about to read and lists the kubeconfigs it finds in the
-     repository. Do not take the default context of this machine for
-     granted.
-   - How far may the probes reach? Tier 0 needs the kubeconfig only
-     (Kubernetes, DNS, certificates, pings). Tier 1 needs tokens (Hatchet,
-     Electric, load balancers, object storage). Tier 2 connects to the
-     databases.
-   Put the kubeconfig and the context into .wassup/local.env. If I want a
-   read-only account first, run `wassup access` and show me what it
-   prints.
-
-4. Run `wassup discover --propose --write --environment <name>`. It reads
-   Terraform, Kubernetes manifests, Helm values, network policies, .env
-   files, application code and the live cluster, and drafts
-   .wassup/proposed/. Treat the draft as evidence, not as the answer:
-   review proposed/review.md line by line against its citations, the least
-   certain lines first, drop what you cannot back, and place or drop every
-   entry in the unresolved hosts list.
-
-5. Write .wassup/topology.yaml, with labels in words someone who has never
-   used Kubernetes would say, and write it for the picture: read
-   reference/picture.md of the skill first. The machines that run the
-   application stand in the middle with what runs on them inside, what
-   holds data at the bottom, the services of others in a group of their
-   own on the right. `runs_on` names every machine a component may run on.
-   No `lane:` on anything that is part of the system. Components in the
-   order of the flow, short labels, one edge per relation that carries
-   work. Then run `wassup validate` and `wassup export`, look at the
-   picture yourself, go through the list at the end of
-   reference/picture.md and change the topology until the diagram is easy
-   to follow. Never write layout.json to tidy it. Show me the rendered
-   diagram, not a description of it, and wait for my answer before you
-   write bindings.
-
-6. Write .wassup/bindings.yaml one tier at a time. After each tier run
-   `wassup validate` and `wassup probe --tier <n>`, fix every unbound
-   component or edge (`wassup probe <id>` tests one), tell me what is
-   bound, what is not and why, and stop until I say go on.
-
-Rules:
-- Read only. wassup never changes the system and neither should you: run
-  nothing that writes to the cluster or the infrastructure.
-- Bindings name the environment variables that hold credentials. The
-  values go into .wassup/local.env, which git ignores, and I put them
-  there: tell me the names, never read, print or copy a value.
-- A database or a service inside the cluster is reached with
-  `via: k8s.service/<namespace>/<service>:<port>`. Never ask me to run
-  `kubectl port-forward`.
-- Rates come from `wassup measure` (with `--signoz https://…` when no
-  binding names SigNoz yet): show me its report, add the components and
-  edges it saw that no box stands for once you checked them in the code or
-  the egress allowlist, then `wassup measure --write` and `wassup probe`.
-  A box that still reads "no rate measured" (◌) is up and uncounted, not a
-  fault: tell me the reason measure gave for each.
-- Never guess. A connection you cannot back with evidence is left out and
-  reported, not drawn.
-- Commit .wassup/ only after I approve the result (its state/ directory is
-  gitignored).
-
-When you are done, tell me: what is on the diagram, what stays unbound and
-why, and which variables .wassup/local.env has to hold before I run
-`wassup`.
+1. Install it, unless `wassup version` already works:
+   curl -fsSL https://raw.githubusercontent.com/danilopopovikj/wassup/main/install.sh | sh
+   (with Go 1.26 or newer, `go install github.com/danilopopovikj/wassup/cmd/wassup@latest`
+   works too). If `wassup version` says its directory is not on my PATH,
+   show me the line it prints. Ask me before installing anything system-wide.
+2. Run `wassup init --print-prompt`. It prints the setup guide. Follow it
+   step by step, and stop where it says to ask me.
 ```
 
-The agent asks first, stops to show you the diagram before it attaches live
-data, stops again after every tier, and never writes to your cluster. When
-it is done, run `wassup`.
+The guide has the agent read your Terraform, manifests, Helm values,
+network policies, code and the live cluster, draft the diagram with every
+connection cited, and check it against live data. The agent asks first,
+stops to show you the diagram before it attaches live data, stops again
+after every tier, and never writes to your cluster. When it is done, run
+`wassup`.
 
 ## By hand
 
@@ -148,9 +67,6 @@ wassup export                       # the picture, before any live data
 wassup validate                     # schemas and id cross-checks
 wassup probe --tier 0               # Kubernetes, DNS, certificates, pings
 wassup probe --tier 1               # adds what needs a token
-wassup measure --signoz https://signoz.example.com
-                                    # a counter for every edge: found, or why not
-wassup measure --write              # adds the bindings it found
 wassup probe                        # everything
 wassup probe db                     # one element, with every value it read
 wassup                              # the diagram

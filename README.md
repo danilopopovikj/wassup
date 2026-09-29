@@ -94,28 +94,52 @@ make install
 
 ## Set up your system
 
-```sh
-cd your-repo
-wassup
+### Install with AI
+
+Open [Claude Code](https://claude.com/claude-code), or any coding agent that
+can run shell commands, in the repository that deploys your system, and
+paste this:
+
+```text
+Install wassup and set it up for this repository.
+
+1. Install it, unless `wassup version` already works:
+   curl -fsSL https://raw.githubusercontent.com/danilopopovikj/wassup/main/install.sh | sh
+   (with Go 1.26 or newer, `go install github.com/danilopopovikj/wassup/cmd/wassup@latest`
+   works too). If `wassup version` says its directory is not on my PATH,
+   show me the line it prints. Ask me before installing anything system-wide.
+2. Run `wassup init --print-prompt`. It prints the setup guide. Follow it
+   step by step, and stop where it says to ask me.
 ```
 
-The first run prints a setup prompt and copies it to your clipboard. Paste it
-into [Claude Code](https://claude.com/claude-code). It asks you which
+The agent installs the binary, then reads the setup guide that ships inside
+it, so the steps always match the version you installed. It asks you which
 environment and which cluster, and how far it may reach. Then it reads your
 Terraform, manifests, Helm values, network policies, code and the live
 cluster, drafts the diagram with every connection cited to a file and line,
 and shows you the picture before it attaches live data, one tier at a time:
 first what needs only your kubeconfig, then what needs a token, then the
-databases. Then run `wassup` again.
+databases. It never writes to your cluster. When it is done, run `wassup`.
 
 What belongs to your machine, the cluster to read and the credentials, goes
 into `.wassup/local.env`, which git ignores. You export nothing, and a
 Postgres inside the cluster needs no `kubectl port-forward`: wassup opens
 its own.
 
-wassup itself needs no AI to run, and you can do every step by hand.
-[docs/setup.md](docs/setup.md) has both ways, and [examples/](examples) has
-two complete configurations.
+### Manual
+
+With wassup [installed](#install):
+
+```sh
+cd your-repo
+wassup
+```
+
+The first run prints the same setup guide and copies it to your clipboard.
+Paste it into your agent, or follow it yourself: wassup needs no AI to run,
+and every step is a command you can type. [docs/setup.md](docs/setup.md)
+walks through it by hand, and [examples/](examples) has two complete
+configurations.
 
 ## Reading the diagram
 
