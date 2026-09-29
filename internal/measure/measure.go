@@ -12,6 +12,7 @@ package measure
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
 	"sort"
@@ -290,26 +291,41 @@ func (p *planner) byHost(out Edge, dns model.Component) Edge {
 		out.Fix = routerFix
 		return out
 	}
-	if len(r.Routers) > 0 {
-		slug := strings.ReplaceAll(host, ".", "-")
-		var names []string
-		for name := range r.Routers {
-			if strings.Contains(name, "-"+slug) {
-				names = append(names, name)
-			}
-		}
-		if len(names) > 0 {
-			sort.Strings(names)
-			out.Status = Found
-			out.Binding = p.routerBinding(RouterRouterMetric, "router", `.*-`+regexp.QuoteMeta(slug)+`.*`)
-			out.Evidence = fmt.Sprintf("the router counts %d %s of %s: %s", len(names), plural(len(names), "route", "routes"), host, strings.Join(names, ", "))
-			return out
-		}
-	}
 	inv := p.src.Inventory
 	if inv == nil {
 		out.Status, out.Reason = Missing, "the cluster was not read, so what the host routes to is not known"
 		return out
+	}
+	if len(r.Routers) > 0 {
+		// Traefik names the route of an Ingress rule <namespace>-<ingress>-<host>
+		// and a path part after it: the host is told from a name under it
+		// (example.com from api.example.com) by the Ingress that comes before.
+		slug := strings.ReplaceAll(host, ".", "-")
+		var prefixes []string
+		for _, ing := range inv.Ingresses {
+			if contains(ing.Hosts, host) {
+				prefixes = append(prefixes, ing.Namespace+"-"+ing.Name+"-"+slug)
+			}
+		}
+		var names []string
+		for name := range r.Routers {
+			for _, pre := range prefixes {
+				if rest, ok := strings.CutPrefix(name, pre); ok && (strings.HasPrefix(rest, "-") || strings.HasPrefix(rest, "@")) {
+					names = append(names, name)
+				}
+			}
+		}
+		if len(names) > 0 {
+			sort.Strings(names)
+			var quoted []string
+			for _, pre := range uniq(prefixes) {
+				quoted = append(quoted, regexp.QuoteMeta(pre))
+			}
+			out.Status = Found
+			out.Binding = p.routerBinding(RouterRouterMetric, "router", "("+strings.Join(quoted, "|")+")[-@].*")
+			out.Evidence = fmt.Sprintf("the router counts %d %s of %s: %s", len(names), plural(len(names), "route", "routes"), host, strings.Join(names, ", "))
+			return out
+		}
 	}
 	mine, shared := map[string]bool{}, map[string][]string{}
 	for _, ing := range inv.Ingresses {
@@ -364,8 +380,11 @@ func (p *planner) byRouter(out Edge, e model.Edge, to model.Component) Edge {
 				for _, svc := range inv.Services {
 					if svc.Namespace == w.Namespace && selects(svc.Selector, w.Labels) {
 						for _, ing := range inv.Ingresses {
-							for _, name := range routerServices(ing) {
-								if strings.HasPrefix(name, svc.Namespace+"-"+svc.Name+"-") {
+							if ing.Namespace != svc.Namespace {
+								continue
+							}
+							for name, backend := range routerBackends(ing) {
+								if backend == svc.Name {
 									svcs = append(svcs, name)
 								}
 							}
@@ -581,7 +600,7 @@ func (p *planner) byPooler(out Edge, from model.Component) Edge {
 			dbs = append(dbs, c.Address)
 		}
 	}
-	if total == 0 {
+	if len(dbs) == 0 {
 		out.Status = Missing
 		out.Reason = "SigNoz holds no transaction count of the pods of the pooler " + name + ": CloudNativePG's pooler metrics are not scraped"
 		out.Fix = "scrape the pooler's metrics port (9127) into SigNoz, then run wassup measure again"
@@ -688,13 +707,46 @@ func (p *planner) addressesOf(c model.Component) []string {
 func addressExpr(hosts []string) string {
 	var parts []string
 	for _, h := range hosts {
-		if !strings.Contains(h, ".") {
-			parts = append(parts, regexp.QuoteMeta(h)+`(\..*)?`)
-			continue
-		}
-		parts = append(parts, `(.*\.)?`+regexp.QuoteMeta(Domain(h)))
+		parts = append(parts, scopeOf(h))
 	}
 	return "(" + strings.Join(uniq(parts), "|") + `)(:[0-9]+)?`
+}
+
+// scopeOf is the expression of the addresses one host stands for. A name
+// in the cluster is itself, alone or qualified. A registered public name
+// widens to its domain. An address, a name of a private zone, and a name
+// under a suffix that hosts many tenants (amazonaws.com holds S3 and SQS
+// alike) stand for themselves alone.
+func scopeOf(h string) string {
+	h = strings.ToLower(strings.TrimSuffix(h, "."))
+	switch {
+	case !strings.Contains(h, "."):
+		return regexp.QuoteMeta(h) + `(\..*)?`
+	case net.ParseIP(h) != nil, private(h), sharedSuffix[Domain(h)]:
+		return regexp.QuoteMeta(h)
+	}
+	return `(.*\.)?` + regexp.QuoteMeta(Domain(h))
+}
+
+// private reports whether a name belongs to a zone that is not the public
+// DNS: the cluster's, a local network's.
+func private(h string) bool {
+	for _, z := range []string{".local", ".internal", ".cluster.local", ".svc", ".lan", ".home.arpa"} {
+		if strings.HasSuffix(h, z) {
+			return true
+		}
+	}
+	return false
+}
+
+// sharedSuffix lists the domains under which many unrelated services live:
+// one of their names says nothing of another's.
+var sharedSuffix = map[string]bool{
+	"amazonaws.com": true, "cloudfront.net": true, "azurewebsites.net": true, "windows.net": true,
+	"herokuapp.com": true, "googleapis.com": true, "appspot.com": true, "run.app": true,
+	"vercel.app": true, "netlify.app": true, "github.io": true, "fly.dev": true, "onrender.com": true,
+	"pages.dev": true, "workers.dev": true, "r2.dev": true, "digitaloceanspaces.com": true,
+	"your-objectstorage.com": true,
 }
 
 // Domain is the name under which a host was registered: the last two
@@ -762,7 +814,7 @@ func (p *planner) externalFor(host string) string {
 			continue
 		}
 		for _, h := range p.addressesOf(c) {
-			if strings.Contains(h, ".") && Domain(h) == Domain(host) {
+			if strings.Contains(h, ".") && regexp.MustCompile("^(?:"+scopeOf(h)+")$").MatchString(strings.ToLower(host)) {
 				return c.ID
 			}
 		}
@@ -786,16 +838,31 @@ func matchesCall(s model.ProbeSpec, c signoz.Call) bool {
 // routerServices names the Services an Ingress routes to the way Traefik
 // names them: namespace, name and port, "@kubernetes".
 func routerServices(ing k8s.IngressInfo) []string {
-	var out []string
+	return keys(boolSet(routerBackends(ing)))
+}
+
+// routerBackends maps the name Traefik gives each Service an Ingress routes
+// to onto the Service's own name, so a Service is found by its name and not
+// by a prefix another Service shares ("api" and "api-admin").
+func routerBackends(ing k8s.IngressInfo) map[string]string {
+	out := map[string]string{}
 	for _, b := range ing.Backends {
 		target, _, _ := strings.Cut(b, " ")
 		name, port, ok := strings.Cut(target, ":")
 		if !ok || name == "" || port == "" {
 			continue
 		}
-		out = append(out, ing.Namespace+"-"+name+"-"+port+"@kubernetes")
+		out[ing.Namespace+"-"+name+"-"+port+"@kubernetes"] = name
 	}
-	return uniq(out)
+	return out
+}
+
+func boolSet(m map[string]string) map[string]bool {
+	out := make(map[string]bool, len(m))
+	for k := range m {
+		out[k] = true
+	}
+	return out
 }
 
 const (
