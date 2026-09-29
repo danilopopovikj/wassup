@@ -113,9 +113,17 @@ Where the numbers come from, per backend:
   ring; workers, concurrency, running tasks and runtimes from Flower's
   `/api/workers` and `/api/tasks`; the deployment's replicas from
   `k8s.workload` on the same box.
-- **Hatchet**: `queue-metrics` (queued, pending, running per queue and
-  workflow), `worker` (slots), `workflow-runs` (running and failed tasks),
-  `task-metrics` (counts), `workflows/crons` (schedules).
+- **Hatchet**: `task-stats` (queued per task and queue, running per task,
+  the oldest queued task); on servers without it `queue-metrics` (queued,
+  pending, running per queue and workflow), then `step-run-queue-metrics`
+  (queued per queue). A 404, or the 400 of an endpoint the server retired
+  (v0.83 answers `queue-metrics` with "TenantGetQueueMetrics is
+  deprecated"), moves on to the next. `worker` (slots; an empty list
+  concludes nothing, the token may be another tenant's), `workflow-runs`
+  (running and failed tasks, the latest runs), `task-metrics` (counts;
+  read at most once a minute beside the polls with a 45s timeout, over 24h,
+  then 6h, then 1h when counting takes longer, and the window that answered
+  is reported), `workflows/crons` (schedules).
 - **Postgres replication**: `pg_replication_slots` for slot activity
   (`active`, always), WAL retained (the distance from `restart_lsn` to the
   current LSN) and the consumer's position (`confirmed_flush_lsn` for a
@@ -139,7 +147,7 @@ are 0–100, rates are per second unless the key says otherwise.
 | Key | Meaning | Used by types |
 | --- | --- | --- |
 | `cpu_pct`, `mem_pct`, `disk_pct` | utilisation | node, workload, db, cache, storage, observability |
-| `rate` | requests, transactions, jobs or operations per second | edges, lb, ingress, db, queue |
+| `rate` | requests, transactions, jobs or operations per second; for a job, the runs that finished over the counted window | edges, lb, ingress, db, queue, job |
 | `error_rate`, `timeout_rate` | percent of requests | edges, ingress, external |
 | `p95_ms`, `latency_ms` | latency | edges, external, storage, syncengine |
 | `queued`, `waiters`, `pending` | units of work waiting at the destination | edges |

@@ -24,6 +24,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -46,6 +47,9 @@ const (
 	minInterval = 5 * time.Second
 	// defaultTimeout bounds one API call when the spec does not set timeout.
 	defaultTimeout = 10 * time.Second
+	// slowTimeout bounds one call to an endpoint that counts over a window
+	// (task-metrics): on a busy tenant it takes far longer than a list.
+	slowTimeout = 45 * time.Second
 	// defaultTick is used when the runtime did not inject spec["_tick"].
 	defaultTick = 5 * time.Second
 	// defaultPages caps how many pages a paginated list follows.
@@ -184,16 +188,19 @@ func configure(spec map[string]any, req requirements) (config, *client, error) {
 		}
 		cfg.tenant = tenant
 	}
+	slow := max(slowTimeout, cfg.timeout)
 	c := &client{
 		base:   cfg.base,
 		token:  token,
 		tenant: cfg.tenant,
 		http:   &http.Client{Timeout: cfg.timeout, Transport: probe.ReadOnly(nil)},
+		slow:   &http.Client{Timeout: slow, Transport: probe.ReadOnly(nil)},
 	}
 	if via != nil {
 		c.via = via
 		c.conns = via.Through(http.DefaultTransport.(*http.Transport).Clone())
 		c.http = &http.Client{Timeout: cfg.timeout, Transport: probe.ReadOnly(c.conns)}
+		c.slow = &http.Client{Timeout: slow, Transport: probe.ReadOnly(c.conns)}
 		c.round = roundFactor * cfg.timeout
 	}
 	return cfg, c, nil
@@ -245,6 +252,9 @@ type client struct {
 	token  string
 	tenant string
 	http   *http.Client
+	// slow is http with the longer timeout of the counting endpoints, on
+	// the same connections.
+	slow *http.Client
 
 	// via is set when the binding names a tunnel wassup opens itself; conns
 	// is then the transport of http, whose connections go through it, and
@@ -256,6 +266,21 @@ type client struct {
 
 	mu        sync.Mutex
 	workflows map[string]string // workflow name -> id
+
+	// pending counts the reads that run beside the rounds (the task counts
+	// of a busy workflow); close waits for them before it lets go of the
+	// connections.
+	pending sync.WaitGroup
+}
+
+// longRound returns the context of a read that runs beside the rounds and
+// may take up to d: like roundContext, but with its own bound. Without a
+// tunnel it ends with ctx.
+func (c *client) longRound(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {
+	if c.via == nil {
+		return context.WithCancel(ctx)
+	}
+	return probe.RoundContext(ctx, d)
 }
 
 // roundContext returns the context of one round. Through a tunnel a round
@@ -280,9 +305,10 @@ func (c *client) unanswered() {
 	c.via.Drop()
 }
 
-// close releases what the client holds when the probe stops: the
-// connections first, the tunnel after them.
+// close releases what the client holds when the probe stops: the reads
+// still running first, then the connections, the tunnel after them.
 func (c *client) close() {
+	c.pending.Wait()
 	if c.via == nil {
 		return
 	}
@@ -334,6 +360,27 @@ func rejected(err error) bool {
 // notFound reports whether err is a 404.
 func notFound(err error) bool { return statusOf(err) == http.StatusNotFound }
 
+// gone reports whether err says the endpoint is not on this server: a 404,
+// or the 400 a newer server answers to an endpoint it retired
+// ("TenantGetQueueMetrics is deprecated").
+func gone(err error) bool {
+	if notFound(err) {
+		return true
+	}
+	var ae *apiError
+	return errors.As(err, &ae) && ae.Status == http.StatusBadRequest && strings.Contains(strings.ToLower(ae.Body), "deprecated")
+}
+
+// timedOut reports whether err is a request that ran out of time, as
+// opposed to one the server refused or the probe's stop cut.
+func timedOut(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
 // healthFor classifies a read error: a rejected token fails the probe,
 // anything else (connection errors, 5xx, decode errors) degrades it.
 func healthFor(err error) (probe.HealthState, string) {
@@ -346,6 +393,11 @@ func healthFor(err error) (probe.HealthState, string) {
 // do performs one GET and returns the status, body and latency. Only
 // transport failures are errors here; callers decide about the status.
 func (c *client) do(ctx context.Context, path string, query url.Values) (int, []byte, time.Duration, error) {
+	return c.doWith(ctx, c.http, path, query)
+}
+
+// doWith is do on the given HTTP client (http or slow).
+func (c *client) doWith(ctx context.Context, hc *http.Client, path string, query url.Values) (int, []byte, time.Duration, error) {
 	u := c.base + path
 	if len(query) > 0 {
 		u += "?" + query.Encode()
@@ -360,7 +412,7 @@ func (c *client) do(ctx context.Context, path string, query url.Values) (int, []
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", userAgent)
 	start := time.Now()
-	resp, err := c.http.Do(req)
+	resp, err := hc.Do(req)
 	latency := time.Since(start)
 	if err != nil {
 		c.unanswered()
@@ -377,7 +429,12 @@ func (c *client) do(ctx context.Context, path string, query url.Values) (int, []
 
 // get performs one GET and decodes the JSON body into out.
 func (c *client) get(ctx context.Context, path string, query url.Values, out any) error {
-	status, body, _, err := c.do(ctx, path, query)
+	return c.getWith(ctx, c.http, path, query, out)
+}
+
+// getWith is get on the given HTTP client (http or slow).
+func (c *client) getWith(ctx context.Context, hc *http.Client, path string, query url.Values, out any) error {
+	status, body, _, err := c.doWith(ctx, hc, path, query)
 	if err != nil {
 		return err
 	}

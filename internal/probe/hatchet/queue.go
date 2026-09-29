@@ -18,11 +18,15 @@ const queuedLookback = 24 * time.Hour
 // topQueues caps the queues listed in detail.
 const topQueues = 10
 
+// topTasks caps the tasks listed in detail.
+const topTasks = 10
+
 var queueAccess = probe.Access{
-	Kind:   KindQueue,
-	Source: "the Hatchet REST API: tenant queue metrics, the worker list and the queued task runs",
-	Delivers: "depth (queued + pending), pending, running, active, growth_per_min, consumers (active workers), " +
-		"oldest_age_s (age of the oldest queued task); detail: queues, total, the queue or workflow filter, url, via",
+	Kind: KindQueue,
+	Source: "the Hatchet REST API: tenant task-stats (queue-metrics, then step-run-queue-metrics, on servers without it), " +
+		"the worker list and, without task-stats, the queued task runs",
+	Delivers: "depth (queued, + pending where the server reports it), pending, running, active, growth_per_min, consumers (active workers), " +
+		"oldest_age_s (age of the oldest queued task); detail: queues, tasks (task-stats), total, source, the queue or workflow filter, oldest_scope, url, via",
 	SpecFields:  withFields("queue", "workflow"),
 	Needs:       "a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token" + viaNeeds,
 	Implemented: true,
@@ -36,9 +40,10 @@ func init() {
 
 // QueueProbe is hatchet.queue, bound to a queue component. Spec: url
 // (required, unless via names a tunnel), token_env, tenant, interval,
-// timeout, via, and at most one of queue (a name in the queues map) or
-// workflow (a name in the workflow map); with neither, the tenant total is
-// reported.
+// timeout, via, and at most one of queue (a queue name) or workflow; with
+// neither, the tenant total is reported. With task-stats a workflow is the
+// tasks whose name is the workflow's or starts with it; with queue-metrics
+// it is a name in the workflow map.
 type QueueProbe struct {
 	h probe.Health
 	probe.Lifetime
@@ -143,19 +148,22 @@ func (p *QueueProbe) poll(ctx context.Context, st *queueState) probe.Observation
 			"url":    st.cfg.base,
 			"tenant": st.cfg.tenant,
 			"queues": topN(qm.Queues, topQueues),
+			"source": qm.source,
 			"legacy": qm.legacy,
 		},
 	}
 	st.cfg.noteVia(o.Detail)
+	if qm.Tasks != nil {
+		o.Detail["tasks"] = qm.perTask(topTasks)
+	}
 	q := facet.QueueFacet{Depth: facet.N(s.queued)}
-	if s.known {
-		q.Pending, q.Running = facet.N(s.pending), facet.N(s.running)
+	if s.hasPending {
+		q.Pending = facet.N(s.pending)
 	}
-	if t := qm.total(); t.known {
-		o.Detail["total"] = map[string]any{"queued": t.queued, "pending": t.pending, "running": t.running}
-	} else {
-		o.Detail["total"] = map[string]any{"queued": t.queued}
+	if s.hasRunning {
+		q.Running = facet.N(s.running)
 	}
+	o.Detail["total"] = totalDetail(qm.total())
 	if st.queue != "" {
 		o.Detail["queue"] = st.queue
 		o.Detail["listed"] = listed
@@ -187,7 +195,12 @@ func (p *QueueProbe) poll(ctx context.Context, st *queueState) probe.Observation
 		q.Consumers = facet.NI(consumers)
 	}
 
-	if age, scope, err := p.oldestQueued(ctx, st, now); err != nil {
+	if qm.Tasks != nil {
+		if oldest, scope := oldestInScope(qm, s, st); !oldest.IsZero() {
+			q.Oldest, q.HasOldest = max(now.Sub(oldest), 0), true
+			o.Detail["oldest_scope"] = scope
+		}
+	} else if age, scope, err := p.oldestQueued(ctx, st, now); err != nil {
 		problems = append(problems, "queued runs: "+err.Error())
 	} else if scope != "" {
 		q.Oldest, q.HasOldest = age, true
@@ -203,7 +216,42 @@ func (p *QueueProbe) poll(ctx context.Context, st *queueState) probe.Observation
 	return o
 }
 
-// oldestQueued returns the age of the oldest QUEUED task. With a workflow
+// totalDetail is the tenant total for the detail: what the source reported
+// and nothing it did not.
+func totalDetail(t shape) map[string]any {
+	d := map[string]any{"queued": t.queued}
+	if t.hasPending {
+		d["pending"] = t.pending
+	}
+	if t.hasRunning {
+		d["running"] = t.running
+	}
+	return d
+}
+
+// oldestInScope returns when the oldest queued task of the filter was
+// inserted, from task-stats, and the scope it covers. A queue whose tasks
+// also wait in other queues has no oldest time of its own; the tenant's
+// oldest is reported then, with scope "tenant", as the runs search does.
+// The time is zero when nothing is queued.
+func oldestInScope(qm queueMetrics, s shape, st *queueState) (time.Time, string) {
+	switch {
+	case st.queue != "":
+		if !s.oldest.IsZero() {
+			return s.oldest, "queue"
+		}
+		if s.queued > 0 {
+			return qm.total().oldest, "tenant"
+		}
+		return time.Time{}, ""
+	case st.workflow != "":
+		return s.oldest, "workflow"
+	}
+	return s.oldest, "tenant"
+}
+
+// oldestQueued returns the age of the oldest QUEUED task, from the runs
+// list, on servers without task-stats. With a workflow
 // filter the search is scoped to that workflow; otherwise it is tenant-wide
 // (Hatchet does not expose the queue of a task). scope is "" when there is
 // no queued task.
