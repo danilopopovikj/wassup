@@ -20,10 +20,14 @@ const (
 	settle = 150 * time.Millisecond
 )
 
-// row is one series of a metric: its labels and its rate per second.
+// row is one series of a metric: its labels, what it counted over the
+// window, its rate per second, and the end of the last step in which it
+// counted anything.
 type row struct {
 	labels map[string]string
+	count  float64
 	value  float64
+	last   time.Time
 }
 
 // table is one answer of SigNoz: the rate of every series of a metric over
@@ -172,30 +176,56 @@ type (
 		MetricName       string `json:"metricName"`
 		TimeAggregation  string `json:"timeAggregation"`
 		SpaceAggregation string `json:"spaceAggregation"`
-		ReduceTo         string `json:"reduceTo"`
 	}
 	groupKey struct {
 		Name string `json:"name"`
 	}
+	// queryAnswer is the answer to a time_series request: per group of
+	// labels, the count of every step that counted something.
 	queryAnswer struct {
 		Data struct {
 			Results []struct {
-				Columns []struct {
-					Name string `json:"name"`
-					Type string `json:"columnType"`
-				} `json:"columns"`
-				Data [][]any `json:"data"`
+				Aggregations []struct {
+					Series []struct {
+						Labels []struct {
+							Key struct {
+								Name string `json:"name"`
+							} `json:"key"`
+							Value any `json:"value"`
+						} `json:"labels"`
+						Values []struct {
+							Timestamp int64 `json:"timestamp"` // milliseconds, the start of the step
+							Value     any   `json:"value"`
+						} `json:"values"`
+					} `json:"series"`
+				} `json:"aggregations"`
 			} `json:"results"`
 		} `json:"data"`
 	}
 )
 
-// queryOf builds the query for the rate of a counter per second, averaged
-// over the window and summed per group of labels.
+// ingestLag is left out at the end of every window: SigNoz takes the
+// counts of a minute in when the minute is over, so the minute that runs
+// now holds only a part of what it will, and a rate over it would read low.
+const ingestLag = time.Minute
+
+// span is the time a query covers: the window, ending a minute ago on a
+// whole minute.
+func span(window time.Duration, now time.Time) (start, end time.Time) {
+	end = now.Truncate(time.Minute).Add(-ingestLag)
+	return end.Add(-window), end
+}
+
+// queryOf builds the query of the counts of a metric, step by step over the
+// window and summed per group of labels. The counts are asked for rather
+// than a rate: SigNoz averages a rate over the steps a series has a value
+// in, so a service that was called in three minutes of sixty would read at
+// twenty times what it was. The count over the window, divided by the
+// window, is the rate.
 func queryOf(metric string, by []string, window time.Duration, now time.Time) queryRequest {
 	spec := querySpec{
 		Name: "A", Signal: "metrics",
-		Aggregations: []aggregation{{MetricName: metric, TimeAggregation: "rate", SpaceAggregation: "sum", ReduceTo: "avg"}},
+		Aggregations: []aggregation{{MetricName: metric, TimeAggregation: "increase", SpaceAggregation: "sum"}},
 		GroupBy:      []groupKey{},
 		StepInterval: stepOf(window),
 		Limit:        rowLimit,
@@ -203,75 +233,85 @@ func queryOf(metric string, by []string, window time.Duration, now time.Time) qu
 	for _, l := range by {
 		spec.GroupBy = append(spec.GroupBy, groupKey{Name: l})
 	}
+	start, end := span(window, now)
 	return queryRequest{
-		SchemaVersion: "v1", Start: now.Add(-window).UnixMilli(), End: now.UnixMilli(), RequestType: "scalar",
+		SchemaVersion: "v1", Start: start.UnixMilli(), End: end.UnixMilli(), RequestType: "time_series",
 		CompositeQuery: compositeQuery{Queries: []builderQuery{{Type: "builder_query", Spec: spec}}},
 	}
 }
 
-// stepOf is the resolution a window is asked for in: a minute, which is how
-// often SigNoz takes a value, and for more than an hour sixty steps, so that
-// a day costs what an hour does.
+// stepOf is the resolution a window is asked for in, in seconds: a minute,
+// which is how often SigNoz takes a value, up to an hour; five minutes up
+// to a day; beyond, 168 steps, an hour a step for a week. The step is how
+// closely the time of the last count is known.
 func stepOf(window time.Duration) int {
-	if window <= time.Hour {
+	switch {
+	case window <= time.Hour:
 		return step
+	case window <= 24*time.Hour:
+		return 5 * step
 	}
-	return int(window.Seconds()) / 60
+	s := int(window.Seconds()) / 168
+	return s - s%step
 }
 
 // ask runs the query of a metric and reads the answer.
 func ask(ctx context.Context, sess *session, metric string, by []string, window time.Duration, now time.Time) (table, error) {
 	var a queryAnswer
-	if err := sess.query(ctx, queryOf(metric, by, window, now), &a); err != nil {
+	q := queryOf(metric, by, window, now)
+	if err := sess.query(ctx, q, &a); err != nil {
 		return table{}, err
 	}
-	return tableOf(a, by)
+	return tableOf(a, by, time.Duration(q.End-q.Start)*time.Millisecond, time.UnixMilli(q.End), stepOf(window))
 }
 
-// tableOf reads an answer: one row per group, the labels in the columns
-// that carry their names and the rate in the column of the aggregation,
-// which is the last one. A rate SigNoz did not know (null) is left out.
-func tableOf(a queryAnswer, by []string) (table, error) {
+// tableOf reads an answer: one row per series, its labels by name, its
+// count over the window, the rate that makes, and the end of the last step
+// that counted anything. A step SigNoz holds no value for counted nothing.
+func tableOf(a queryAnswer, by []string, window time.Duration, end time.Time, stepS int) (table, error) {
 	var t table
-	if len(a.Data.Results) == 0 {
+	if len(a.Data.Results) == 0 || len(a.Data.Results[0].Aggregations) == 0 {
 		return t, nil
 	}
-	res := a.Data.Results[0]
-	if len(res.Columns) == 0 {
-		return t, nil
-	}
-	value := len(res.Columns) - 1
-	for i, c := range res.Columns {
-		if c.Type == "aggregation" {
-			value = i
+	all := a.Data.Results[0].Aggregations[0].Series
+	for _, s := range all {
+		r := row{labels: make(map[string]string, len(by))}
+		have := map[string]bool{}
+		for _, l := range s.Labels {
+			r.labels[l.Key.Name] = text(l.Value)
+			have[l.Key.Name] = true
 		}
-	}
-	at := map[string]int{}
-	for i, c := range res.Columns {
-		if i != value {
-			at[c.Name] = i
-		}
-	}
-	for _, l := range by {
-		if _, ok := at[l]; !ok {
-			return t, fmt.Errorf("SigNoz %s: the answer has no column for the label %s", queryPath, l)
-		}
-	}
-	for _, cells := range res.Data {
-		if len(cells) != len(res.Columns) {
-			return t, fmt.Errorf("SigNoz %s: a row of %d values under %d columns", queryPath, len(cells), len(res.Columns))
-		}
-		v, ok := number(cells[value])
-		if !ok {
-			continue
-		}
-		r := row{labels: make(map[string]string, len(by)), value: v}
 		for _, l := range by {
-			r.labels[l] = text(cells[at[l]])
+			if !have[l] {
+				r.labels[l] = "" // a series without the label has none
+			}
+		}
+		known := false
+		for _, v := range s.Values {
+			n, ok := number(v.Value)
+			if !ok {
+				continue
+			}
+			known = true
+			r.count += n
+			if n > 0 {
+				if at := time.UnixMilli(v.Timestamp).Add(time.Duration(stepS) * time.Second); at.After(r.last) {
+					r.last = at
+				}
+			}
+		}
+		if !known {
+			continue // SigNoz knows nothing of it
+		}
+		if r.last.After(end) {
+			r.last = end
+		}
+		if window > 0 {
+			r.value = r.count / window.Seconds()
 		}
 		t.rows = append(t.rows, r)
 	}
-	t.full = len(res.Data) >= rowLimit
+	t.full = len(all) >= rowLimit
 	return t, nil
 }
 

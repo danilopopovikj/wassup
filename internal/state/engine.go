@@ -644,11 +644,14 @@ func measured(m map[string]float64, work []string) bool {
 var edgeWork = []string{"lag_bytes"}
 
 // finish decides between flowing and idle for a component that is in
-// order. Its own rate is what its label says, in the unit of its type; the
-// busiest edge that touches it stands in where it reports none.
+// order. Its own rate is what its label says, in the unit of its type; what
+// it is sent stands in where it reports none, and what it sends where
+// nothing is sent to it. An idle component says when it last saw work,
+// where a probe knows; one that nothing measures says so and looks it.
 func (c *ctx) finish(comp model.Component, es model.ElementState) model.ElementState {
 	rate, unit, flowing := c.incidentFlow(comp.ID)
-	if own, ok := es.Metrics["rate"]; ok && own > 0 {
+	if own, ok := es.Metrics["rate"]; ok && own > 0 && comp.Type != "scheduledjob" {
+		// a scheduled job's rate is how often it runs, not work going through
 		rate, unit, flowing = own, model.RateUnitOf(comp.Type), true
 	}
 	known := measured(es.Metrics, model.Catalog[comp.Type].Work) || c.incidentMeasured(comp.ID)
@@ -666,10 +669,65 @@ func (c *ctx) finish(comp model.Component, es model.ElementState) model.ElementS
 		}
 	case known:
 		es.State, es.Label = model.Idle, "idle"
+		if last, what := c.lastWork(comp, es); !last.IsZero() {
+			es.Label += ", " + what + " " + Ago(c.in.Now, last) + " ago"
+		}
+	case comp.Type == "node":
+		// a machine that is up and runs nothing anybody counts
+		es.State, es.Label, es.Marker = model.Idle, "up", model.MarkerUnmetered
 	default:
-		es.State, es.Label = model.Idle, NoRate
+		es.State, es.Label, es.Marker = model.Idle, NoRate, model.MarkerUnmetered
 	}
 	return es
+}
+
+// lastWork is when a component last saw work, and how to say it: when a
+// scheduled job last ran, else the latest call a probe of the component or
+// of an edge that ends at it saw.
+func (c *ctx) lastWork(comp model.Component, es model.ElementState) (time.Time, string) {
+	if comp.Type == "scheduledjob" {
+		var last time.Time
+		for _, k := range []string{"last_run", "last_success", "last_failure"} {
+			if t := timeOf(es.Detail[k]); t.After(last) {
+				last = t
+			}
+		}
+		return last, "ran"
+	}
+	last, what := timeOf(es.Detail["last_seen"]), "last call"
+	for _, e := range c.t.Edges {
+		if e.To != comp.ID {
+			continue
+		}
+		if t := timeOf(c.snap.Edges[e.ID()].Detail["last_seen"]); t.After(last) {
+			last, what = t, lastNoun(e.Kind)
+		}
+	}
+	return last, what
+}
+
+// lastNoun names the latest unit of work of an edge kind.
+func lastNoun(kind string) string {
+	switch kind {
+	case "sql":
+		return "last query"
+	case "queue":
+		return "last job"
+	}
+	return "last call"
+}
+
+// timeOf reads a time a probe left in a detail: a time, or RFC 3339 text.
+func timeOf(v any) time.Time {
+	switch t := v.(type) {
+	case time.Time:
+		return t
+	case string:
+		if at, err := time.Parse(time.RFC3339, t); err == nil {
+			return at
+		}
+	}
+	return time.Time{}
 }
 
 // incidentMeasured reports whether a rate was read for one of the edges
@@ -699,35 +757,51 @@ func (c *ctx) busyOn(nodeID string) (busy, known bool) {
 		}
 		// Unbound, without data, or in order with nothing counting: what goes
 		// through it is not known, and so not what goes through the machine.
-		if h.Marker == model.MarkerUnbound || h.Marker == model.MarkerNoData || c.snap.Components[h.ID].Label == NoRate {
+		if h.Marker == model.MarkerUnbound || h.Marker == model.MarkerNoData || c.snap.Components[h.ID].Marker == model.MarkerUnmetered {
 			known = false
 		}
 	}
 	return busy, known
 }
 
-// incidentFlow reports whether any incident edge flows, and the busiest rate.
+// incidentFlow reports whether any incident edge flows, and the rate a
+// component's label says: what is sent to it, added up in one unit, or,
+// when nothing sent to it is counted, the busiest of what it sends. An API
+// that serves 6 req/s and runs 50 queries/s serves 6 req/s; the queries are
+// the database's work, and its edge says them.
 func (c *ctx) incidentFlow(id string) (float64, string, bool) {
-	var best float64
-	var unit string
+	in := map[string]float64{}
+	var out float64
+	var outUnit string
 	flowing := false
 	for _, e := range c.t.Edges {
 		if e.From != id && e.To != id {
 			continue
 		}
 		es := c.snap.Edges[e.ID()]
-		if es.State == model.Flowing {
-			flowing = true
-			if e.Kind == "replication" || e.Kind == "tcp" {
-				continue // lag and health-check connections are not a rate worth a label
-			}
-			if es.Rate > best {
-				best = es.Rate
-				unit = es.Unit
-			}
+		if es.State != model.Flowing {
+			continue
+		}
+		flowing = true
+		if e.Kind == "replication" || e.Kind == "tcp" || es.Rate <= 0 {
+			continue // lag and health-check connections are not a rate worth a label
+		}
+		if e.To == id {
+			in[es.Unit] += es.Rate
+		} else if es.Rate > out {
+			out, outUnit = es.Rate, es.Unit
 		}
 	}
-	return best, unit, flowing
+	best, unit := 0.0, ""
+	for u, r := range in {
+		if r > best || (r == best && u < unit) {
+			best, unit = r, u
+		}
+	}
+	if best > 0 {
+		return best, unit, flowing
+	}
+	return out, outUnit, flowing
 }
 
 // evalEdge applies the edge rules.
@@ -745,6 +819,9 @@ func (c *ctx) evalEdge(e model.Edge) model.ElementState {
 			es.Detail[k] = v
 		}
 		es.LastData = j.LastAt
+		if u, ok := j.Detail["unit"].(string); ok && u != "" && e.Kind != "replication" {
+			es.Unit = u // a probe that knows what it counts says it: queries, not transactions
+		}
 	}
 	src := c.snap.Components[e.From]
 	dst := c.snap.Components[e.To]
@@ -885,10 +962,14 @@ func (c *ctx) evalEdge(e model.Edge) model.ElementState {
 	// Idle is what was measured at nothing. An edge nobody measures does not
 	// say idle: that would read as no traffic where the traffic is not known.
 	es.State = model.Idle
-	es.Label = NoRate
 	if own && measured(es.Metrics, edgeWork) {
 		es.Label = "idle"
+		if last := timeOf(es.Detail["last_seen"]); !last.IsZero() {
+			es.Label += ", " + lastNoun(e.Kind) + " " + Ago(c.in.Now, last) + " ago"
+		}
+		return es
 	}
+	es.Label, es.Marker = NoRate, model.MarkerUnmetered
 	return es
 }
 
@@ -1203,6 +1284,10 @@ func (c *ctx) hostedOn(nodeID string) []model.Hosted {
 		if all := c.placementOf(comp.ID); all != nil {
 			pl := all[nodeID]
 			h.Known, h.Pods, h.Ready, h.Restarts = true, pl.Pods, pl.Ready, pl.Restarts
+			h.CPUPct, h.MemPct = pl.CPU, pl.Mem
+			if r, ok := c.ratesByNode(comp.ID)[nodeID]; ok && pl.Pods > 0 {
+				h.Rate = &r
+			}
 			switch {
 			case pl.Pods == 0:
 				h.State = model.Idle
@@ -1234,7 +1319,47 @@ func (c *ctx) hostedOn(nodeID string) []model.Hosted {
 }
 
 // placement is what a provider reported about one component on one node.
-type placement struct{ Pods, Ready, Restarts int }
+type placement struct {
+	Pods, Ready, Restarts int
+	CPU, Mem              *float64 // nil when not read
+}
+
+// ratesByNode reads the "rate_by_node" detail a probe of the component
+// itself leaves (a router scraped pod by pod), keyed by the id of the node.
+// The rate of an edge is not the rate of the pods at its end: a router on
+// one machine sends to an API on every machine.
+func (c *ctx) ratesByNode(compID string) map[string]float64 {
+	j := c.joined(compID)
+	if j == nil {
+		return nil
+	}
+	out := map[string]float64{}
+	switch m := j.Detail["rate_by_node"].(type) {
+	case map[string]float64:
+		for node, r := range m {
+			out[c.nodeID(node)] = r
+		}
+	case map[string]any:
+		for node, v := range m {
+			if r, ok := v.(float64); ok {
+				out[c.nodeID(node)] = r
+			}
+		}
+	}
+	return out
+}
+
+// pctOf reads an optional percentage of a placement.
+func pctOf(v any) *float64 {
+	switch n := v.(type) {
+	case float64:
+		return &n
+	case int:
+		f := float64(n)
+		return &f
+	}
+	return nil
+}
 
 // nodeID returns the id on the diagram of the machine a provider knows by
 // name: the node whose probe reported that name, then the node of that id,
@@ -1273,7 +1398,8 @@ func (c *ctx) placementOf(compID string) map[string]placement {
 	}
 	out := map[string]placement{}
 	each := func(node string, fields map[string]any) {
-		out[c.nodeID(node)] = placement{Pods: toInt(fields["pods"]), Ready: toInt(fields["ready"]), Restarts: toInt(fields["restarts"])}
+		out[c.nodeID(node)] = placement{Pods: toInt(fields["pods"]), Ready: toInt(fields["ready"]), Restarts: toInt(fields["restarts"]),
+			CPU: pctOf(fields["cpu_pct"]), Mem: pctOf(fields["mem_pct"])}
 	}
 	switch m := raw.(type) {
 	case map[string]any:

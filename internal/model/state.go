@@ -25,6 +25,10 @@ const (
 	MarkerUnbound Marker = "unbound" // no probe returned data
 	MarkerStale   Marker = "stale"   // last data older than 3 ticks
 	MarkerNoData  Marker = "nodata"  // the rate source is down, so idle would be a lie
+	// MarkerUnmetered is an element that is bound and in order while nothing
+	// counts what goes through it: it is there and answers, and whether it is
+	// busy is not known. It must not look idle, and it must not look broken.
+	MarkerUnmetered Marker = "unmetered"
 )
 
 // Glyph is the one glyph per state.

@@ -33,11 +33,13 @@ type fakeSigNoz struct {
 	status   int      // the status of a query, when not 200
 }
 
-// series is one series SigNoz holds. A rate that is nil is one SigNoz does
-// not know.
+// series is one series SigNoz holds, counting at an even rate over every
+// step of a query. A rate that is nil is one SigNoz does not know. until,
+// when set, is when it stopped counting: no step after it holds a count.
 type series struct {
 	labels map[string]string
 	rate   any
+	until  time.Time
 }
 
 // of makes a series from pairs of label and value and a rate.
@@ -49,36 +51,64 @@ func of(rate any, pairs ...string) series {
 	return s
 }
 
-// grouped answers the way SigNoz does: one row per combination of the
-// labels asked for, the rates of its series added up.
-func grouped(all []series, by []string) [][]any {
-	rows := [][]any{}
-	at := map[string]int{}
+// grouped answers the way SigNoz does: one series per combination of the
+// labels asked for, the counts of its series added up step by step.
+func grouped(all []series, by []string, q queryRequest) []any {
+	stepMs := int64(q.CompositeQuery.Queries[0].Spec.StepInterval) * 1000
+	type group struct {
+		labels []any
+		values map[int64]float64
+	}
+	var order []string
+	groups := map[string]*group{}
 	for _, s := range all {
-		cells := make([]any, 0, len(by)+1)
+		rate, ok := s.rate.(float64)
+		if !ok {
+			continue // SigNoz knows no value of it
+		}
+		var labels []any
+		var key []string
 		for _, l := range by {
 			if v, ok := s.labels[l]; ok {
-				cells = append(cells, v)
-			} else {
-				cells = append(cells, nil)
+				labels = append(labels, map[string]any{"key": map[string]any{"name": l}, "value": v})
+				key = append(key, l+"="+v)
 			}
 		}
-		key := fmt.Sprint(cells...)
-		i, seen := at[key]
-		if !seen {
-			at[key] = len(rows)
-			rows = append(rows, append(cells, s.rate))
-			continue
+		k := strings.Join(key, ",")
+		g := groups[k]
+		if g == nil {
+			g = &group{labels: labels, values: map[int64]float64{}}
+			groups[k] = g
+			order = append(order, k)
 		}
-		if a, ok := rows[i][len(by)].(float64); ok {
-			if b, ok := s.rate.(float64); ok {
-				rows[i][len(by)] = a + b
+		for ts := q.Start - q.Start%stepMs; ts < q.End; ts += stepMs {
+			if !s.until.IsZero() && ts >= s.until.UnixMilli() {
+				break
 			}
-		} else {
-			rows[i][len(by)] = s.rate
+			from, to := max(ts, q.Start), min(ts+stepMs, q.End)
+			g.values[ts] += rate * float64(to-from) / 1000
 		}
 	}
-	return rows
+	out := []any{}
+	for _, k := range order {
+		g := groups[k]
+		var ts []int64
+		for t := range g.values {
+			ts = append(ts, t)
+		}
+		sort.Slice(ts, func(i, j int) bool { return ts[i] < ts[j] })
+		values := []any{}
+		for _, t := range ts {
+			if g.values[t] != 0 {
+				values = append(values, map[string]any{"timestamp": t, "value": g.values[t]})
+			}
+		}
+		if g.labels == nil {
+			g.labels = []any{}
+		}
+		out = append(out, map[string]any{"labels": g.labels, "values": values})
+	}
+	return out
 }
 
 func newFake(t *testing.T) *fakeSigNoz {
@@ -130,15 +160,14 @@ func (f *fakeSigNoz) serve(w http.ResponseWriter, r *http.Request) {
 			io.WriteString(w, `{"status":"error","error":{"code":"internal","message":"the database is busy"}}`)
 			return
 		}
-		cols := []map[string]string{}
 		var by []string
 		for _, g := range q.CompositeQuery.Queries[0].Spec.GroupBy {
 			by = append(by, g.Name)
-			cols = append(cols, map[string]string{"name": g.Name, "columnType": "group"})
 		}
-		cols = append(cols, map[string]string{"name": "__result_0", "columnType": "aggregation"})
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{
-			"type": "scalar", "data": map[string]any{"results": []any{map[string]any{"columns": cols, "data": grouped(f.held(q), by)}}},
+			"type": "time_series", "data": map[string]any{"results": []any{map[string]any{
+				"queryName": "A", "aggregations": []any{map[string]any{"index": 0, "series": grouped(f.held(q), by, q)}},
+			}}},
 		}})
 	default:
 		f.others = append(f.others, r.Method+" "+r.URL.Path)
@@ -280,7 +309,7 @@ func TestARateIsTheSumOfTheSeriesThatMatch(t *testing.T) {
 	}
 	q := f.queries[0]
 	spec := q.CompositeQuery.Queries[0].Spec
-	if q.RequestType != "scalar" || spec.Signal != "metrics" || spec.Aggregations[0].TimeAggregation != "rate" ||
+	if q.RequestType != "time_series" || spec.Signal != "metrics" || spec.Aggregations[0].TimeAggregation != "increase" ||
 		spec.Aggregations[0].SpaceAggregation != "sum" || spec.Aggregations[0].MetricName != "signoz_external_call_latency_count" {
 		t.Errorf("the query: %+v", q)
 	}
@@ -611,31 +640,100 @@ func TestValidate(t *testing.T) {
 	}
 }
 
-func TestTheAnswerIsReadByItsColumns(t *testing.T) {
+func TestTheAnswerIsReadSeriesBySeries(t *testing.T) {
 	var a queryAnswer
-	raw := `{"type":"scalar","data":{"results":[{"columns":[
-		{"name":"service.name","columnType":"group"},
-		{"name":"__result_0","columnType":"aggregation"},
-		{"name":"address","columnType":"group"}],
-		"data":[["api",1.25,"db:5432"],["api",null,"cache:6379"],["worker",2,null]]}]}}`
+	raw := `{"type":"time_series","data":{"results":[{"queryName":"A","aggregations":[{"index":0,"series":[
+		{"labels":[{"key":{"name":"service.name"},"value":"api"},{"key":{"name":"address"},"value":"db:5432"}],
+		 "values":[{"timestamp":1000000,"value":30},{"timestamp":1060000,"value":0},{"timestamp":1120000,"value":45}]},
+		{"labels":[{"key":{"name":"service.name"},"value":"api"},{"key":{"name":"address"},"value":"cache:6379"}],"values":[]},
+		{"labels":[{"key":{"name":"service.name"},"value":"worker"}],
+		 "values":[{"timestamp":1000000,"value":6}]}]}]}]}}`
 	if err := json.Unmarshal([]byte(raw), &a); err != nil {
 		t.Fatal(err)
 	}
-	tab, err := tableOf(a, []string{"address", "service.name"})
+	end := time.UnixMilli(1180000)
+	tab, err := tableOf(a, []string{"address", "service.name"}, 3*time.Minute, end, 60)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(tab.rows) != 2 {
-		t.Fatalf("rows = %+v, want the two with a rate", tab.rows)
+		t.Fatalf("rows = %+v, want the two SigNoz holds values of", tab.rows)
 	}
-	if r := tab.rows[0]; r.value != 1.25 || r.labels["service.name"] != "api" || r.labels["address"] != "db:5432" {
-		t.Errorf("row 0 = %+v", r)
+	r := tab.rows[0]
+	if r.count != 75 || r.value != 75.0/180 || r.labels["service.name"] != "api" || r.labels["address"] != "db:5432" {
+		t.Errorf("row 0 = %+v, want 75 over three minutes", r)
 	}
-	if r := tab.rows[1]; r.value != 2 || r.labels["address"] != "" {
+	if !r.last.Equal(end) {
+		t.Errorf("last = %v, want the end of the step that counted last, %v", r.last, end)
+	}
+	if r := tab.rows[1]; r.count != 6 || r.labels["address"] != "" || !r.last.Equal(time.UnixMilli(1060000)) {
 		t.Errorf("row 1 = %+v: a series without the label has an empty one", r)
 	}
-	if _, err := tableOf(a, []string{"http.status_code"}); err == nil || !strings.Contains(err.Error(), "no column for the label http.status_code") {
-		t.Errorf("err = %v", err)
+}
+
+// A service that is called in a few minutes of an hour is called at the
+// rate its calls make over the hour, not at the rate of the minutes it was
+// called in: SigNoz's own average of a rate reads the second, many times
+// over.
+func TestASparseSeriesReadsItsCountOverTheWindow(t *testing.T) {
+	var a queryAnswer
+	raw := `{"data":{"results":[{"aggregations":[{"series":[{"labels":[],
+		"values":[{"timestamp":0,"value":6},{"timestamp":600000,"value":6},{"timestamp":1200000,"value":6}]}]}]}]}}`
+	if err := json.Unmarshal([]byte(raw), &a); err != nil {
+		t.Fatal(err)
+	}
+	tab, err := tableOf(a, nil, time.Hour, time.UnixMilli(3600000), 60)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := tab.rows[0].value; got != 18.0/3600 {
+		t.Errorf("rate = %v, want 18 calls over an hour (0.005/s), not the 0.1/s of the minutes they came in", got)
+	}
+}
+
+// A quiet binding says when it was last counted, from the day, or from the
+// week when the day holds nothing of it.
+func TestAQuietBindingSaysWhenItWasLastCounted(t *testing.T) {
+	f := newFake(t)
+	f.rows = []series{of(4.0, "address", "db.bookstore:5432")}
+	stopped := time.Now().Add(-3 * time.Hour).Truncate(time.Hour)
+	f.day = []series{of(4.0, "address", "db.bookstore:5432"), {labels: map[string]string{"address": "api.mail.example:443"}, rate: 0.01, until: stopped}}
+	o := first(t, &edgeProbe{tables: newStore()}, f.spec("api->mail", map[string]any{"match": map[string]any{"address": `api\.mail\..*`}}))
+	if o.Err != "" {
+		t.Fatalf("err: %s", o.Err)
+	}
+	if o.Metrics["rate"] != 0 {
+		t.Errorf("rate = %v, want 0: counted within the day, not within the window", o.Metrics["rate"])
+	}
+	last, err := time.Parse(time.RFC3339, fmt.Sprint(o.Detail["last_seen"]))
+	if err != nil || !last.Equal(stopped) {
+		t.Errorf("last_seen = %v, want %v, the end of the last step that counted", o.Detail["last_seen"], stopped)
+	}
+	if o.Detail["count"] != 0.0 {
+		t.Errorf("count = %v, want 0 in the window", o.Detail["count"])
+	}
+}
+
+func TestTheUnitOfACountIsSaid(t *testing.T) {
+	for _, c := range []struct {
+		metric, unit, want string
+	}{
+		{"signoz_external_call_latency_count", "", "req/s"},
+		{"signoz_db_latency_count", "", "queries/s"},
+		{"signoz_calls_total", "spans", "spans/s"},
+		{"signoz_calls_total", "spans/s", "spans/s"},
+	} {
+		spec := map[string]any{"url": "https://signoz.bookstore.example", "metric": c.metric}
+		if c.unit != "" {
+			spec["unit"] = c.unit
+		}
+		cfg, err := edgeConfigOf(spec)
+		if err != nil || cfg.unit != c.want {
+			t.Errorf("%s unit %q: %q %v, want %q", c.metric, c.unit, cfg.unit, err, c.want)
+		}
+	}
+	if _, err := edgeConfigOf(map[string]any{"url": "https://s.example", "metric": "m", "unit": "Req per sec"}); err == nil {
+		t.Error("a unit that is not a word was taken")
 	}
 }
 
@@ -716,7 +814,8 @@ func TestWhatWasCountedTodayAndNotNowReadsARateOfZero(t *testing.T) {
 	if _, ok := o.Detail["match_note"]; ok {
 		t.Errorf("the match found its series: %v", o.Detail["match_note"])
 	}
-	// the last day is asked for in steps that keep the answer small
+	// the last day is asked for in steps of five minutes: close enough to
+	// say when it was last counted, few enough to keep the answer small
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.queries) != 2 {
@@ -726,7 +825,7 @@ func TestWhatWasCountedTodayAndNotNowReadsARateOfZero(t *testing.T) {
 	if got := time.Duration(day.End-day.Start) * time.Millisecond; got != 24*time.Hour {
 		t.Errorf("the second query covers %s", got)
 	}
-	if got := day.CompositeQuery.Queries[0].Spec.StepInterval; got != 1440 {
+	if got := day.CompositeQuery.Queries[0].Spec.StepInterval; got != 300 {
 		t.Errorf("step = %d s", got)
 	}
 }
