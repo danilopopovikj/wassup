@@ -247,3 +247,23 @@ func TestAPoolerIsCountedByTheTransactionsItPassesOn(t *testing.T) {
 		t.Errorf("match = %v: PgBouncer's own database is left out", m)
 	}
 }
+
+// Workloads that send their traces under one service name cannot be told
+// apart; the name comes from the variables their pods have.
+func TestComponentsThatShareAServiceNameAreNotBound(t *testing.T) {
+	cfg := bookstore()
+	cfg.Topology.Components = append(cfg.Topology.Components, model.Component{ID: "mailer", Type: "backgroundworker", Label: "Mailer"})
+	cfg.Topology.Edges = append(cfg.Topology.Edges, model.Edge{From: "mailer", To: "maps", Kind: "external"})
+	cfg.Bindings.Components["mailer"] = []model.ProbeSpec{{"probe": "k8s.workload", "namespace": "shop", "selector": "app=mailer"}}
+	src := sources()
+	src.Inventory.Workloads = append(src.Inventory.Workloads,
+		k8s.WorkloadInfo{Namespace: "shop", Name: "mailer", Labels: map[string]string{"app": "mailer"}, Env: []k8s.EnvRef{{Name: "OTEL_RESOURCE_ATTRIBUTES", Value: "service.name=jobs"}}})
+	src.Inventory.Workloads[2].Env = []k8s.EnvRef{{Name: "OTEL_SERVICE_NAME", Value: "jobs"}} // worker
+	src.Survey.Quiet = nil
+	src.Survey.Spans = append(src.Survey.Spans, signoz.Call{Service: "jobs", Count: 10, Last: last})
+	src.Survey.External = append(src.Survey.External, signoz.Call{Service: "jobs", Address: "maps.example", Count: 30, Last: last})
+	e := verdicts(Plan(cfg, src))["mailer->maps"]
+	if e.Status != Missing || !strings.Contains(e.Reason, "as jobs, as worker do") {
+		t.Errorf("mailer->maps = %+v", e)
+	}
+}

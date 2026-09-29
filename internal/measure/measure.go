@@ -177,10 +177,42 @@ func (p *planner) namesOf(c model.Component) []string {
 			for _, w := range inv.Workloads {
 				if w.Namespace == s.String("namespace") && selects(sel, w.Labels) {
 					add(w.Name)
+					add(tracedAs(w))
 				}
 			}
 		}
 	}
+	return out
+}
+
+// tracedAs is the service name a workload's pods give their traces, from
+// OTEL_SERVICE_NAME or the service.name of OTEL_RESOURCE_ATTRIBUTES, or "".
+func tracedAs(w k8s.WorkloadInfo) string {
+	var fromAttrs string
+	for _, e := range w.Env {
+		switch e.Name {
+		case "OTEL_SERVICE_NAME":
+			if e.Value != "" {
+				return e.Value
+			}
+		case "OTEL_RESOURCE_ATTRIBUTES":
+			fromAttrs = strings.TrimPrefix(e.Value, "service.name=")
+		}
+	}
+	return fromAttrs
+}
+
+// sharers lists the components besides one whose names include a service
+// name: several workloads that send traces under one name cannot be told
+// apart in SigNoz.
+func (p *planner) sharers(id, service string) []string {
+	var out []string
+	for other, names := range p.services {
+		if other != id && contains(names, service) {
+			out = append(out, other)
+		}
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -579,9 +611,13 @@ func (p *planner) caller(c model.Component) (string, string) {
 		}
 	}
 	for _, sp := range s.Spans {
-		if contains(names, sp.Service) {
-			return sp.Service, ""
+		if !contains(names, sp.Service) {
+			continue
 		}
+		if others := p.sharers(c.ID, sp.Service); len(others) > 0 {
+			return "", fmt.Sprintf("%s sends its traces as %s, as %s do: their calls cannot be told apart", c.DisplayLabel(), sp.Service, strings.Join(others, ", "))
+		}
+		return sp.Service, ""
 	}
 	return "", c.DisplayLabel() + " sends no traces to SigNoz (no service named " + strings.Join(names, ", ") + ")"
 }

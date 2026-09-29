@@ -145,3 +145,16 @@ func TestOddPasswords(t *testing.T) {
 		}
 	}
 }
+
+func TestTheServiceNameOfTracesIsKeptAndNothingElse(t *testing.T) {
+	for _, c := range []struct{ name, value, want string }{
+		{"OTEL_SERVICE_NAME", "backend", "backend"},
+		{"OTEL_RESOURCE_ATTRIBUTES", "deployment.environment=prod,service.name=celery-worker,team=secret-ops", "service.name=celery-worker"},
+		{"OTEL_RESOURCE_ATTRIBUTES", "deployment.environment=prod", ""},
+		{"OTEL_SERVICE_NAME", "has spaces and $", ""},
+	} {
+		if got := EnvValue(c.name, c.value); got != c.want {
+			t.Errorf("EnvValue(%s, %q) = %q, want %q", c.name, c.value, got, c.want)
+		}
+	}
+}
