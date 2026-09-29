@@ -307,7 +307,7 @@ scenario(1, "deploy-crash-loop", "Deploy crash loop", "site is giving errors", "
         # a job a minute is not no job
         "exports-queue->worker": {"state": "flowing", "label": "flowing, 1 jobs/min"},
         # nothing measures it, which is not the same as nothing going through
-        "docs-sync->worker": {"state": "idle", "label": "no rate measured"},
+        "docs-sync->worker": {"state": "idle", "label": "idle"},
     },
     "cause": "api",
     "story_contains": ["requests arrive, 1.1k/s", "load balancer passes them to 3 of 3 nodes",

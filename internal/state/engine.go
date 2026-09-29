@@ -292,6 +292,10 @@ func (c *ctx) callErrors(id string, es *model.ElementState) {
 	es.Metrics["error_rate"] = math.Round(1000*failed/calls) / 10
 }
 
+// callsWindow is the longest window, in seconds, over which counted calls
+// may outweigh what the pings see now.
+const callsWindow = 600
+
 // minFailedPings is the fewest failed attempts a share of failures is said
 // on: one slow answer of ten is one slow answer.
 const minFailedPings = 2
@@ -314,7 +318,11 @@ func (c *ctx) callsSucceed(id string, th model.ThresholdSet) bool {
 			continue
 		}
 		j := c.joined(e.ID())
-		if j == nil || !j.Bound {
+		if j == nil || !j.Bound || c.isStale(j, c.th(e.ID())) {
+			continue
+		}
+		// calls counted over an hour say little of the last minutes
+		if w := toInt(j.Detail["window_s"]); w == 0 || w > callsWindow {
 			continue
 		}
 		r, okR := j.Metrics["rate"]
@@ -433,6 +441,9 @@ func (c *ctx) failingReason(comp model.Component, j *bind.Joined, th model.Thres
 		// The share of failed pings says what wassup's machine sees. Where
 		// the system's own calls to the service were counted and succeed,
 		// they say more, and one ping in ten that timed out says little.
+		if v, ok := metric(j, "error_rate"); ok && v >= 100 {
+			return "every ping fails" // a service that is down answers no ping, whatever the calls said a while ago
+		}
 		if c.callsSucceed(comp.ID, th) {
 			break
 		}
@@ -763,7 +774,7 @@ func (c *ctx) finishJob(comp model.Component, es model.ElementState) model.Eleme
 	switch {
 	case !last.IsZero():
 		es.State, es.Label = model.Idle, "idle, ran "+Ago(c.in.Now, last)+" ago"
-	case measured(es.Metrics, []string{"succeeded", "failed"}) && countWindow(es) > 0:
+	case measured(es.Metrics, []string{"succeeded", "failed"}) && es.Metrics["succeeded"]+es.Metrics["failed"] == 0 && countWindow(es) > 0:
 		// counted over a known window and none there: say how long
 		es.State, es.Label = model.Idle, "idle, no run in "+Dur(countWindow(es))
 	case measured(es.Metrics, model.Catalog[comp.Type].Work):
@@ -1100,6 +1111,11 @@ func (c *ctx) derivedRate(e model.Edge, src, dst model.ElementState) (float64, b
 			return r, true
 		}
 		known = true
+	}
+	// a scheduled job's rate is how often it ran over a day, not what flows now
+	if srcComp, _ := c.t.Component(e.From); srcComp.Type == "scheduledjob" {
+		_, read := src.Metrics["active"]
+		return 0, known || read // between its runs a job sends nothing, and that is known
 	}
 	if r, ok := src.Metrics["rate"]; ok && len(c.t.Outgoing(e.From)) == 1 {
 		if r > 0 {

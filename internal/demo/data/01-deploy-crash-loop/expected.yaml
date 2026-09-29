@@ -31,7 +31,7 @@ edges:
     label: "flowing, 1 jobs/min"
   docs-sync->worker:
     state: idle
-    label: no rate measured
+    label: idle
 cause: api
 story_contains:
   - "requests arrive, 1.1k/s"

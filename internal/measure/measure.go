@@ -255,7 +255,7 @@ func (p *planner) edge(e model.Edge) Edge {
 		return out
 	case from.Type == "scheduledjob":
 		out.Status = Skipped
-		out.Reason = "it takes the rate of " + from.DisplayLabel() + "'s runs, which the job's own binding reads"
+		out.Reason = "the job's own binding says when it runs; between its runs the edge is idle"
 		return out
 	case from.Type == "dns":
 		return p.byHost(out, from)
