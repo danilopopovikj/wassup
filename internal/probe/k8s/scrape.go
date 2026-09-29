@@ -39,8 +39,8 @@ func init() {
 	probe.Register(probe.Access{
 		Kind:   kindScrape,
 		Source: "a counter on the Prometheus metrics page of every ready pod of a workload, read with a GET through the API server (pod informer, pods/proxy)",
-		Delivers: "rate (per second, the counter's growth over the window summed over the pods) and error_rate (the percentage of it that the series matching errors make up); " +
-			"detail: the pods read, the series matched, the window",
+		Delivers: "rate (per second, the counter's growth over the window summed over the pods; a counter that did not move is a rate of 0 only once it was watched for the whole window) and error_rate (the percentage of it that the series matching errors make up); " +
+			"detail: the pods read, the series matched, the window, span_s, rate_by_node and error_rate_by_node (per node, from the pods on it), label_values when match finds no series",
 		SpecFields: []string{"namespace (required)", "selector (required)", "port (required)", "metric (required)", "match", "errors", "path", "scheme", "interval", "window", "kubeconfig", "context"},
 		Needs: "list/watch on pods and get on pods/proxy in the namespace, which reaches every port of its pods with a GET; " +
 			"the pods serve their metrics without credentials on that port",
@@ -209,11 +209,21 @@ type reading struct {
 	total, errors float64
 }
 
+// history is what a pod's counter was seen to do: the readings within the
+// window, oldest first, and since when the counter has been watched without
+// starting over. The readings are trimmed to the window, the watch is not:
+// it tells a counter that stood still for the whole window from one that
+// was only looked at twice, a few seconds apart.
+type history struct {
+	from     time.Time
+	readings []reading
+}
+
 // scrapeProbe is k8s.scrape.
 type scrapeProbe struct {
 	base
-	// readings holds, per pod, the readings within the window, oldest first.
-	readings map[string][]reading
+	// pods holds, per pod, what its counter was seen to do.
+	pods map[string]*history
 	// store is the store of pages the probe reads from: the shared one,
 	// unless a test gave it its own.
 	store *pageStore
@@ -281,12 +291,13 @@ func (p *scrapeProbe) observe(ctx context.Context, c *Clients, pods corelisters.
 		return probe.Observation{}, fmt.Errorf("no ready pod in namespace %s matches %q", cfg.namespace, cfg.selector)
 	}
 	sort.Slice(ready, func(i, j int) bool { return ready[i].Name < ready[j].Name })
-	if p.readings == nil {
-		p.readings = map[string][]reading{}
+	if p.pods == nil {
+		p.pods = map[string]*history{}
 	}
 
 	var read, unread []string
 	var firstErr error
+	var seen []series // every series of the metric, for a match that finds none
 	matched := 0
 	live := map[string]bool{}
 	for _, pd := range ready {
@@ -294,7 +305,7 @@ func (p *scrapeProbe) observe(ctx context.Context, c *Clients, pods corelisters.
 		// The first two readings are a tick apart, so the rate is there on
 		// the second round; after that the page is read every interval.
 		fresh := cfg.interval
-		if len(p.readings[pd.Name]) < 2 && cfg.tick < fresh {
+		if h := p.pods[pd.Name]; (h == nil || len(h.readings) < 2) && cfg.tick < fresh {
 			fresh = cfg.tick / 2
 		}
 		body, at, err := p.store.read(ctx, c, cfg.pagePath(pd.Name), fresh)
@@ -304,6 +315,7 @@ func (p *scrapeProbe) observe(ctx context.Context, c *Clients, pods corelisters.
 				err = fmt.Errorf("the page has no metric %s", cfg.metric)
 			}
 			if err == nil {
+				seen = append(seen, all...)
 				r := reading{at: at}
 				for _, s := range all {
 					if !probe.Matches(s.labels, cfg.match) {
@@ -327,9 +339,9 @@ func (p *scrapeProbe) observe(ctx context.Context, c *Clients, pods corelisters.
 		}
 		read = append(read, pd.Name)
 	}
-	for pod := range p.readings {
+	for pod := range p.pods {
 		if !live[pod] {
-			delete(p.readings, pod)
+			delete(p.pods, pod)
 		}
 	}
 	if len(read) == 0 {
@@ -344,19 +356,73 @@ func (p *scrapeProbe) observe(ctx context.Context, c *Clients, pods corelisters.
 		o.Detail["unread_pods"] = unread
 		o.Detail["unread_note"] = "the rate leaves out the pods that could not be read: " + firstErr.Error()
 	}
-	if matched == 0 && len(cfg.match) > 0 {
-		o.Detail["match_note"] = "no series of " + cfg.metric + " matches, so no rate is reported: nothing was counted yet, or match names a value that does not exist"
-	}
 	var t facet.TrafficFacet
-	// What matches nothing was not counted by anybody: that is no rate of
-	// zero, it is no rate.
-	if rate, errs, ok := p.rate(read); ok && matched > 0 {
-		t.Rate = facet.N(round3(rate))
-		if len(cfg.errors) > 0 {
-			t.ErrorRate = facet.N(0)
-			if rate > 0 {
-				t.ErrorRate = facet.N(round1(100 * errs / rate))
+	if matched == 0 && len(cfg.match) > 0 {
+		// What matches nothing was not counted by anybody: that is no rate
+		// of zero, it is no rate.
+		o.Detail["match_note"] = "no series of " + cfg.metric + " matches, so no rate is reported: nothing was counted yet, or match names a value that does not exist; label_values lists the values the pages hold"
+		o.Detail["label_values"] = labelValues(seen, cfg.match)
+		facet.EmitTraffic(&o, t, now)
+		return o, nil
+	}
+
+	// The pods read once so far have no rate yet; the rate is the others'.
+	var rated, unrated []string
+	for _, pod := range read {
+		if _, ok := p.podRate(pod, cfg.window); ok {
+			rated = append(rated, pod)
+		} else {
+			unrated = append(unrated, pod)
+		}
+	}
+	if len(unrated) > 0 && len(rated) > 0 {
+		o.Detail["unrated_pods"] = unrated
+		o.Detail["unrated_note"] = "the rate leaves out the pods read only once so far, which have no rate yet"
+	}
+	if g, ok := p.growth(rated, cfg.window); ok {
+		o.Detail["span_s"] = int(g.span.Seconds())
+		if g.known() {
+			t.Rate = facet.N(round3(g.rate))
+			if len(cfg.errors) > 0 {
+				t.ErrorRate = facet.N(g.errorRate())
 			}
+		} else {
+			o.Detail["quiet_note"] = fmt.Sprintf("nothing was counted in the %d s the pages were watched, which says nothing about the %d s window: no rate is reported until the window is covered", int(g.span.Seconds()), int(cfg.window.Seconds()))
+		}
+	}
+
+	// Per machine, from the pods on it: a machine with a pod that was not
+	// read, or has no rate yet, is left out rather than reading low.
+	byNode := map[string][]string{}
+	for _, pd := range ready {
+		if n := pd.Spec.NodeName; n != "" {
+			byNode[n] = append(byNode[n], pd.Name)
+		}
+	}
+	isRated := map[string]bool{}
+	for _, pod := range rated {
+		isRated[pod] = true
+	}
+	rates, errRates := map[string]float64{}, map[string]float64{}
+	for node, pods := range byNode {
+		whole := true
+		for _, pod := range pods {
+			whole = whole && isRated[pod]
+		}
+		if !whole {
+			continue
+		}
+		if g, ok := p.growth(pods, cfg.window); ok && g.known() {
+			rates[node] = round3(g.rate)
+			if len(cfg.errors) > 0 {
+				errRates[node] = g.errorRate()
+			}
+		}
+	}
+	if len(rates) > 0 {
+		o.Detail["rate_by_node"] = rates
+		if len(cfg.errors) > 0 {
+			o.Detail["error_rate_by_node"] = errRates
 		}
 	}
 	// IngressFacet and TrafficFacet write a rate the same way.
@@ -368,43 +434,130 @@ func (p *scrapeProbe) observe(ctx context.Context, c *Clients, pods corelisters.
 // adds nothing, and a counter that went down was reset (the pod's process
 // started over), so what came before is no basis for a rate.
 func (p *scrapeProbe) keep(pod string, r reading, window time.Duration) {
-	h := p.readings[pod]
-	if n := len(h); n > 0 {
-		switch last := h[n-1]; {
+	h := p.pods[pod]
+	if h != nil && len(h.readings) > 0 {
+		switch last := h.readings[len(h.readings)-1]; {
 		case !r.at.After(last.at):
 			return
 		case r.total < last.total || r.errors < last.errors:
 			h = nil
 		}
 	}
-	h = append(h, r)
-	// the window, and always the two newest
-	for len(h) > 2 && r.at.Sub(h[0].at) > window {
-		h = h[1:]
+	if h == nil {
+		h = &history{from: r.at}
+		p.pods[pod] = h
 	}
-	p.readings[pod] = h
+	h.readings = append(h.readings, r)
+	// the window, and always the two newest
+	for len(h.readings) > 2 && r.at.Sub(h.readings[0].at) > window {
+		h.readings = h.readings[1:]
+	}
 }
 
-// rate sums, over the pods read, the growth of the counter per second
-// between the oldest and the newest reading. It is not known before one
+// podGrowth is what a pod's counter grew by between its oldest and newest
+// reading, and whether it has been watched for the whole window.
+type podGrowth struct {
+	total, errors float64
+	span          time.Duration
+	watched       bool
+}
+
+// podRate reads the growth of one pod's counter. It is not known before the
 // pod has two readings.
-func (p *scrapeProbe) rate(podNames []string) (rate, errs float64, ok bool) {
-	for _, pod := range podNames {
-		h := p.readings[pod]
-		if len(h) < 2 {
+func (p *scrapeProbe) podRate(pod string, window time.Duration) (podGrowth, bool) {
+	h := p.pods[pod]
+	if h == nil || len(h.readings) < 2 {
+		return podGrowth{}, false
+	}
+	first, last := h.readings[0], h.readings[len(h.readings)-1]
+	span := last.at.Sub(first.at)
+	if span <= 0 {
+		return podGrowth{}, false
+	}
+	return podGrowth{
+		total: last.total - first.total, errors: last.errors - first.errors,
+		span: span, watched: last.at.Sub(h.from) >= window,
+	}, true
+}
+
+// growth is the rate of a set of pods: the sum of each pod's growth per
+// second, over the shortest span among them.
+type growth struct {
+	rate, errs float64
+	span       time.Duration
+	// watched is true when every pod was watched for the whole window.
+	watched bool
+}
+
+// known says whether the rate may be reported. A count that grew is a
+// measurement over any span. A count that stood still is one only when it
+// was watched for the whole window: two readings a few seconds apart on a
+// service that answers a request every ten seconds find nothing between
+// them more often than not, and that is not a service at rest.
+func (g growth) known() bool { return g.rate > 0 || g.watched }
+
+// errorRate is the percentage of the rate the errors make up.
+func (g growth) errorRate() float64 {
+	if g.rate <= 0 {
+		return 0
+	}
+	return round1(100 * g.errs / g.rate)
+}
+
+// growth sums the rates of the pods named, each over its own readings. It is
+// not known when no pod has two readings.
+func (p *scrapeProbe) growth(pods []string, window time.Duration) (growth, bool) {
+	g := growth{watched: true}
+	ok := false
+	for _, pod := range pods {
+		pg, has := p.podRate(pod, window)
+		if !has {
 			continue
 		}
-		first, last := h[0], h[len(h)-1]
-		dt := last.at.Sub(first.at).Seconds()
-		if dt <= 0 {
-			continue
+		dt := pg.span.Seconds()
+		g.rate += pg.total / dt
+		g.errs += pg.errors / dt
+		g.watched = g.watched && pg.watched
+		if !ok || pg.span < g.span {
+			g.span = pg.span
 		}
-		rate += (last.total - first.total) / dt
-		errs += (last.errors - first.errors) / dt
 		ok = true
 	}
-	return rate, errs, ok
+	return g, ok
 }
+
+// labelValues lists, for each label a binding matches on, the values the
+// series of the metric hold, the busiest first (by what the counters have
+// counted since their pods started). It is what somebody who wrote a match
+// that finds nothing needs to see to write one that does.
+func labelValues(all []series, match map[string]*regexp.Regexp) map[string][]string {
+	out := map[string][]string{}
+	for label := range match {
+		count := map[string]float64{}
+		for _, s := range all {
+			count[s.labels[label]] += s.value
+		}
+		values := make([]string, 0, len(count))
+		for v := range count {
+			values = append(values, v)
+		}
+		sort.Slice(values, func(i, j int) bool {
+			if count[values[i]] != count[values[j]] {
+				return count[values[i]] > count[values[j]]
+			}
+			return values[i] < values[j]
+		})
+		if len(values) > seenValues {
+			values = values[:seenValues]
+		}
+		out[label] = values
+	}
+	return out
+}
+
+// seenValues is how many values of a label a binding that matched nothing
+// is shown.
+const seenValues = 20
 
 // round3 rounds to three decimals: a request a minute is 0.017 per second.
 func round3(v float64) float64 { return probe.Round(v, 3) }

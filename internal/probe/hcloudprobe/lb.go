@@ -14,20 +14,41 @@ import (
 	"github.com/danilopopovikj/wassup/internal/probe/facet"
 )
 
-// TargetHealth is the flattened health of one server target.
+// TargetHealth is the health of one machine behind the balancer, a server or
+// an IP, however many target entries name it.
 type TargetHealth struct {
 	ServerID int64
-	Healthy  bool
+	// IP is set for an ip target, which has no server id.
+	IP      string
+	Healthy bool
 	// Status is a short text per service: "6443 healthy, 80 unhealthy".
 	Status string
-	// Via names the label selector that matched the server, if any.
+	// Via names the label selectors that matched the server, if any.
 	Via string
 }
 
-// flattenTargets lists every server target, descending into label selector
-// targets. IP targets have no server id and are listed with ServerID 0.
-func flattenTargets(targets []LoadBalancerTarget, via string) []TargetHealth {
-	var out []TargetHealth
+// targetEntry is one server or IP as the API lists it: once per direct
+// target and once more under every label selector that matches it.
+type targetEntry struct {
+	serverID int64
+	ip       string
+	via      string
+	health   []LoadBalancerTargetHealthStatus
+}
+
+// key names the machine an entry points at, so two entries for the same
+// server count once.
+func (e targetEntry) key() string {
+	if e.serverID != 0 {
+		return "server:" + strconv.FormatInt(e.serverID, 10)
+	}
+	return "ip:" + e.ip
+}
+
+// flattenTargets lists every server and IP entry, descending into label
+// selector targets.
+func flattenTargets(targets []LoadBalancerTarget, via string) []targetEntry {
+	var out []targetEntry
 	for _, t := range targets {
 		switch t.Type {
 		case "label_selector":
@@ -37,13 +58,83 @@ func flattenTargets(targets []LoadBalancerTarget, via string) []TargetHealth {
 			}
 			out = append(out, flattenTargets(t.Targets, sel)...)
 		default:
-			th := TargetHealth{Via: via}
+			e := targetEntry{via: via, health: t.HealthStatus}
 			if t.Server != nil {
-				th.ServerID = t.Server.ID
+				e.serverID = t.Server.ID
 			}
-			th.Healthy, th.Status = healthOf(t.HealthStatus)
-			out = append(out, th)
+			if t.IP != nil {
+				e.ip = t.IP.IP
+			}
+			out = append(out, e)
 		}
+	}
+	return out
+}
+
+// mergeTargets folds the entries of each machine into one TargetHealth, in
+// the order the machines first appear. A server listed directly and matched
+// by a label selector is one machine the balancer sends traffic to, not two,
+// so it counts once. Its health is read per service: the balancer checks the
+// same machine on the same port for every entry, so the entries differ only
+// in when the check last ran or in an entry too new to have been checked. A
+// service is healthy when any entry says so, and the machine is healthy when
+// every service it has a status for is.
+func mergeTargets(entries []targetEntry) []TargetHealth {
+	var order []string
+	byKey := map[string]*targetEntry{}
+	for _, e := range entries {
+		m, ok := byKey[e.key()]
+		if !ok {
+			c := e
+			c.health = append([]LoadBalancerTargetHealthStatus(nil), e.health...)
+			byKey[e.key()] = &c
+			order = append(order, e.key())
+			continue
+		}
+		if e.via != "" && !strings.Contains(", "+m.via+", ", ", "+e.via+", ") {
+			if m.via != "" {
+				m.via += ", "
+			}
+			m.via += e.via
+		}
+		m.health = append(m.health, e.health...)
+	}
+	out := make([]TargetHealth, 0, len(order))
+	for _, k := range order {
+		m := byKey[k]
+		th := TargetHealth{ServerID: m.serverID, IP: m.ip, Via: m.via}
+		th.Healthy, th.Status = healthOf(bestPerPort(m.health))
+		out = append(out, th)
+	}
+	return out
+}
+
+// bestPerPort keeps one status per listen port: healthy when any entry says
+// healthy, then unhealthy, then whatever else was said (unknown).
+func bestPerPort(hs []LoadBalancerTargetHealthStatus) []LoadBalancerTargetHealthStatus {
+	rank := func(s string) int {
+		switch s {
+		case "healthy":
+			return 2
+		case "unhealthy":
+			return 1
+		}
+		return 0
+	}
+	best := map[int]LoadBalancerTargetHealthStatus{}
+	var ports []int
+	for _, h := range hs {
+		b, ok := best[h.ListenPort]
+		if !ok {
+			ports = append(ports, h.ListenPort)
+		}
+		if !ok || rank(h.Status) > rank(b.Status) {
+			best[h.ListenPort] = h
+		}
+	}
+	out := make([]LoadBalancerTargetHealthStatus, 0, len(ports))
+	for _, p := range ports {
+		out = append(out, best[p])
 	}
 	return out
 }
@@ -74,9 +165,10 @@ type Summary struct {
 	Targets []TargetHealth
 }
 
-// Summarize counts healthy server targets across every service.
+// Summarize counts the healthy machines behind the balancer, each server and
+// each IP once however many targets name it.
 func Summarize(lb LoadBalancer) Summary {
-	s := Summary{Targets: flattenTargets(lb.Targets, "")}
+	s := Summary{Targets: mergeTargets(flattenTargets(lb.Targets, ""))}
 	for _, t := range s.Targets {
 		s.Total++
 		if t.Healthy {
@@ -110,7 +202,7 @@ func LastValue(resp LoadBalancerMetricsResponse, series string) (float64, bool) 
 var lbAccess = probe.Access{
 	Kind:   "hcloud.lb",
 	Source: "the Hetzner Cloud API: load balancer targets' health and the load balancer metrics endpoint",
-	Delivers: "connections, rate (requests per second), targets_healthy, targets_total, TargetUnhealthy when no target is healthy; " +
+	Delivers: "connections, rate (requests per second), targets_healthy, targets_total (each server or IP once, however many targets name it), TargetUnhealthy when no target is healthy; " +
 		"per entry of targets an observation for the edge <lb>-><component> with healthy (1/0) and HealthCheckFailing; " +
 		"detail: services, targets, algorithm, location",
 	SpecFields:  []string{"name", "id", "token_env", "targets", "interval", "endpoint"},
@@ -301,8 +393,13 @@ func (p *LBProbe) poll(ctx context.Context, c *client, ref *resourceRef, targets
 	byServer := map[int64]TargetHealth{}
 	tlist := make([]map[string]any, 0, len(sum.Targets))
 	for _, t := range sum.Targets {
-		byServer[t.ServerID] = t
-		entry := map[string]any{"server_id": t.ServerID, "healthy": t.Healthy, "status": t.Status}
+		entry := map[string]any{"healthy": t.Healthy, "status": t.Status}
+		if t.ServerID != 0 {
+			byServer[t.ServerID] = t
+			entry["server_id"] = t.ServerID
+		} else {
+			entry["ip"] = t.IP
+		}
 		if t.Via != "" {
 			entry["label_selector"] = t.Via
 		}
