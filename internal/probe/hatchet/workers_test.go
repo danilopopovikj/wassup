@@ -3,6 +3,7 @@ package hatchet
 import (
 	"context"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -188,4 +189,70 @@ func countCond(conds []model.Condition, kind string) int {
 		}
 	}
 	return n
+}
+
+// The backlog comes from task-stats on a server that has it; the retired
+// queue-metrics is not asked.
+func TestWorkersBacklogFromTaskStats(t *testing.T) {
+	queueMetricsAsked := false
+	srv := serve(t, routes{
+		tenantPath("/worker"):     rawJSON(`{"rows": [{"metadata": {"id": "w1"}, "name": "w", "status": "ACTIVE", "maxRuns": 2, "availableRuns": 1}]}`),
+		tenantPath("/task-stats"): taskStats(time.Now()),
+		tenantPath("/queue-metrics"): func(w http.ResponseWriter, _ *http.Request) {
+			queueMetricsAsked = true
+			http.Error(w, `{"errors":[{"description":"TenantGetQueueMetrics is deprecated"}]}`, http.StatusBadRequest)
+		},
+		stablePath("/workflow-runs"): rawJSON(`{"rows": []}`),
+	})
+	p := &WorkersProbe{}
+	st, err := p.setup(specFor(t, srv, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := p.poll(context.Background(), st)
+	if o.Err != "" || o.Metrics["waiters"] != 10 || o.Detail["queue_source"] != sourceTaskStats {
+		t.Fatalf("metrics = %v, detail = %v", o.Metrics, o.Detail)
+	}
+	if queueMetricsAsked {
+		t.Error("queue-metrics was asked although task-stats answered")
+	}
+	if h := p.Health(); h.State != probe.HealthOK {
+		t.Fatalf("health = %+v", h)
+	}
+}
+
+// A worker list with nobody in it says nothing about the fleet: the token
+// may be another tenant's. It never reads as not ready.
+func TestWorkersEmptyListConcludesNothing(t *testing.T) {
+	srv := serve(t, routes{
+		tenantPath("/worker"):        rawJSON(`{"rows": []}`),
+		tenantPath("/task-stats"):    rawJSON(`{}`),
+		stablePath("/workflow-runs"): rawJSON(`{"rows": []}`),
+	})
+	for name, extra := range map[string]map[string]any{"no filter": nil, "a name filter": {"name": "api-worker"}} {
+		p := &WorkersProbe{}
+		st, err := p.setup(specFor(t, srv, extra))
+		if err != nil {
+			t.Fatal(err)
+		}
+		o := p.poll(context.Background(), st)
+		if o.Err != "" {
+			t.Fatal(o.Err)
+		}
+		if _, ok := model.HasCondition(o.Conditions, model.CondNotReady); ok {
+			t.Errorf("%s: NotReady from an empty worker list", name)
+		}
+		for _, k := range []string{"workers_online", "workers_total"} {
+			if _, ok := o.Metrics[k]; ok {
+				t.Errorf("%s: %s reported from an empty worker list", name, k)
+			}
+		}
+		note, _ := o.Detail["workers_note"].(string)
+		if !strings.Contains(note, "Hatchet lists no worker") || !strings.Contains(note, "another tenant than the workers'") {
+			t.Errorf("%s: workers_note = %q", name, note)
+		}
+		if o.Metrics["waiters"] != 0 || o.Metrics["active"] != 0 {
+			t.Errorf("%s: metrics = %v", name, o.Metrics)
+		}
+	}
 }

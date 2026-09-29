@@ -195,3 +195,168 @@ func TestQueueServerDown(t *testing.T) {
 		t.Fatalf("health = %+v", h)
 	}
 }
+
+// taskStats answers task-stats as a v0.83 server does: an object keyed by
+// task, with the queued part broken down by queue and the running part not.
+func taskStats(now time.Time) http.HandlerFunc {
+	ts := func(d time.Duration) string { return now.Add(-d).Format(time.RFC3339Nano) }
+	return rawJSON(`{
+  "send-email": {"queued": {"total": 5, "oldest": "` + ts(2*time.Minute) + `", "queues": {"emails": 5}},
+                 "running": {"total": 2, "oldest": "` + ts(time.Minute) + `"}},
+  "send-email-digest": {"queued": {"total": 1, "oldest": "` + ts(30*time.Second) + `", "queues": {"emails": 1}}},
+  "reports:build": {"queued": {"total": 4, "oldest": "` + ts(10*time.Minute) + `", "queues": {"default": 3, "reports": 1}},
+                    "running": {"total": 1, "concurrency": [{"expression": "input.shop", "type": "GROUP_ROUND_ROBIN", "keys": {"a": 1}}]}},
+  "idle": {"running": {"total": 3}}
+}`)
+}
+
+func TestQueueTaskStats(t *testing.T) {
+	now := time.Now()
+	runsRead := false
+	srv := serve(t, routes{
+		tenantPath("/task-stats"): taskStats(now),
+		tenantPath("/worker"):     rawJSON(workerRows),
+		stablePath("/workflow-runs"): func(w http.ResponseWriter, r *http.Request) {
+			runsRead = true
+			queuedRuns(now)(w, r)
+		},
+	})
+	p := &QueueProbe{}
+	st, err := p.setup(specFor(t, srv, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := p.poll(context.Background(), st)
+	if o.Err != "" {
+		t.Fatal(o.Err)
+	}
+	want := map[string]float64{"depth": 10, "running": 6, "active": 6, "consumers": 2}
+	for k, v := range want {
+		if o.Metrics[k] != v {
+			t.Errorf("%s = %v, want %v", k, o.Metrics[k], v)
+		}
+	}
+	if _, ok := o.Metrics["pending"]; ok {
+		t.Error("pending fabricated: task-stats does not report it")
+	}
+	if age := o.Metrics["oldest_age_s"]; age < 599 || age > 605 {
+		t.Errorf("oldest_age_s = %v", age)
+	}
+	if runsRead {
+		t.Error("the queued runs were searched although task-stats has the oldest time")
+	}
+	if o.Detail["source"] != sourceTaskStats || o.Detail["legacy"] != false || o.Detail["oldest_scope"] != "tenant" {
+		t.Errorf("detail = %v", o.Detail)
+	}
+	queues, _ := o.Detail["queues"].([]map[string]any)
+	if len(queues) != 3 || queues[0]["name"] != "emails" || queues[0]["queued"] != 6.0 {
+		t.Errorf("queues = %v", queues)
+	}
+	tasks, _ := o.Detail["tasks"].([]map[string]any)
+	if len(tasks) != 4 || tasks[0]["name"] != "send-email" || tasks[0]["queued"] != 5.0 || tasks[0]["running"] != 2.0 {
+		t.Errorf("tasks = %v", tasks)
+	}
+	total, _ := o.Detail["total"].(map[string]any)
+	if total["queued"] != 10.0 || total["running"] != 6.0 {
+		t.Errorf("total = %v", total)
+	}
+	if _, ok := total["pending"]; ok {
+		t.Errorf("total fabricates pending: %v", total)
+	}
+	if h := p.Health(); h.State != probe.HealthOK {
+		t.Fatalf("health = %+v", h)
+	}
+}
+
+func TestQueueTaskStatsFilters(t *testing.T) {
+	now := time.Now()
+	srv := serve(t, routes{
+		tenantPath("/task-stats"): taskStats(now),
+		tenantPath("/worker"):     rawJSON(workerRows),
+	})
+	for name, tc := range map[string]struct {
+		spec    map[string]any
+		depth   float64
+		running float64 // -1: not reported
+		oldest  float64
+		scope   string
+		listed  bool
+	}{
+		"a queue its tasks alone wait in": {map[string]any{"queue": "emails"}, 6, -1, 120, "queue", true},
+		"a queue shared with another":     {map[string]any{"queue": "default"}, 3, -1, 600, "tenant", true},
+		"an unknown queue":                {map[string]any{"queue": "nothing"}, 0, -1, -1, "", false},
+		"a workflow and its tasks":        {map[string]any{"workflow": "send-email"}, 6, 2, 120, "workflow", true},
+		"a workflow with nothing queued":  {map[string]any{"workflow": "idle"}, 0, 3, -1, "", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			p := &QueueProbe{}
+			st, err := p.setup(specFor(t, srv, tc.spec))
+			if err != nil {
+				t.Fatal(err)
+			}
+			o := p.poll(context.Background(), st)
+			if o.Err != "" {
+				t.Fatal(o.Err)
+			}
+			if o.Metrics["depth"] != tc.depth {
+				t.Errorf("depth = %v, want %v", o.Metrics["depth"], tc.depth)
+			}
+			if r, ok := o.Metrics["running"]; (tc.running < 0) == ok || (ok && r != tc.running) {
+				t.Errorf("running = %v (%v), want %v", r, ok, tc.running)
+			}
+			if age, ok := o.Metrics["oldest_age_s"]; (tc.oldest < 0) == ok || (ok && (age < tc.oldest-1 || age > tc.oldest+5)) {
+				t.Errorf("oldest_age_s = %v (%v), want %v", age, ok, tc.oldest)
+			}
+			if tc.scope != "" && o.Detail["oldest_scope"] != tc.scope {
+				t.Errorf("oldest_scope = %v, want %s", o.Detail["oldest_scope"], tc.scope)
+			}
+			if o.Detail["listed"] != tc.listed {
+				t.Errorf("listed = %v", o.Detail["listed"])
+			}
+		})
+	}
+}
+
+// A v0.83 server answers queue-metrics with a hard-coded 400; with
+// task-stats missing too, the probe moves on to step-run-queue-metrics.
+func TestQueueDeprecatedQueueMetricsFallsBack(t *testing.T) {
+	deprecated := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"errors":[{"description":"TenantGetQueueMetrics is deprecated"}]}`))
+	}
+	srv := serve(t, routes{
+		tenantPath("/queue-metrics"):          deprecated,
+		tenantPath("/step-run-queue-metrics"): rawJSON(`{"queues": {"default": 5, "emails": 2}}`),
+		tenantPath("/worker"):                 rawJSON(workerRows),
+		stablePath("/workflow-runs"):          rawJSON(`{"rows": []}`),
+	})
+	p := &QueueProbe{}
+	st, err := p.setup(specFor(t, srv, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := p.poll(context.Background(), st)
+	if o.Err != "" {
+		t.Fatal(o.Err)
+	}
+	if o.Metrics["depth"] != 7 || o.Detail["source"] != sourceStepRun || o.Detail["legacy"] != true {
+		t.Fatalf("metrics = %v, detail = %v", o.Metrics, o.Detail)
+	}
+	if h := p.Health(); h.State != probe.HealthOK {
+		t.Fatalf("health = %+v", h)
+	}
+
+	// Another 400 is an answer about the request, not a missing endpoint.
+	srv = serve(t, routes{
+		tenantPath("/task-stats"): func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, `{"errors":[{"description":"invalid tenant"}]}`, http.StatusBadRequest)
+		},
+		tenantPath("/step-run-queue-metrics"): rawJSON(`{"queues": {"default": 5}}`),
+	})
+	p = &QueueProbe{}
+	st, _ = p.setup(specFor(t, srv, nil))
+	if o := p.poll(context.Background(), st); !strings.Contains(o.Err, "invalid tenant") {
+		t.Fatalf("err = %q", o.Err)
+	}
+}

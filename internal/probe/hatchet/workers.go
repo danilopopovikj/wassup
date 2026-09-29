@@ -31,11 +31,13 @@ const (
 )
 
 var workersAccess = probe.Access{
-	Kind:   KindWorkers,
-	Source: "the Hatchet REST API: the worker list, running and completed task runs and the tenant queue metrics",
-	Delivers: "workers_online, workers_total, pool_used, pool_max (slots), active (running tasks), waiters (queued + pending tasks), " +
-		"running_s (longest running task), p95_s (task duration over the last hour); TaskRunning past long_task, PoolExhausted, NotReady; " +
-		"detail: workers, long tasks, url, via",
+	Kind: KindWorkers,
+	Source: "the Hatchet REST API: the worker list, running and completed task runs and the tenant task-stats " +
+		"(queue-metrics, then step-run-queue-metrics, on servers without it)",
+	Delivers: "workers_online, workers_total, pool_used, pool_max (slots), active (running tasks), waiters (queued tasks, + pending where the server reports it), " +
+		"running_s (longest running task), p95_s (task duration over the last hour); TaskRunning past long_task, PoolExhausted, " +
+		"NotReady when listed workers are all inactive (an empty list concludes nothing: workers_note says so); " +
+		"detail: workers, long tasks, queue_source, workers_note, url, via",
 	SpecFields:  withFields("name", "long_task"),
 	Needs:       "a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token" + viaNeeds,
 	Implemented: true,
@@ -51,6 +53,12 @@ func init() {
 // workers. Spec: url (required, unless via names a tunnel), token_env,
 // tenant, interval, timeout, via, name (optional prefix filter on the worker
 // name), long_task (default 10m).
+//
+// A worker list with no worker in it says nothing about the fleet: the
+// token may belong to another tenant than the workers', or the name filter
+// may match none of them, while the pods run jobs. The fleet is then left
+// without workers_online and workers_total, so it is never read as not
+// ready; only listed workers that are all inactive are.
 type WorkersProbe struct {
 	h probe.Health
 	probe.Lifetime
@@ -165,9 +173,14 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 	}
 	o.Detail["workers"] = list
 	pool := facet.BackgroundWorkerFacet{
-		Online: facet.NI(online), Total: facet.NI(len(workers)), LongTask: st.longTask,
+		LongTask:       st.longTask,
 		NotReadyDetail: "no active Hatchet workers",
 		Since:          func(key string, at time.Time) time.Time { return st.seen.mark(key, at) },
+	}
+	if len(workers) > 0 {
+		pool.Online, pool.Total = facet.NI(online), facet.NI(len(workers))
+	} else {
+		o.Detail["workers_note"] = noWorkersNote(st.name)
 	}
 	if slotsKnown {
 		pool.SlotsUsed, pool.SlotsMax = facet.N(poolUsed), facet.N(poolMax)
@@ -203,6 +216,7 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 		problems = append(problems, "queue metrics: "+err.Error())
 	} else {
 		pool.Backlog = facet.N(qm.total().depth())
+		o.Detail["queue_source"] = qm.source
 	}
 
 	done, err := st.c.runs(ctx, runQuery{
@@ -246,4 +260,13 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 		p.h.Set(probe.HealthOK, "")
 	}
 	return o
+}
+
+// noWorkersNote is the detail of a worker list with no worker in it.
+func noWorkersNote(name string) string {
+	if name != "" {
+		return fmt.Sprintf("Hatchet lists no worker whose name starts with %q for this tenant; check name, "+
+			"or the token may belong to another tenant than the workers'", name)
+	}
+	return "Hatchet lists no worker for this tenant; the token may belong to another tenant than the workers'"
 }

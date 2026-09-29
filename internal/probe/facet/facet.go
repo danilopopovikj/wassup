@@ -336,9 +336,13 @@ func EmitQueue(o *probe.Observation, q QueueFacet, now time.Time) {
 // workflow run on a schedule.
 type ScheduledJobFacet struct {
 	Active, Succeeded, Failed, Queued Num
-	LastFailure                       *Failure
-	Running                           *Task
-	Schedule                          string // plain words: "every 15 min", "cron 0 * * * *"
+	// Rate is the runs that finished (succeeded, failed or cancelled) per
+	// second over the window the counts were read for; unset when they
+	// were not read.
+	Rate        Num
+	LastFailure *Failure
+	Running     *Task
+	Schedule    string // plain words: "every 15 min", "cron 0 * * * *"
 }
 
 // EmitScheduledJob writes the job into an observation.
@@ -346,6 +350,7 @@ func EmitScheduledJob(o *probe.Observation, j ScheduledJobFacet, now time.Time) 
 	put(o, "active", j.Active)
 	put(o, "succeeded", j.Succeeded)
 	put(o, "failed", j.Failed)
+	put(o, "rate", j.Rate)
 	if j.Queued.Set && j.Queued.V > 0 {
 		put(o, "queued", j.Queued)
 	}
