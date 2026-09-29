@@ -21,6 +21,10 @@ const (
 	// pingWindow is the number of attempts error_rate and timeout_rate are
 	// computed over.
 	pingWindow = 10
+	// pingMinWindow is the fewest attempts a rate is said over: one slow
+	// answer of two is no 50 percent of timeouts, it is one slow answer. A
+	// service that is down is told sooner by the streak.
+	pingMinWindow = 5
 	// pingStreak is the number of consecutive failed attempts that raise the
 	// Timeout condition.
 	pingStreak = 3
@@ -34,7 +38,7 @@ func init() {
 	probe.Register(probe.Access{
 		Kind:        KindPing,
 		Source:      "an HTTP endpoint",
-		Delivers:    "latency_ms, error_rate and timeout_rate over the last 10 attempts, the last status, Timeout after 3 consecutive failures",
+		Delivers:    "latency_ms, error_rate and timeout_rate over the last 10 attempts (from the fifth on), the last status, Timeout after 3 consecutive failures",
 		SpecFields:  []string{"url", "method", "timeout", "interval", "expect_status"},
 		Needs:       "outbound HTTPS to the endpoint; no credentials",
 		Implemented: true,
@@ -249,10 +253,13 @@ func (p *Ping) observe(target, rawURL string, a attempt) probe.Observation {
 		o.Detail["last_error"] = a.err
 	}
 	e := facet.ExternalFacet{
-		LatencyMS:   facet.N(float64(a.latency) / float64(time.Millisecond)),
-		ErrorRate:   facet.N(100 * float64(errs) / n),
-		TimeoutRate: facet.N(100 * float64(timeouts) / n),
-		Status:      facet.NI(a.status),
+		LatencyMS: facet.N(float64(a.latency) / float64(time.Millisecond)),
+		Status:    facet.NI(a.status),
+	}
+	if len(p.window) >= pingMinWindow {
+		e.ErrorRate, e.TimeoutRate = facet.N(100*float64(errs)/n), facet.N(100*float64(timeouts)/n)
+	} else {
+		o.Detail["rate_note"] = fmt.Sprintf("%d of %d attempts made: the share of errors and timeouts is said from %d on", len(p.window), pingWindow, pingMinWindow)
 	}
 	if len(p.streak) >= pingStreak {
 		e.TimingOut, e.TimingOutSince, e.Detail = true, p.streak[0].at, a.err

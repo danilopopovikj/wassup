@@ -68,14 +68,18 @@ func TestPingExpectStatus(t *testing.T) {
 	p, _ := newPing(2 * time.Second)
 
 	// 401 is fine when that is what we expect...
-	o := p.observe("x", srv.URL, p.ping(context.Background(), http.MethodGet, srv.URL, 2*time.Second, 401))
-	if o.Metrics["error_rate"] != 0 {
-		t.Fatalf("error_rate = %v, want 0", o.Metrics["error_rate"])
+	var o probe.Observation
+	for i := 0; i < pingMinWindow-1; i++ {
+		o = p.observe("x", srv.URL, p.ping(context.Background(), http.MethodGet, srv.URL, 2*time.Second, 401))
 	}
-	// ...and an error when we expected 200.
+	// ...and no share of errors is said over four attempts.
+	if r, ok := o.Metrics["error_rate"]; ok {
+		t.Fatalf("error_rate = %v over %d attempts", r, pingMinWindow-1)
+	}
+	// An error when we expected 200: one in five.
 	o = p.observe("x", srv.URL, p.ping(context.Background(), http.MethodGet, srv.URL, 2*time.Second, 200))
-	if o.Metrics["error_rate"] != 50 {
-		t.Fatalf("error_rate = %v, want 50", o.Metrics["error_rate"])
+	if o.Metrics["error_rate"] != 20 {
+		t.Fatalf("error_rate = %v, want 20", o.Metrics["error_rate"])
 	}
 	if o.Detail["last_error"] != "status 401, expected 200" {
 		t.Fatalf("last_error = %v", o.Detail["last_error"])
@@ -138,8 +142,9 @@ func TestPingTimeouts(t *testing.T) {
 		}
 		*clock = clock.Add(5 * time.Second)
 	}
-	if o.Metrics["error_rate"] != 100 || o.Metrics["timeout_rate"] != 100 {
-		t.Fatalf("metrics = %v, want 100/100", o.Metrics)
+	// three attempts say no share yet; the streak says it times out
+	if _, ok := o.Metrics["timeout_rate"]; ok {
+		t.Fatalf("metrics = %v: a rate over %d attempts", o.Metrics, pingStreak)
 	}
 	c, ok := model.HasCondition(o.Conditions, model.CondTimeout)
 	if !ok {
@@ -169,8 +174,9 @@ func TestPingTimeouts(t *testing.T) {
 	if _, ok := model.HasCondition(o.Conditions, model.CondTimeout); ok {
 		t.Fatalf("Timeout still raised after a success")
 	}
-	if o.Metrics["timeout_rate"] != 75 {
-		t.Fatalf("timeout_rate = %v, want 75", o.Metrics["timeout_rate"])
+	o = p.observe("github", srv2.URL, p.ping(context.Background(), http.MethodHead, srv2.URL, time.Second, 0))
+	if o.Metrics["timeout_rate"] != 60 {
+		t.Fatalf("timeout_rate = %v, want 60: three of five", o.Metrics["timeout_rate"])
 	}
 }
 
@@ -190,6 +196,9 @@ func TestPingConnectionRefused(t *testing.T) {
 	}
 	if _, ok := model.HasCondition(o.Conditions, model.CondTimeout); !ok {
 		t.Fatalf("connection refused streak did not raise Timeout: %+v", o)
+	}
+	for i := pingStreak; i < pingMinWindow; i++ {
+		o = p.observe("github", url, p.ping(context.Background(), http.MethodHead, url, time.Second, 0))
 	}
 	if o.Metrics["error_rate"] != 100 || o.Metrics["timeout_rate"] != 0 {
 		t.Fatalf("metrics = %v", o.Metrics)
