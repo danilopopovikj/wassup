@@ -142,7 +142,7 @@ func (q queueMetrics) queue(name string) (s shape, listed bool) {
 func (q queueMetrics) workflow(name string) (s shape, listed bool, err error) {
 	if q.Tasks != nil {
 		for task, t := range q.Tasks {
-			if task == name || strings.HasPrefix(task, name) {
+			if taskOf(task, name) {
 				s.add(t)
 				listed = true
 			}
@@ -536,4 +536,15 @@ func (c *client) version(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return meta.Version, nil
+}
+
+// taskOf reports whether a task belongs to a workflow: it is the workflow
+// of a single task, or its name goes on past the workflow's after a
+// separator. "process" is not "process-image".
+func taskOf(task, workflow string) bool {
+	if task == workflow {
+		return true
+	}
+	rest, ok := strings.CutPrefix(task, workflow)
+	return ok && rest != "" && strings.ContainsRune(":./", rune(rest[0]))
 }

@@ -274,8 +274,10 @@ func (p *edgeProbe) observe(ctx context.Context, store *tableStore, sess *sessio
 	now := time.Now()
 	o := probe.Observation{Target: target, Probe: kindEdge, At: now, Detail: map[string]any{
 		"metric": cfg.metric, "series": m.matched, "window_s": int(cfg.window.Seconds()), "read_at": tab.at.UTC().Format(time.RFC3339),
-		"unit": cfg.unit,
 	}}
+	if cfg.unit != "" {
+		o.Detail["unit"] = cfg.unit
+	}
 	if pastErr != nil {
 		o.Detail["known_note"] = "the last " + minutes(cfg.known) + " could not be read, so a series that is quiet now is not told from one that does not exist: " + pastErr.Error()
 	}
@@ -381,14 +383,15 @@ func lookBack(cfg edgeConfig) []time.Duration {
 
 // unitOf reads what one count of the metric is. A binding says it with
 // unit, a plural noun ("queries"); without one, the calls of a service to a
-// database are queries and everything else a request.
+// database are queries, and anything else is said in the unit of the edge's
+// kind, which "" leaves to the engine.
 func unitOf(spec map[string]any, metric string) (string, error) {
 	u := probe.Str(spec, "unit", "")
 	if u == "" {
 		if metric == "signoz_db_latency_count" {
 			return "queries/s", nil
 		}
-		return "req/s", nil
+		return "", nil
 	}
 	u = strings.TrimSuffix(u, "/s")
 	if !unitWord.MatchString(u) {
