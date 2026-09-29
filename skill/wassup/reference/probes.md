@@ -312,7 +312,7 @@ nobody called it. `signoz.edge` then reads the last day, in steps of five
 minutes, and when that holds nothing either the whole of `known` (a week;
 `known: 0s` leaves it out), in steps of an hour: a series that was counted
 within it is known, its counter did not move, and the rate is 0, which the
-diagram says as `idle, last call 3 h ago`: `last_seen` is the end of the
+diagram says as `idle, called 3 h ago`: `last_seen` is the end of the
 last step that counted. The past is read every ten minutes, and only while
 the window holds nothing of a binding.
 

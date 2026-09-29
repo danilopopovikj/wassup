@@ -476,13 +476,13 @@ func TestIdleSaysWhenWorkWasLastSeen(t *testing.T) {
 		probe.Observation{Target: "api->db", Probe: "signoz.edge", Metrics: map[string]float64{"rate": 0},
 			Detail: map[string]any{"last_seen": now.Add(-10 * time.Minute).UTC().Format(time.RFC3339), "unit": "queries/s"}},
 	)...)
-	if got := s.Edges["ingress->api"].Label; got != "idle, last call 3 h ago" {
+	if got := s.Edges["ingress->api"].Label; got != "idle, called 3 h ago" {
 		t.Errorf("ingress->api: %q", got)
 	}
-	if got := s.Edges["api->db"].Label; got != "idle, last query 10 min ago" {
+	if got := s.Edges["api->db"].Label; got != "idle, queried 10 min ago" {
 		t.Errorf("api->db: %q", got)
 	}
-	if got := s.Components["api"].Label; got != "idle, last call 3 h ago" {
+	if got := s.Components["api"].Label; got != "idle, called 3 h ago" {
 		t.Errorf("api: %q, want what was last sent to it", got)
 	}
 }
@@ -542,5 +542,21 @@ func TestAPingThatTimedOutOnceDoesNotFailAServiceOfOthers(t *testing.T) {
 	calls := probe.Observation{Target: "api->pay", Probe: "signoz.edge", Metrics: map[string]float64{"rate": 0.02, "error_rate": 0}}
 	if s := run(ping(30), calls); s.Components["pay"].State == model.Failing {
 		t.Errorf("the API's calls succeed: %q", s.Components["pay"].Label)
+	}
+}
+
+// The error rate of a service of others is that of the system's calls to
+// it, where they are counted; the pings' stays in the detail.
+func TestAServiceOfOthersSaysTheErrorsOfTheCallsToIt(t *testing.T) {
+	topo := &model.Topology{Components: []model.Component{
+		{ID: "api", Type: "workload"}, {ID: "pay", Type: "external"},
+	}, Edges: []model.Edge{{From: "api", To: "pay", Kind: "external"}}}
+	b := bind.New()
+	b.Apply(probe.Observation{Target: "pay", Probe: "http.ping", At: now, Metrics: map[string]float64{"error_rate": 10, "timeout_rate": 10}, Detail: map[string]any{"window": 10}})
+	b.Apply(probe.Observation{Target: "api->pay", Probe: "signoz.edge", At: now, Metrics: map[string]float64{"rate": 2, "error_rate": 1.5}})
+	s := Evaluate(Input{Topology: topo, Joined: b.All(), Now: now, Tick: 1, TickEvery: 5 * time.Second})
+	es := s.Components["pay"]
+	if es.Metrics["error_rate"] != 1.5 || es.Detail["ping_error_rate"] != 10.0 {
+		t.Errorf("error_rate = %v, ping_error_rate = %v", es.Metrics["error_rate"], es.Detail["ping_error_rate"])
 	}
 }
