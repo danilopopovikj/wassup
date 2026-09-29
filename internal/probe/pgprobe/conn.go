@@ -24,7 +24,12 @@ import (
 )
 
 // roundTimeout bounds one round of queries.
-const roundTimeout = 5 * time.Second
+//
+// The first round of a database in the cluster opens a tunnel, a TLS
+// session and a login before its statements, and a machine on another
+// continent pays a round trip for each: 5 s was spent on that alone while
+// the rest of wassup read the cluster over the same link.
+const roundTimeout = 10 * time.Second
 
 // stopGrace is how long a round in flight may still run once the probe was
 // told to stop.
