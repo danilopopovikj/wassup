@@ -402,6 +402,27 @@ func TestTransactionsBecomeARateBetweenTwoRounds(t *testing.T) {
 	}
 }
 
+// PostgreSQL shows a backend's counts when the backend flushes them, so the
+// counter moves in steps: the rate is taken over the last minute of rounds.
+func TestTheRateIsTakenOverTheLastMinute(t *testing.T) {
+	at := time.Date(2026, 9, 27, 12, 0, 0, 0, time.UTC)
+	var tx txCounter
+	tx.rate(0, 0, at)
+	// a busy backend flushed nothing for 25 s, then 30 s' worth at once
+	for _, step := range []struct {
+		s     int
+		count float64
+	}{{5, 0}, {10, 0}, {15, 0}, {20, 0}, {25, 0}, {30, 450}, {60, 900}, {90, 1350}} {
+		r, ok := tx.rate(step.count, 0, at.Add(time.Duration(step.s)*time.Second))
+		if step.s == 90 && (!ok || r != 15) {
+			t.Errorf("at 90 s: %v %v, want 15 a second over the minute from 30 s", r, ok)
+		}
+	}
+	if n := len(tx.readings); n != 3 {
+		t.Errorf("%d readings kept, want those of 30, 60 and 90 s", n)
+	}
+}
+
 // Every round of wassup ends with a commit the database counts. A database
 // nobody else uses reads nothing, whatever the number of bindings on it.
 func TestTheRateLeavesOutTheRoundsOfWassupItself(t *testing.T) {
@@ -412,11 +433,13 @@ func TestTheRateLeavesOutTheRoundsOfWassupItself(t *testing.T) {
 	if r, ok := tx.rate(1004, 4, at.Add(5*time.Second)); !ok || r != 0 {
 		t.Errorf("4 more, all of them wassup's: %v %v", r, ok)
 	}
-	if r, ok := tx.rate(1058, 8, at.Add(10*time.Second)); !ok || r != 10 {
-		t.Errorf("54 more, 4 of them wassup's: %v %v", r, ok)
+	if r, ok := tx.rate(1058, 8, at.Add(10*time.Second)); !ok || r != 5 {
+		t.Errorf("58 more in 10 s, 8 of them wassup's: %v %v", r, ok)
 	}
-	// a round of another binding that the database has not counted yet
-	if r, ok := tx.rate(1061, 12, at.Add(15*time.Second)); !ok || r != 0 {
+	// wassup finished more than the database counted in all: none, not less
+	tx = txCounter{}
+	tx.rate(1000, 0, at)
+	if r, ok := tx.rate(1001, 4, at.Add(5*time.Second)); !ok || r != 0 {
 		t.Errorf("fewer than wassup's own is none, not less than none: %v %v", r, ok)
 	}
 

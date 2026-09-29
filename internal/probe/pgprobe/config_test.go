@@ -280,8 +280,8 @@ func TestExplain(t *testing.T) {
 		"tls refused": {errors.New("server refused TLS connection"), false, "the server does not speak TLS: set sslmode to disable or prefer"},
 		"name":        {&net.DNSError{Err: "no such host", Name: "db-rw.bookstore.svc", IsNotFound: true}, false, "the name db-rw.bookstore.svc does not resolve on this machine"},
 		"refused":     {errors.New("dial tcp 203.0.113.9:5432: connect: connection refused"), false, "connection refused on db.bookstore.example:5432: nothing listens there, or a firewall turns the connection down"},
-		"unreachable": {context.DeadlineExceeded, false, "no answer from db.bookstore.example:5432 within 5s"},
-		"slow":        {context.DeadlineExceeded, true, "the server did not answer within 5s"},
+		"unreachable": {context.DeadlineExceeded, false, "no answer from db.bookstore.example:5432 within 10s"},
+		"slow":        {context.DeadlineExceeded, true, "the server did not answer within 10s"},
 	} {
 		got := c.explain(tc.err, tc.connected)
 		if !strings.Contains(got.Error(), tc.want) {

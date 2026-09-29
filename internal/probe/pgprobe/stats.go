@@ -628,26 +628,58 @@ func (o *ownRounds) rounds(server string) float64 {
 	return o.n[server]
 }
 
-// txCounter turns the transaction counter of two rounds into a rate.
-type txCounter struct {
+// txWindow is what the rate of transactions is taken over. PostgreSQL
+// shows what a backend counted once the backend flushes its statistics:
+// about once a second when it is idle, and a busy one may keep them up to a
+// minute. Two readings a few seconds apart read what happened to be flushed
+// between them, half of the truth or twice it; a minute reads the truth.
+const txWindow = time.Minute
+
+// txReading is the transaction counter of one round, and how many rounds of
+// wassup's own the database had counted when it was read.
+type txReading struct {
 	count, own float64
 	at         time.Time
 }
 
-// rate returns the transactions per second since the round before, without
-// the ones wassup finished itself in between (own is how many it had
-// finished when count was read). It is not known on the first round, and
-// not after the counter went down, which is what a reset of the statistics
-// or a switch to another server does.
+// txCounter turns the transaction counter of the rounds of the last minute
+// into a rate.
+type txCounter struct {
+	readings []txReading
+}
+
+// rate returns the transactions per second over the last minute of
+// readings, or over the readings there are when there is less, without the
+// ones wassup finished itself in between (own is how many it had finished
+// when count was read). It is not known on the first round, and not after
+// the counter went down, which is what a reset of the statistics or a switch
+// to another server does: the readings start over from there.
 func (t *txCounter) rate(count, own float64, at time.Time) (float64, bool) {
-	prev := *t
-	t.count, t.own, t.at = count, own, at
-	dt := at.Sub(prev.at).Seconds()
-	if prev.at.IsZero() || dt <= 0 || count < prev.count {
+	if n := len(t.readings); n > 0 {
+		last := t.readings[n-1]
+		if !at.After(last.at) {
+			return 0, false
+		}
+		if count < last.count {
+			t.readings = nil
+		}
+	}
+	t.readings = append(t.readings, txReading{count: count, own: own, at: at})
+	// keep the newest reading at or before the start of the window, so the
+	// rate covers the whole of it, and every reading after
+	cut := 0
+	for i, r := range t.readings {
+		if !r.at.After(at.Add(-txWindow)) {
+			cut = i
+		}
+	}
+	t.readings = t.readings[cut:]
+	if len(t.readings) < 2 {
 		return 0, false
 	}
-	others := max(count-prev.count-(own-prev.own), 0)
-	return math.Round(others/dt*10) / 10, true
+	first := t.readings[0]
+	others := max(count-first.count-(own-first.own), 0)
+	return math.Round(others/at.Sub(first.at).Seconds()*10) / 10, true
 }
 
 // stamp sets Since on each condition to the first time this probe saw that
