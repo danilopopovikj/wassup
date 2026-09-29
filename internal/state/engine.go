@@ -649,9 +649,11 @@ var edgeWork = []string{"lag_bytes"}
 // nothing is sent to it. An idle component says when it last saw work,
 // where a probe knows; one that nothing measures says so and looks it.
 func (c *ctx) finish(comp model.Component, es model.ElementState) model.ElementState {
+	if comp.Type == "scheduledjob" {
+		return c.finishJob(comp, es)
+	}
 	rate, unit, flowing := c.incidentFlow(comp.ID)
-	if own, ok := es.Metrics["rate"]; ok && own > 0 && comp.Type != "scheduledjob" {
-		// a scheduled job's rate is how often it runs, not work going through
+	if own, ok := es.Metrics["rate"]; ok && own > 0 {
 		rate, unit, flowing = own, model.RateUnitOf(comp.Type), true
 	}
 	known := measured(es.Metrics, model.Catalog[comp.Type].Work) || c.incidentMeasured(comp.ID)
@@ -679,6 +681,36 @@ func (c *ctx) finish(comp model.Component, es model.ElementState) model.ElementS
 		es.State, es.Label, es.Marker = model.Idle, NoRate, model.MarkerUnmetered
 	}
 	return es
+}
+
+// finishJob decides for a scheduled job that runs nothing now: it is idle
+// between its runs, however often it runs, and says when it last ran, or
+// that it did not run in the window its counts cover. A running job was
+// decided before, by the processing rule.
+func (c *ctx) finishJob(comp model.Component, es model.ElementState) model.ElementState {
+	last, _ := c.lastWork(comp, es)
+	switch {
+	case !last.IsZero():
+		es.State, es.Label = model.Idle, "idle, ran "+Ago(c.in.Now, last)+" ago"
+	case measured(es.Metrics, []string{"succeeded", "failed"}) && countWindow(es) > 0:
+		// counted over a known window and none there: say how long
+		es.State, es.Label = model.Idle, "idle, no run in "+Dur(countWindow(es))
+	case measured(es.Metrics, model.Catalog[comp.Type].Work):
+		es.State, es.Label = model.Idle, "idle"
+	default:
+		es.State, es.Label, es.Marker = model.Idle, NoRate, model.MarkerUnmetered
+	}
+	return es
+}
+
+// countWindow is the window a job's counts cover, when its probe says.
+func countWindow(es model.ElementState) time.Duration {
+	if w, ok := es.Detail["window"].(string); ok {
+		if d, err := time.ParseDuration(w); err == nil && d > 0 {
+			return d
+		}
+	}
+	return 0
 }
 
 // lastWork is when a component last saw work, and how to say it: when a

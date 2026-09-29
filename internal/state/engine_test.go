@@ -496,3 +496,21 @@ func TestAnEdgeTakesTheUnitItsProbeSays(t *testing.T) {
 		t.Errorf("api->db: %q", got)
 	}
 }
+
+// A scheduled job is idle between its runs and says when it last ran, or
+// that it did not run in the window its counts cover.
+func TestAScheduledJobSaysWhenItRan(t *testing.T) {
+	topo := &model.Topology{Components: []model.Component{{ID: "sweep", Type: "scheduledjob"}, {ID: "nightly", Type: "scheduledjob"}}}
+	b := bind.New()
+	b.Apply(probe.Observation{Target: "sweep", Probe: "hatchet.workflow", At: now, Metrics: map[string]float64{"active": 0, "succeeded": 24, "failed": 0},
+		Detail: map[string]any{"last_run": now.Add(-12 * time.Minute), "window": "24h0m0s"}})
+	b.Apply(probe.Observation{Target: "nightly", Probe: "hatchet.workflow", At: now, Metrics: map[string]float64{"active": 0, "succeeded": 0, "failed": 0},
+		Detail: map[string]any{"window": "24h0m0s"}})
+	s := Evaluate(Input{Topology: topo, Now: now, Joined: b.All(), Tick: 1, TickEvery: 5 * time.Second})
+	if got := s.Components["sweep"].Label; got != "idle, ran 12 min ago" {
+		t.Errorf("sweep: %q", got)
+	}
+	if got := s.Components["nightly"].Label; got != "idle, no run in 24 h" {
+		t.Errorf("nightly: %q", got)
+	}
+}
