@@ -514,3 +514,33 @@ func TestAScheduledJobSaysWhenItRan(t *testing.T) {
 		t.Errorf("nightly: %q", got)
 	}
 }
+
+// A service of others is failing from pings when they fail more than once,
+// and not while the system's own calls to it are counted and succeed: a ping
+// says what wassup's machine sees, the calls what the system does.
+func TestAPingThatTimedOutOnceDoesNotFailAServiceOfOthers(t *testing.T) {
+	topo := &model.Topology{Components: []model.Component{
+		{ID: "api", Type: "workload"}, {ID: "pay", Type: "external", Label: "Payments"},
+	}, Edges: []model.Edge{{From: "api", To: "pay", Kind: "external"}}}
+	run := func(obs ...probe.Observation) *model.Snapshot {
+		b := bind.New()
+		for _, o := range obs {
+			o.At = now
+			b.Apply(o)
+		}
+		return Evaluate(Input{Topology: topo, Joined: b.All(), Now: now, Tick: 1, TickEvery: 5 * time.Second})
+	}
+	ping := func(timeouts float64) probe.Observation {
+		return probe.Observation{Target: "pay", Probe: "http.ping", Metrics: map[string]float64{"timeout_rate": timeouts, "error_rate": timeouts, "latency_ms": 400}, Detail: map[string]any{"window": 10}}
+	}
+	if s := run(ping(10)); s.Components["pay"].State == model.Failing {
+		t.Errorf("one timeout in ten: %q", s.Components["pay"].Label)
+	}
+	if s := run(ping(30)); s.Components["pay"].Label != "failing, 30 percent timeouts" {
+		t.Errorf("three in ten: %q", s.Components["pay"].Label)
+	}
+	calls := probe.Observation{Target: "api->pay", Probe: "signoz.edge", Metrics: map[string]float64{"rate": 0.02, "error_rate": 0}}
+	if s := run(ping(30), calls); s.Components["pay"].State == model.Failing {
+		t.Errorf("the API's calls succeed: %q", s.Components["pay"].Label)
+	}
+}
