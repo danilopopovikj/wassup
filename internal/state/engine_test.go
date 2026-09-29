@@ -513,6 +513,14 @@ func TestAScheduledJobSaysWhenItRan(t *testing.T) {
 	if got := s.Components["nightly"].Label; got != "idle, no run in 24 h" {
 		t.Errorf("nightly: %q", got)
 	}
+	// counts that show runs, and no run read: not "no run"
+	b = bind.New()
+	b.Apply(probe.Observation{Target: "sweep", Probe: "hatchet.workflow", At: now, Metrics: map[string]float64{"active": 0, "succeeded": 50, "failed": 0},
+		Detail: map[string]any{"window": "24h0m0s"}})
+	s = Evaluate(Input{Topology: topo, Now: now, Joined: b.All(), Tick: 1, TickEvery: 5 * time.Second})
+	if got := s.Components["sweep"].Label; got != "idle" {
+		t.Errorf("sweep with 50 runs and none read: %q", got)
+	}
 }
 
 // A service of others is failing from pings when they fail more than once,
@@ -539,9 +547,19 @@ func TestAPingThatTimedOutOnceDoesNotFailAServiceOfOthers(t *testing.T) {
 	if s := run(ping(30)); s.Components["pay"].Label != "failing, 30 percent timeouts" {
 		t.Errorf("three in ten: %q", s.Components["pay"].Label)
 	}
-	calls := probe.Observation{Target: "api->pay", Probe: "signoz.edge", Metrics: map[string]float64{"rate": 0.02, "error_rate": 0}}
+	calls := probe.Observation{Target: "api->pay", Probe: "signoz.edge", Metrics: map[string]float64{"rate": 0.02, "error_rate": 0}, Detail: map[string]any{"window_s": 300}}
 	if s := run(ping(30), calls); s.Components["pay"].State == model.Failing {
 		t.Errorf("the API's calls succeed: %q", s.Components["pay"].Label)
+	}
+	// calls counted over an hour say nothing of the last minutes
+	hour := calls
+	hour.Detail = map[string]any{"window_s": 3600}
+	if s := run(ping(30), hour); s.Components["pay"].State != model.Failing {
+		t.Errorf("an hour of calls hid three failed pings: %q", s.Components["pay"].Label)
+	}
+	// a service that answers no ping at all fails, whatever the calls said
+	if s := run(ping(100), calls); s.Components["pay"].State != model.Failing {
+		t.Errorf("every ping failed: %q", s.Components["pay"].Label)
 	}
 }
 
@@ -558,5 +576,20 @@ func TestAServiceOfOthersSaysTheErrorsOfTheCallsToIt(t *testing.T) {
 	es := s.Components["pay"]
 	if es.Metrics["error_rate"] != 1.5 || es.Detail["ping_error_rate"] != 10.0 {
 		t.Errorf("error_rate = %v, ping_error_rate = %v", es.Metrics["error_rate"], es.Detail["ping_error_rate"])
+	}
+}
+
+// An edge from a scheduled job does not take the job's rate: it is how often
+// the job ran over a day, not what flows now.
+func TestAnEdgeFromAJobDoesNotFlowWithItsDailyRate(t *testing.T) {
+	topo := &model.Topology{Components: []model.Component{{ID: "sweep", Type: "scheduledjob"}, {ID: "db", Type: "database"}},
+		Edges: []model.Edge{{From: "sweep", To: "db", Kind: "sql"}}}
+	b := bind.New()
+	b.Apply(probe.Observation{Target: "sweep", Probe: "hatchet.workflow", At: now, Metrics: map[string]float64{"active": 0, "succeeded": 24, "rate": 24.0 / 86400},
+		Detail: map[string]any{"last_run": now.Add(-40 * time.Minute), "window": "24h0m0s"}})
+	b.Apply(probe.Observation{Target: "db", Probe: "cnpg.cluster", At: now, Metrics: map[string]float64{"cpu_pct": 5}})
+	s := Evaluate(Input{Topology: topo, Now: now, Joined: b.All(), Tick: 1, TickEvery: 5 * time.Second})
+	if es := s.Edges["sweep->db"]; es.State != model.Idle || es.Marker != "" {
+		t.Errorf("sweep->db: %s %q %q, want idle between runs", es.State, es.Label, es.Marker)
 	}
 }
