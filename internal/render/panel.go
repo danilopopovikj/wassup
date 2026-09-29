@@ -431,6 +431,7 @@ func helpLines() []string {
 		"!!!  ⊘ blocked   traffic cannot pass",
 		"!!!  ✕ failing   errors or crashes",
 		"..  ┄ unbound   no probe returned data    ◷ stale  data older than 3 ticks",
+		"..  ◌ no rate   up, and nothing counts what goes through it",
 	}
 }
 

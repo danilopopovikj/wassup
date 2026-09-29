@@ -368,6 +368,11 @@ type Hosted struct {
 	Pods     int    `json:"pods,omitempty"`
 	Ready    int    `json:"ready,omitempty"`
 	Restarts int    `json:"restarts,omitempty"`
+	// What the component's pods on this machine use and carry, where the
+	// provider reads them pod by pod; nil is not known, never zero.
+	CPUPct *float64 `json:"cpu_pct,omitempty"`
+	MemPct *float64 `json:"mem_pct,omitempty"`
+	Rate   *float64 `json:"rate,omitempty"`
 }
 
 // Gauge is one horizontal bar inside a box.

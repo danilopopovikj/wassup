@@ -29,9 +29,13 @@ const (
 	minWindow = 2 * step * time.Second
 	// edgeKnown is how far back a series counts as known. A service that is
 	// called now and then has no series in a window in which nobody called
-	// it; that it was counted within the last day says its counter is there
-	// and did not move.
-	edgeKnown = 24 * time.Hour
+	// it; that it was counted within the last week says its counter is there
+	// and did not move, and when it last moved.
+	edgeKnown = 7 * 24 * time.Hour
+	// dayKnown is the first look back, read before the whole of known: most
+	// quiet series were counted within it, and its steps of five minutes say
+	// when closer than the hour a step of a week is.
+	dayKnown = 24 * time.Hour
 	// knownInterval is how often the day is read, by the bindings whose
 	// window holds nothing of them.
 	knownInterval = 10 * time.Minute
@@ -43,14 +47,14 @@ func init() {
 	probe.Register(probe.Access{
 		Kind:   kindEdge,
 		Source: "a counter SigNoz holds, such as the calls of one service to another, asked for with one read query per metric that the bindings share (POST /api/v5/query_range)",
-		Delivers: "on an edge: rate (per second, the counter's growth over the window summed over the series that match) and error_rate (the percentage of it that the series matching errors make up); " +
-			"on a database: rate, its transactions per second; a rate of 0 when the series that match were counted within known (a day) and not within the window; " +
-			"no rate when no series matches in either; detail: the metric, the series matched, the window",
-		SpecFields: []string{"url (required)", "metric (required)", "match", "errors", "window", "known", "interval", "user_env", "password_env", "token_env"},
+		Delivers: "on an edge: rate (per second: what the series that match counted over the window, divided by the window) and error_rate (the percentage of it that the series matching errors make up); " +
+			"on a database: rate, its transactions per second; a rate of 0 when the series that match were counted within known (a week) and not within the window; " +
+			"no rate when no series matches in either; detail: the metric, the series matched, the window, count (what they counted in it), last_seen (the end of the last step that counted anything), unit",
+		SpecFields: []string{"url (required)", "metric (required)", "match", "errors", "window", "known", "unit", "interval", "user_env", "password_env", "token_env"},
 		Needs: "HTTP access to SigNoz, and a user with the viewer role: its name and password in the environment variables named by user_env and password_env " +
 			"(default SIGNOZ_USER, SIGNOZ_PASSWORD), or an API key in the one named by token_env. wassup signs in with a POST and asks with a POST; neither changes anything in SigNoz. " +
 			"A query costs SigNoz's database a read over the window, once per metric and interval, however many bindings use the metric; " +
-			"while the window holds nothing of a binding, one more over the last day (known) every ten minutes, in steps of 24 minutes",
+			"while the window holds nothing of a binding, one more over the last day every ten minutes, in steps of five minutes, and when that holds nothing either, one over known (a week) in steps of an hour",
 		Implemented: true,
 		Facets:      []string{facet.NameTraffic, facet.NameDatabase},
 		Tier:        probe.TierToken,
@@ -67,7 +71,8 @@ type edgeConfig struct {
 	labels   []string // the labels match and errors name, sorted
 	interval time.Duration
 	window   time.Duration
-	known    time.Duration // 0 when the day is left alone
+	known    time.Duration // 0 when the past is left alone
+	unit     string        // what one count is, per second: "req/s", "queries/s"
 }
 
 // edgeConfigOf validates a spec.
@@ -104,6 +109,9 @@ func edgeConfigOf(spec map[string]any) (edgeConfig, error) {
 		}
 	}
 	sort.Strings(cfg.labels)
+	if cfg.unit, err = unitOf(spec, cfg.metric); err != nil {
+		return cfg, err
+	}
 	if cfg.interval, err = probe.StrictDur(spec, "interval", edgeInterval); err != nil {
 		return cfg, err
 	}
@@ -195,43 +203,63 @@ func (p *edgeProbe) Start(ctx context.Context, spec map[string]any, out chan<- p
 	return nil
 }
 
+// matched is what the series of a table that a binding means add up to.
+type matched struct {
+	total, failed float64 // per second
+	count         float64 // over the window
+	matched       int
+	last          time.Time
+}
+
 // sum adds up the series of a table that a binding means.
-func sum(rows []row, cfg edgeConfig) (total, failed float64, matched int) {
+func sum(rows []row, cfg edgeConfig) matched {
+	var m matched
 	for _, r := range rows {
 		if !probe.Matches(r.labels, cfg.match) {
 			continue
 		}
-		matched++
-		total += r.value
+		m.matched++
+		m.total += r.value
+		m.count += r.count
+		if r.last.After(m.last) {
+			m.last = r.last
+		}
 		if len(cfg.errors) > 0 && probe.Matches(r.labels, cfg.errors) {
-			failed += r.value
+			m.failed += r.value
 		}
 	}
-	return total, failed, matched
+	return m
 }
 
 // observe reads the metric's table and adds up the series the binding means.
-// When the window holds none of them it reads the last day: a series that
-// was counted then is known, and its rate now is zero.
+// When the window holds none of them it looks further back, the last day
+// first and then the whole of known: a series that was counted then is
+// known, its rate now is zero, and when it last counted is said.
 func (p *edgeProbe) observe(ctx context.Context, store *tableStore, sess *session, cfg edgeConfig, target string) (probe.Observation, error) {
 	tab, err := store.read(ctx, sess, cfg)
 	if err != nil {
 		return probe.Observation{}, err
 	}
-	total, failed, matched := sum(tab.rows, cfg)
+	m := sum(tab.rows, cfg)
 	rows, held, quiet := tab.rows, cfg.window, false
-	var dayErr error
-	if matched == 0 && cfg.known > cfg.window {
-		day := cfg
-		day.window, day.interval = cfg.known, knownInterval
-		var dt table
-		if dt, dayErr = store.read(ctx, sess, day); dayErr == nil {
-			rows, held = dt.rows, cfg.known
-			if _, _, seen := sum(dt.rows, cfg); seen > 0 {
-				matched, quiet = seen, true
+	var pastErr error
+	if m.matched == 0 {
+		for _, back := range lookBack(cfg) {
+			past := cfg
+			past.window, past.interval = back, knownInterval
+			pt, err := store.read(ctx, sess, past)
+			if err != nil {
+				if ctx.Err() != nil {
+					return probe.Observation{}, err
+				}
+				pastErr = err
+				break
 			}
-		} else if ctx.Err() != nil {
-			return probe.Observation{}, dayErr
+			rows, held = pt.rows, back
+			if pm := sum(pt.rows, cfg); pm.matched > 0 {
+				m.matched, m.last, quiet = pm.matched, pm.last, true
+				break
+			}
 		}
 	}
 	if len(rows) == 0 {
@@ -239,39 +267,78 @@ func (p *edgeProbe) observe(ctx context.Context, store *tableStore, sess *sessio
 	}
 	now := time.Now()
 	o := probe.Observation{Target: target, Probe: kindEdge, At: now, Detail: map[string]any{
-		"metric": cfg.metric, "series": matched, "window_s": int(cfg.window.Seconds()), "read_at": tab.at.UTC().Format(time.RFC3339),
+		"metric": cfg.metric, "series": m.matched, "window_s": int(cfg.window.Seconds()), "read_at": tab.at.UTC().Format(time.RFC3339),
+		"unit": cfg.unit,
 	}}
-	if dayErr != nil {
-		o.Detail["known_note"] = "the last " + minutes(cfg.known) + " could not be read, so a series that is quiet now is not told from one that does not exist: " + dayErr.Error()
+	if pastErr != nil {
+		o.Detail["known_note"] = "the last " + minutes(cfg.known) + " could not be read, so a series that is quiet now is not told from one that does not exist: " + pastErr.Error()
 	}
-	if matched == 0 {
+	if m.matched == 0 {
 		// Nobody counted what matches nothing: that is no rate of zero, it
 		// is no rate.
 		o.Detail["match_note"] = "no series of " + cfg.metric + " matches in the last " + minutes(held) + ", so no rate is reported: nothing was counted, or match names a value that does not exist; label_values lists the values SigNoz holds"
 		o.Detail["label_values"] = valuesOf(rows, cfg.match)
 		return o, nil
 	}
-	if quiet {
-		o.Detail["quiet_note"] = "nothing was counted in the last " + minutes(cfg.window) + "; what matches was counted within the last " + minutes(cfg.known) + ", so the rate is 0"
+	if !m.last.IsZero() {
+		o.Detail["last_seen"] = m.last.UTC().Format(time.RFC3339)
 	}
+	if quiet {
+		o.Detail["quiet_note"] = "nothing was counted in the last " + minutes(cfg.window) + "; what matches was counted within the last " + minutes(held) + ", so the rate is 0"
+		m.total, m.failed, m.count = 0, 0, 0
+	}
+	o.Detail["count"] = probe.Round(m.count, 2)
 	if tab.full {
 		o.Detail["rows_note"] = fmt.Sprintf("SigNoz answered with %d series, which is all it was asked for: the rate may leave some out; match on fewer labels", len(tab.rows))
 	}
 	if !strings.Contains(target, "->") {
 		// on a database: its transactions a second, and nothing else
-		facet.EmitDatabase(&o, facet.DatabaseFacet{Rate: facet.N(probe.Round(total, rateDecimals)), Ready: true}, now)
+		facet.EmitDatabase(&o, facet.DatabaseFacet{Rate: facet.N(probe.Round(m.total, rateDecimals)), Ready: true}, now)
 		return o, nil
 	}
-	t := facet.TrafficFacet{Rate: facet.N(probe.Round(total, rateDecimals))}
+	t := facet.TrafficFacet{Rate: facet.N(probe.Round(m.total, rateDecimals))}
 	if len(cfg.errors) > 0 {
 		t.ErrorRate = facet.N(0)
-		if total > 0 {
-			t.ErrorRate = facet.N(probe.Round(100*failed/total, 1))
+		if m.total > 0 {
+			t.ErrorRate = facet.N(probe.Round(100*m.failed/m.total, 1))
 		}
 	}
 	facet.EmitTraffic(&o, t, now)
 	return o, nil
 }
+
+// lookBack lists how far back a binding whose window holds nothing looks:
+// the last day, then the whole of known when that is more.
+func lookBack(cfg edgeConfig) []time.Duration {
+	var out []time.Duration
+	if cfg.known > cfg.window {
+		out = append(out, min(dayKnown, cfg.known))
+	}
+	if cfg.known > dayKnown && cfg.known > cfg.window {
+		out = append(out, cfg.known)
+	}
+	return out
+}
+
+// unitOf reads what one count of the metric is. A binding says it with
+// unit, a plural noun ("queries"); without one, the calls of a service to a
+// database are queries and everything else a request.
+func unitOf(spec map[string]any, metric string) (string, error) {
+	u := probe.Str(spec, "unit", "")
+	if u == "" {
+		if metric == "signoz_db_latency_count" {
+			return "queries/s", nil
+		}
+		return "req/s", nil
+	}
+	u = strings.TrimSuffix(u, "/s")
+	if !unitWord.MatchString(u) {
+		return "", fmt.Errorf("unit is what one count is, a word such as queries or spans")
+	}
+	return u + "/s", nil
+}
+
+var unitWord = regexp.MustCompile(`^[a-z]{2,16}$`)
 
 // rateDecimals keep a call an hour apart from none: 0.000278 per second.
 const rateDecimals = 6

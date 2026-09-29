@@ -63,7 +63,7 @@ var primaryGauges = map[string][]string{
 	"loadbalancer":     {"targets"},
 	"backgroundworker": {"workers", "slots", "cpu"},
 	"ingress":          {"errors", "cert"},
-	"scheduledjob":     {"running", "ok 24h", "failed"},
+	"scheduledjob":     {"running", "succeeded", "failed"},
 	"queue":            {"depth", "oldest"},
 	"cache":            {"mem", "hits"},
 	"database":         {"conns", "cpu", "disk"},
@@ -326,6 +326,8 @@ func drawBox(c *Canvas, g *layout.Graph, b *layout.Box, snap *model.Snapshot, op
 		glyph = "┄"
 	case model.MarkerStale:
 		glyph = "◷"
+	case model.MarkerUnmetered:
+		glyph = unmeteredGlyph
 	}
 	tst := Style{Fg: col, Bold: true}
 	if es.Marker == model.MarkerUnbound {
@@ -394,6 +396,11 @@ func drawBox(c *Canvas, g *layout.Graph, b *layout.Box, snap *model.Snapshot, op
 	}
 }
 
+// unmeteredGlyph marks a box that is up and in order while nothing counts
+// what goes through it. It is drawn bright, as what runs is, and not with
+// the ring of idle, which would say that nothing goes through it.
+const unmeteredGlyph = "◌"
+
 // ellipsis clips s to w runes, ending with … when clipped.
 func ellipsis(s string, w int) string {
 	r := []rune(s)
@@ -429,6 +436,8 @@ func drawFrameHeader(c *Canvas, b *layout.Box, comp model.Component, es model.El
 		glyph, tst = "┄", Style{Fg: ColGray}
 	case model.MarkerStale:
 		glyph = "◷"
+	case model.MarkerUnmetered:
+		glyph = unmeteredGlyph
 	}
 	c.Text(x, y, glyph+" ", tst, 2)
 	c.Text(x+2, y, ellipsis(comp.DisplayLabel(), inner-2), Style{Bold: true}, inner-2)
@@ -469,9 +478,11 @@ func drawInstance(c *Canvas, g *layout.Graph, b *layout.Box, comp model.Componen
 		drawEmptyPlace(c, b, label, opts)
 		return
 	}
+	gauges := visibleGauges(comp, es, opts.Detail)
 	if h, ok := hostedOf(snap, b.Node, b.Instance); ok && h.Known {
 		state = h.State
 		label += fmt.Sprintf(" ×%d", h.Pods)
+		elsewhere := podsOf(snap, b.Instance) > h.Pods
 		switch {
 		case h.Ready < h.Pods:
 			line = fmt.Sprintf("%d of %d ready", h.Ready, h.Pods)
@@ -479,6 +490,17 @@ func drawInstance(c *Canvas, g *layout.Graph, b *layout.Box, comp model.Componen
 			line = fmt.Sprintf("%d restarts here", h.Restarts)
 		case h.State == model.Flowing && es.State != model.Flowing:
 			line = "fine here"
+		case h.Rate != nil && es.State == model.Flowing:
+			line = "idle here"
+			if *h.Rate > 0 {
+				line = "flowing, " + rateText(*h.Rate, es.Unit)
+			}
+		case elsewhere && es.State == model.Flowing && es.Rate > 0:
+			// the rate is the component's, not this copy's
+			line = "flowing, " + rateText(es.Rate, es.Unit) + " in all"
+		}
+		if elsewhere {
+			gauges = placeGauges(gauges, h)
 		}
 	}
 	col := StateColor(state)
@@ -521,6 +543,8 @@ func drawInstance(c *Canvas, g *layout.Graph, b *layout.Box, comp model.Componen
 		glyph, tst = "┄", Style{Fg: ColGray}
 	case model.MarkerStale:
 		glyph = "◷"
+	case model.MarkerUnmetered:
+		glyph = unmeteredGlyph
 	}
 	c.Text(x, y, glyph+" ", tst, 2)
 	c.Text(x+2, y, ellipsis(label, inner-2), Style{Bold: true}, inner-2)
@@ -538,7 +562,7 @@ func drawInstance(c *Canvas, g *layout.Graph, b *layout.Box, comp model.Componen
 	if y < b.Bottom()-1 {
 		// cpu 40% · ram 55%: the component's essentials in one line
 		var parts []string
-		for _, gg := range visibleGauges(comp, es, opts.Detail) {
+		for _, gg := range gauges {
 			name := gg.Short
 			if name == "" {
 				name = gg.Name
@@ -576,6 +600,51 @@ func drawInstance(c *Canvas, g *layout.Graph, b *layout.Box, comp model.Componen
 	if opts.Lens != nil && !lit[b.Instance] && !lit[b.ID] {
 		c.Dim(b.X, b.Y, b.W, b.H)
 	}
+}
+
+// rateText says a rate in its unit; drawInstance names its state "state".
+func rateText(v float64, unit string) string { return state.Rate(v, unit) }
+
+// podsOf counts the pods of a component on every machine that says.
+func podsOf(snap *model.Snapshot, compID string) int {
+	n := 0
+	for _, es := range snap.Components {
+		for _, h := range es.Hosted {
+			if h.ID == compID && h.Known {
+				n += h.Pods
+			}
+		}
+	}
+	return n
+}
+
+// placeGauges makes the gauges of a component that runs on several machines
+// say what its copy on one of them does: its own pods ready, and its own cpu
+// and ram where the provider read them pod by pod. A gauge of the whole
+// that the copy cannot say is left out rather than shown in its place.
+func placeGauges(all []model.Gauge, h model.Hosted) []model.Gauge {
+	var out []model.Gauge
+	for _, g := range all {
+		switch g.Name {
+		case "ready":
+			g.Value = fmt.Sprintf("%d/%d", h.Ready, h.Pods)
+			g.Pct = 100 * float64(h.Ready) / float64(max(h.Pods, 1))
+		case "cpu":
+			if h.CPUPct == nil {
+				continue
+			}
+			g.Value, g.Pct = fmt.Sprintf("%.0f%%", *h.CPUPct), *h.CPUPct
+		case "ram":
+			if h.MemPct == nil {
+				continue
+			}
+			g.Value, g.Pct = fmt.Sprintf("%.0f%%", *h.MemPct), *h.MemPct
+		case "restarts":
+			g.Value = fmt.Sprint(h.Restarts)
+		}
+		out = append(out, g)
+	}
+	return out
 }
 
 // drawEmptyPlace paints the place of a component on a machine that holds
@@ -698,7 +767,7 @@ func lookOf(r *layout.Route, snap *model.Snapshot, opts DrawOptions, lit, annota
 		lk.st = Style{Fg: ColGray, Dim: true}
 		lk.rank = 0
 	}
-	if es.State == model.Idle && es.Marker == "" {
+	if es.State == model.Idle && (es.Marker == "" || es.Marker == model.MarkerUnmetered) {
 		lk.st.Dim = true
 		lk.rank = 1
 	}

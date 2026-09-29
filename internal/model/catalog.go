@@ -89,7 +89,7 @@ var Catalog = map[string]TypeSpec{
 	}, Probes: []string{"hatchet.workers", "celery.worker", "k8s.workload"}, Notes: "A fleet of background workers (Celery, Hatchet); every slot busy with work queued reads as waiting"},
 	"scheduledjob": {Type: "scheduledjob", RateUnit: "jobs/s", Work: []string{"active"}, Lane: LaneCompute, Facets: []string{"ScheduledJobFacet"}, Gauges: []GaugeSpec{
 		{Name: "running", Short: "run", Metric: "active", RateOnly: true},
-		{Name: "ok 24h", Short: "ok", Metric: "succeeded", RateOnly: true},
+		{Name: "succeeded", Short: "ok", Metric: "succeeded", RateOnly: true},
 		{Name: "failed", Short: "fail", Metric: "failed", RateOnly: true},
 	}, Probes: []string{"k8s.cronjob", "hatchet.workflow"}, Entry: true, Notes: "CronJobs, one-off jobs and Hatchet workflows"},
 	"queue": {Type: "queue", RateUnit: "jobs/s", Work: []string{"depth"}, Lane: LaneCompute, Facets: []string{"QueueFacet"}, Gauges: []GaugeSpec{

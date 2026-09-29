@@ -299,8 +299,9 @@ func TestAComponentSaysItsOwnRateInItsOwnUnit(t *testing.T) {
 	if got := s.Components["db"].Label; got != "flowing, 95 tx/s" {
 		t.Errorf("the database counts its transactions itself: %q", got)
 	}
-	// the API reports no rate: the busiest edge that touches it stands in
-	if got := s.Components["api"].Label; got != "flowing, 120 tx/s" {
+	// the API reports no rate: what is sent to it stands in, not the queries
+	// it runs, which are the database's work
+	if got := s.Components["api"].Label; got != "flowing, 40 req/s" {
 		t.Errorf("api: %q", got)
 	}
 	// a rate of nothing of its own does not hide an edge that flows
@@ -315,14 +316,18 @@ func TestAComponentSaysItsOwnRateInItsOwnUnit(t *testing.T) {
 
 func TestIdleIsOnlySaidWhereSomethingWasMeasured(t *testing.T) {
 	s := eval(t, up()...)
-	for _, id := range []string{"api", "db", "ingress", "n1"} {
-		if es := s.Components[id]; es.State != model.Idle || es.Label != NoRate || es.Marker != "" {
+	for _, id := range []string{"api", "db", "ingress"} {
+		if es := s.Components[id]; es.State != model.Idle || es.Label != NoRate || es.Marker != model.MarkerUnmetered {
 			t.Errorf("%s: nothing measures it: %s %q %q", id, es.State, es.Label, es.Marker)
 		}
 	}
+	// a machine that is up, with nothing on it that anybody counts, says up
+	if es := s.Components["n1"]; es.State != model.Idle || es.Label != "up" || es.Marker != model.MarkerUnmetered {
+		t.Errorf("n1: %s %q %q", es.State, es.Label, es.Marker)
+	}
 	for _, id := range []string{"ingress->api", "api->db"} {
-		if es := s.Edges[id]; es.State != model.Idle || es.Label != NoRate {
-			t.Errorf("%s: nothing measures it: %s %q", id, es.State, es.Label)
+		if es := s.Edges[id]; es.State != model.Idle || es.Label != NoRate || es.Marker != model.MarkerUnmetered {
+			t.Errorf("%s: nothing measures it: %s %q %q", id, es.State, es.Label, es.Marker)
 		}
 	}
 	if sev, _, _ := WorstSeverity(s); sev != model.Info {
@@ -396,8 +401,8 @@ func TestAMachineWithSomethingUnknownOnItDoesNotSayIdle(t *testing.T) {
 	if es := s.Components["api"]; es.Marker != model.MarkerUnbound {
 		t.Fatalf("api = %s %q %q", es.State, es.Label, es.Marker)
 	}
-	if es := s.Components["n1"]; es.State != model.Idle || es.Label != NoRate {
-		t.Errorf("nothing was measured on n1: %s %q", es.State, es.Label)
+	if es := s.Components["n1"]; es.State != model.Idle || es.Label != "up" || es.Marker != model.MarkerUnmetered {
+		t.Errorf("nothing was measured on n1: %s %q %q", es.State, es.Label, es.Marker)
 	}
 }
 
@@ -459,5 +464,35 @@ func TestAMachineKnowsWhatIsNotOnIt(t *testing.T) {
 	}
 	if len(there) != 1 || there[0].ID != "api" || !there[0].Known || there[0].Pods != 0 || there[0].State != model.Idle {
 		t.Errorf("n2 holds none, and that is known: %+v", there)
+	}
+}
+
+// Idle says when work was last seen, where a probe knows: a call that
+// SigNoz counted three hours ago, a job that ran twelve minutes ago.
+func TestIdleSaysWhenWorkWasLastSeen(t *testing.T) {
+	s := eval(t, append(up(),
+		probe.Observation{Target: "ingress->api", Probe: "signoz.edge", Metrics: map[string]float64{"rate": 0},
+			Detail: map[string]any{"last_seen": now.Add(-3 * time.Hour).UTC().Format(time.RFC3339)}},
+		probe.Observation{Target: "api->db", Probe: "signoz.edge", Metrics: map[string]float64{"rate": 0},
+			Detail: map[string]any{"last_seen": now.Add(-10 * time.Minute).UTC().Format(time.RFC3339), "unit": "queries/s"}},
+	)...)
+	if got := s.Edges["ingress->api"].Label; got != "idle, last call 3 h ago" {
+		t.Errorf("ingress->api: %q", got)
+	}
+	if got := s.Edges["api->db"].Label; got != "idle, last query 10 min ago" {
+		t.Errorf("api->db: %q", got)
+	}
+	if got := s.Components["api"].Label; got != "idle, last call 3 h ago" {
+		t.Errorf("api: %q, want what was last sent to it", got)
+	}
+}
+
+// A probe that knows what it counts says the unit, and the edge takes it.
+func TestAnEdgeTakesTheUnitItsProbeSays(t *testing.T) {
+	s := eval(t, append(up(),
+		probe.Observation{Target: "api->db", Probe: "signoz.edge", Metrics: map[string]float64{"rate": 55}, Detail: map[string]any{"unit": "queries/s"}},
+	)...)
+	if got := s.Edges["api->db"].Label; got != "flowing, 55 queries/s" {
+		t.Errorf("api->db: %q", got)
 	}
 }
