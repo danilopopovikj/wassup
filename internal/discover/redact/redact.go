@@ -114,6 +114,9 @@ func EnvValue(name, value string) string {
 	if value == "" {
 		return ""
 	}
+	if v, ok := serviceName(name, value); ok {
+		return v
+	}
 	address := nameHas(name, addressWords) || strings.Contains(strings.ToLower(name), "dsn")
 	if !address {
 		lower := strings.ToLower(name)
@@ -386,4 +389,27 @@ func Expand(value string, lookup func(name string) (string, bool)) string {
 		value = next
 	}
 	return value
+}
+
+// serviceName keeps the name a workload's traces carry, and nothing else of
+// the variables that set it: OTEL_SERVICE_NAME whole, and of
+// OTEL_RESOURCE_ATTRIBUTES the service.name alone ("service.name=api"),
+// which is how the traces SigNoz holds are put to the boxes of the diagram.
+func serviceName(name, value string) (string, bool) {
+	switch name {
+	case "OTEL_SERVICE_NAME":
+		if plainRe.MatchString(value) {
+			return value, true
+		}
+		return "", true
+	case "OTEL_RESOURCE_ATTRIBUTES":
+		for _, kv := range strings.Split(value, ",") {
+			k, v, ok := strings.Cut(strings.TrimSpace(kv), "=")
+			if ok && k == "service.name" && plainRe.MatchString(v) {
+				return "service.name=" + v, true
+			}
+		}
+		return "", true
+	}
+	return "", false
 }
