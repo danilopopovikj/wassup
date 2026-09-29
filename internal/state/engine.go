@@ -265,6 +265,33 @@ func (c *ctx) evalComponent(comp model.Component) (model.ElementState, bool) {
 	return es, false
 }
 
+// callErrors makes the error rate of a service of others the share of the
+// system's own calls to it that failed, where edges that end at it counted
+// them: the share of wassup's pings that failed stays in the detail. The
+// calls are what the system does; the pings what wassup's machine sees.
+func (c *ctx) callErrors(id string, es *model.ElementState) {
+	var calls, failed float64
+	for _, e := range c.t.Edges {
+		if e.To != id {
+			continue
+		}
+		m := c.snap.Edges[e.ID()].Metrics
+		r, okR := m["rate"]
+		er, okE := m["error_rate"]
+		if okR && okE && r > 0 {
+			calls += r
+			failed += r * er / 100
+		}
+	}
+	if calls == 0 {
+		return
+	}
+	if v, ok := es.Metrics["error_rate"]; ok {
+		es.Detail["ping_error_rate"] = v
+	}
+	es.Metrics["error_rate"] = math.Round(1000*failed/calls) / 10
+}
+
 // minFailedPings is the fewest failed attempts a share of failures is said
 // on: one slow answer of ten is one slow answer.
 const minFailedPings = 2
@@ -693,6 +720,9 @@ func (c *ctx) finish(comp model.Component, es model.ElementState) model.ElementS
 	if comp.Type == "scheduledjob" {
 		return c.finishJob(comp, es)
 	}
+	if comp.Type == "external" {
+		c.callErrors(comp.ID, &es)
+	}
 	rate, unit, flowing := c.incidentFlow(comp.ID)
 	if own, ok := es.Metrics["rate"]; ok && own > 0 {
 		rate, unit, flowing = own, model.RateUnitOf(comp.Type), true
@@ -767,7 +797,7 @@ func (c *ctx) lastWork(comp model.Component, es model.ElementState) (time.Time, 
 		}
 		return last, "ran"
 	}
-	last, what := timeOf(es.Detail["last_seen"]), "last call"
+	last, what := timeOf(es.Detail["last_seen"]), "called"
 	for _, e := range c.t.Edges {
 		if e.To != comp.ID {
 			continue
@@ -779,15 +809,16 @@ func (c *ctx) lastWork(comp model.Component, es model.ElementState) (time.Time, 
 	return last, what
 }
 
-// lastNoun names the latest unit of work of an edge kind.
+// lastNoun says the latest unit of work of an edge kind, short enough for
+// a narrow box: "called 3 h ago", "queried 10 min ago".
 func lastNoun(kind string) string {
 	switch kind {
 	case "sql":
-		return "last query"
+		return "queried"
 	case "queue":
 		return "last job"
 	}
-	return "last call"
+	return "called"
 }
 
 // timeOf reads a time a probe left in a detail: a time, or RFC 3339 text.

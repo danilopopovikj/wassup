@@ -19,7 +19,7 @@ Templates per state:
 | State | Template | Example |
 | --- | --- | --- |
 | flowing | `flowing, <rate> <unit>` | flowing, 1.2k req/s |
-| idle | `idle`, `idle, last call <ago>`, `idle, ran <ago>` | idle, last call 3 h ago |
+| idle | `idle`, `idle, called <ago>`, `idle, ran <ago>` | idle, called 3 h ago |
 | waiting | `waiting, <n> queued, at the <destination>` | waiting, 38 queued, at the database |
 | processing | `processing <unit of work>, <elapsed>` | processing export-42, 18 min |
 | blocked | `blocked at firewall since <HH:MM>, rule <name>` / `blocked, health check failing since <HH:MM>` | blocked at firewall rule allow-lb-only |
@@ -30,8 +30,8 @@ when the probes of an element failed (`no data, connection refused`) and
 `stale, <last label>`. A failed probe is never a reason for `failing`.
 
 `idle` is a measurement: a rate was read, and it is zero. Where the probe
-knows when work last went through, idle says it: `idle, last call 3 h ago`
-on a service called now and then, `idle, last query 10 min ago`, and on a
+knows when work last went through, idle says it: `idle, called 3 h ago`
+on a service called now and then, `idle, queried 10 min ago`, and on a
 scheduled job `idle, ran 12 min ago`, or `idle, no run in 24 h` when its
 counts cover a day and it did not run. An element that is bound and in
 order while nothing counts what goes through it reads `no rate measured`

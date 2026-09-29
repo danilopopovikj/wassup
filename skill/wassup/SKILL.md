@@ -223,7 +223,7 @@ how far you go, with the result of the last tier in front of them.
      cnpg_pg_stat_database_xact_rollback`, `match: {datname: <db>}`, as
      `pg.stats` counts them.
    - **Idle says when.** An edge or a service of others that SigNoz counted
-     within the week and not within the window reads `idle, last call 3 h
+     within the week and not within the window reads `idle, called 3 h
      ago`; a scheduled job reads `idle, ran 12 min ago`, or `idle, no run
      in 24 h` when it did not run: that one is worth telling the user.
    - **A service inside the cluster** that a tier 1 or 2 probe reads

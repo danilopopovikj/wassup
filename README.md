@@ -125,7 +125,7 @@ glyph and one color each.
 | | State | Means |
 | --- | --- | --- |
 | `●` | flowing | work is moving |
-| `○` | idle | healthy, nothing happening, and since when: "idle, last call 3 h ago" |
+| `○` | idle | healthy, nothing happening, and since when: "idle, called 3 h ago" |
 | `≡` | waiting | work is queued at the destination |
 | `◐` | processing | a long unit of work is running |
 | `⊘` | blocked | traffic cannot pass |
