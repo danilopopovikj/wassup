@@ -125,13 +125,16 @@ glyph and one color each.
 | | State | Means |
 | --- | --- | --- |
 | `●` | flowing | work is moving |
-| `○` | idle | healthy, nothing happening |
+| `○` | idle | healthy, nothing happening, and since when: "idle, last call 3 h ago" |
 | `≡` | waiting | work is queued at the destination |
 | `◐` | processing | a long unit of work is running |
 | `⊘` | blocked | traffic cannot pass |
 | `✕` | failing | errors or crashes |
 
-A box wassup has no data for is drawn as unbound, never as healthy.
+A box wassup has no data for is drawn as unbound, never as healthy. A box
+that is up while nothing counts its traffic reads `◌ no rate measured`: not
+idle, not broken, just not counted, and `wassup measure` says what would
+count it.
 
 | Key | Does |
 | --- | --- |
@@ -175,6 +178,7 @@ one.
 | `wassup validate` | checks the files in `.wassup/` |
 | `wassup probe [--tier <n>]` | runs every probe and reports what is unbound, why, and what to do |
 | `wassup probe <id>` | runs the probes of one element and prints what they read |
+| `wassup measure [--write]` | finds a counter for every edge that has none, from the router and SigNoz, with the evidence, or says why none can |
 | `wassup access` | prints the smallest read-only account for the probes you use |
 | `wassup explain <ref>` | everything known about one element |
 

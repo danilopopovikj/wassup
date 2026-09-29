@@ -19,7 +19,7 @@ Templates per state:
 | State | Template | Example |
 | --- | --- | --- |
 | flowing | `flowing, <rate> <unit>` | flowing, 1.2k req/s |
-| idle | `idle` | idle |
+| idle | `idle`, `idle, last call <ago>`, `idle, ran <ago>` | idle, last call 3 h ago |
 | waiting | `waiting, <n> queued, at the <destination>` | waiting, 38 queued, at the database |
 | processing | `processing <unit of work>, <elapsed>` | processing export-42, 18 min |
 | blocked | `blocked at firewall since <HH:MM>, rule <name>` / `blocked, health check failing since <HH:MM>` | blocked at firewall rule allow-lb-only |
@@ -29,10 +29,23 @@ Markers outside the six states: `unbound, no probe data`, `no data, <reason>`
 when the probes of an element failed (`no data, connection refused`) and
 `stale, <last label>`. A failed probe is never a reason for `failing`.
 
-`idle` is a measurement: a rate was read, and it is zero. An element that is
-bound and in order while nothing counts what goes through it reads
-`no rate measured`. A job that says it is not running and a queue that says
-it is empty are idle without a rate.
+`idle` is a measurement: a rate was read, and it is zero. Where the probe
+knows when work last went through, idle says it: `idle, last call 3 h ago`
+on a service called now and then, `idle, last query 10 min ago`, and on a
+scheduled job `idle, ran 12 min ago`, or `idle, no run in 24 h` when its
+counts cover a day and it did not run. An element that is bound and in
+order while nothing counts what goes through it reads `no rate measured`
+with the glyph `◌`, bright: it is up, which is not idle and not trouble. A
+machine in that case reads `up`. A job that says it is not running and a
+queue that says it is empty are idle without a rate.
+
+A rate is said in the unit of what was counted: `req/s` for requests,
+`queries/s` for the calls of a service to its database, `tx/s` for a
+database's transactions (its commits and its rollbacks). A component's own
+rate is what is sent to it: an API reads the requests it serves, not the
+queries it runs. The copy of a component on one machine says its own pods,
+cpu, ram and rate where they are known, and `in all` after a rate that is
+the whole component's.
 
 A rate is said in the unit a person would count in. Below one a second it
 is said by the minute, below one a minute by the hour: `1 req/min` and

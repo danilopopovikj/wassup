@@ -222,6 +222,12 @@ you turn it on for a bucket you do not know the size of.
 
 ## Rates: `k8s.scrape` and `signoz.edge`
 
+`wassup measure` writes most of these bindings: it reads which Service each
+Ingress routes to, one metrics page of the router and a week of SigNoz, and
+proposes the binding of every edge that has none, with the evidence that it
+counts, or says why none can. What follows is what those bindings mean, and
+how to write one where `measure` has no rule.
+
 Both read a counter and report how fast it grows: `rate` per second, and
 `error_rate`, the percentage of it that the series matching `errors` make
 up. `metric` is the name of the counter, `match` and `errors` map a label
@@ -262,6 +268,34 @@ database instance. All the bindings of one metric are answered by one
 query, sent every `interval` (1 min) over `window` (5 min), so ten bindings
 cost SigNoz's database what one costs.
 
+It asks for what the counter counted step by step, a minute a step, and
+divides the sum by the window. It does not ask SigNoz for a rate: SigNoz
+averages a rate over the steps a series has a value in, so a service called
+in three minutes of sixty would read twenty times what it was called. The
+minute that is still coming in is left out. `count` in the detail is what
+was counted over the window.
+
+`unit` says what one count is, a plural word (`queries`, `spans`, `tx`):
+the calls of a service to its database are `queries/s` without it, every
+other count `req/s`. `plus` adds more counters of the same thing to
+`metric`, a name or a list: a database's transactions are its commits and
+its rollbacks, as `pg.stats` counts them.
+
+```yaml
+db-standby:
+  - probe: signoz.edge
+    url: https://signoz.bookstore.example
+    metric: cnpg_pg_stat_database_xact_commit
+    plus: cnpg_pg_stat_database_xact_rollback
+    match: { k8s.pod.name: bookstore-db-2, datname: bookstore }
+```
+
+A counter the collector scrapes (every `cnpg_` counter) starts over when the
+collector restarts, and SigNoz then reads its whole count since the pod
+started as the increase of one step. Such a step, a thousand times the
+series' median and over a hundred thousand, is left out, and the window
+with it; `restart_note` says so.
+
 ```yaml
 api->github:
   - probe: signoz.edge
@@ -274,11 +308,13 @@ api->github:
 ```
 
 A service that is called now and then has no series in a window in which
-nobody called it. `signoz.edge` then reads the last day (`known`, 24 h;
-`known: 0s` leaves it out): a series that was counted within it is known,
-its counter did not move, and the rate is 0, which the diagram says as
-`idle`. The day is read in steps of 24 minutes, every ten minutes, and only
-while the window holds nothing of a binding.
+nobody called it. `signoz.edge` then reads the last day, in steps of five
+minutes, and when that holds nothing either the whole of `known` (a week;
+`known: 0s` leaves it out), in steps of an hour: a series that was counted
+within it is known, its counter did not move, and the rate is 0, which the
+diagram says as `idle, last call 3 h ago`: `last_seen` is the end of the
+last step that counted. The past is read every ten minutes, and only while
+the window holds nothing of a binding.
 
 A binding that matches no series in the day either reports no rate, and the
 element reads `no rate measured`: `match` names a value that does not exist,
@@ -319,7 +355,7 @@ idle.
 | `hatchet.workflow` | 1 | ScheduledJobFacet | the Hatchet REST API: the workflow list, per-workflow task metrics (read beside the polls, at most once a minute, with a timeout of their own), the latest workflow runs and the cron triggers | succeeded, failed, active, queued, cancelled over the window that answered, rate (finished runs per second over it), running_s; JobFailed when the latest finished run failed, JobRunning while a run is running; a job event per failed run; detail: window (the window the counts cover, 24h falling back to 6h and 1h when counting takes too long), counts_at, latest_status, last_run, last_success, last_failure, schedule, cron, workflow_id, url, via | `url`, `token_env`, `tenant`, `interval`, `timeout`, `via`, `kubeconfig`, `context`, `workflow`, `window` | a Hatchet API token in the environment variable named by token_env (default HATCHET_CLIENT_TOKEN); the tenant id from the spec or from the token. With via set to k8s.service/<namespace>/<name>:<port> (or k8s.pod/...) wassup opens its own port-forward to the API, which the identity of the kubeconfig has to be allowed to do in that namespace (get on services, get and list on pods, create on pods/portforward); bindings with the same via share one. url may then be left out and reads http://<name>.<namespace>.svc:<port>; a url that is set keeps its scheme and its path, and its host is the Host header and the name of the certificate, not the address that is dialled | shipped |
 | `hcloud.firewall` | 1 | FirewallFacet, TrafficFacet | the Hetzner Cloud API firewall resource | rules (count); on an edge with port set: allowed (1/0) and FirewallDenied when no inbound rule lets the port through; detail: rules (direction, protocol, port, source ips, description), applied_to. No events: terraform.state owns change markers | `name`, `id`, `token_env`, `port`, `protocol`, `interval`, `endpoint` | a read-only Cloud API token in the environment variable named by token_env (default HCLOUD_TOKEN) | shipped |
 | `hcloud.lb` | 1 | LoadBalancerFacet | the Hetzner Cloud API: load balancer targets' health and the load balancer metrics endpoint | connections, rate (requests per second), targets_healthy, targets_total (each server or IP once, however many targets name it), TargetUnhealthy when no target is healthy; per entry of targets an observation for the edge <lb>-><component> with healthy (1/0) and HealthCheckFailing; detail: services, targets, algorithm, location | `name`, `id`, `token_env`, `targets`, `interval`, `endpoint` | a read-only Cloud API token in the environment variable named by token_env (default HCLOUD_TOKEN) | shipped |
-| `http.ping` | 0 | ExternalFacet, WorkloadFacet, ObservabilityFacet | an HTTP endpoint | latency_ms, error_rate and timeout_rate over the last 10 attempts, the last status, Timeout after 3 consecutive failures | `url`, `method`, `timeout`, `interval`, `expect_status` | outbound HTTPS to the endpoint; no credentials | shipped |
+| `http.ping` | 0 | ExternalFacet, WorkloadFacet, ObservabilityFacet | an HTTP endpoint | latency_ms, error_rate and timeout_rate over the last 10 attempts (from the fifth on), the last status, Timeout after 3 consecutive failures | `url`, `method`, `timeout`, `interval`, `expect_status` | outbound HTTPS to the endpoint; no credentials | shipped |
 | `k8s.cronjob` | 0 | ScheduledJobFacet | Kubernetes API (cronjob and job informers) | active, succeeded, failed (last 24h), running_s; JobFailed, JobRunning | `namespace (required)`, `name (required)`, `kubeconfig`, `context` | get/list/watch on cronjobs and jobs in the namespace | shipped |
 | `k8s.ingress` | 0 | IngressFacet, CertificateFacet | Kubernetes API (ingress informer); the certificate's expiry from cert-manager Certificates when installed, else from a TLS handshake with the ingress host; the TLS secrets only when read_tls_secret is true | cert_days; CertExpired, CertExpiring, CertRenewalFailed; cert (renewal) events | `namespace (required)`, `name (required)`, `read_tls_secret`, `kubeconfig`, `context` | get/list/watch on ingresses; list on certificates.cert-manager.io (optional); TCP access to the ingress hosts on port 443 (optional); get on the TLS secrets in the namespace only when read_tls_secret is true | shipped |
 | `k8s.node` | 0 | NodeFacet | Kubernetes API (node, pod and event informers), metrics.k8s.io NodeMetrics and the kubelet /stats/summary through the API server proxy | cpu_pct, mem_pct, disk_pct, pods, killed; NotReady, MemoryPressure, DiskPressure, Rebooted; node (reboot) events | `name (required)`, `kubeconfig`, `context` | get/list/watch on nodes, pods and events; get on nodes.metrics.k8s.io; get on nodes/proxy for disk usage (optional) | shipped |
@@ -332,6 +368,6 @@ idle.
 | `redis.info` | 2 | CacheFacet | the Redis INFO command | mem_pct, hit_rate (per tick), evictions (per minute), clients; CacheFull when memory is at the limit and the policy is noeviction or the hit rate collapsed; detail: maxmemory, maxmemory_policy, used_memory_human, keys, keys_without_ttl, redis_version, via | `addr`, `url`, `host`, `port`, `user`, `password_env`, `db`, `tls`, `via`, `kubeconfig`, `context` | network access to the Redis port, named by url, by addr (host:port) or by host and port; a password in the environment variable named by password_env when AUTH is on (taken as it is, nothing to encode), and user for an ACL user. With via set to k8s.service/<namespace>/<name>:<port> (or k8s.pod/...) wassup opens its own port-forward to the server, which the identity of the kubeconfig has to be allowed to do in that namespace (get on services, get and list on pods, create on pods/portforward); bindings with the same via share one. The address may then be left out; one that is set is the name in the messages and in the certificate, not what is dialled | shipped |
 | `redis.list` | 2 | QueueFacet | LLEN on one Redis list | depth; detail: key, via | `addr`, `url`, `host`, `port`, `key`, `user`, `password_env`, `db`, `tls`, `via`, `kubeconfig`, `context` | network access to the Redis port, named by url, by addr (host:port) or by host and port; a password in the environment variable named by password_env when AUTH is on (taken as it is, nothing to encode), and user for an ACL user. With via set to k8s.service/<namespace>/<name>:<port> (or k8s.pod/...) wassup opens its own port-forward to the server, which the identity of the kubeconfig has to be allowed to do in that namespace (get on services, get and list on pods, create on pods/portforward); bindings with the same via share one. The address may then be left out; one that is set is the name in the messages and in the certificate, not what is dialled | shipped |
 | `s3.bucket` | 1 | StorageFacet | an S3-compatible object store (AWS S3, Hetzner Object Storage, MinIO, Spaces, R2): HeadBucket, one request a round; with list_objects: true also a paged ListObjectsV2 under the optional prefix, one request per 1000 objects a round | latency_ms of HeadBucket; NotReady when the bucket does not exist, ConnectionRefused when the endpoint does not answer; detail: region, endpoint. With list_objects: true also used_bytes and objects summed over the listing, last_write, and disk_pct when quota_bytes is set; a bucket with more than max_objects keys (default 20000) is not sized and reports only lower bounds in the detail. Without the listing the size and the object count are not read and not shown | `bucket`, `endpoint`, `region`, `list_objects`, `prefix`, `path_style`, `access_key_env`, `secret_key_env`, `session_token_env`, `quota_bytes`, `max_objects`, `interval`, `timeout` | read-only credentials in the environment variables named by access_key_env and secret_key_env (default AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY), allowed s3:ListBucket on the bucket, which HeadBucket and the listing both take. The check costs one request a round; the listing costs one more per 1000 objects, which a store that bills requests charges for | shipped |
-| `signoz.edge` | 1 | TrafficFacet, DatabaseFacet | a counter SigNoz holds, such as the calls of one service to another, asked for with one read query per metric that the bindings share (POST /api/v5/query_range) | on an edge: rate (per second, the counter's growth over the window summed over the series that match) and error_rate (the percentage of it that the series matching errors make up); on a database: rate, its transactions per second; a rate of 0 when the series that match were counted within known (a day) and not within the window; no rate when no series matches in either; detail: the metric, the series matched, the window | `url (required)`, `metric (required)`, `match`, `errors`, `window`, `known`, `interval`, `user_env`, `password_env`, `token_env` | HTTP access to SigNoz, and a user with the viewer role: its name and password in the environment variables named by user_env and password_env (default SIGNOZ_USER, SIGNOZ_PASSWORD), or an API key in the one named by token_env. wassup signs in with a POST and asks with a POST; neither changes anything in SigNoz. A query costs SigNoz's database a read over the window, once per metric and interval, however many bindings use the metric; while the window holds nothing of a binding, one more over the last day (known) every ten minutes, in steps of 24 minutes | shipped |
+| `signoz.edge` | 1 | TrafficFacet, DatabaseFacet | a counter SigNoz holds, such as the calls of one service to another, asked for with one read query per metric that the bindings share (POST /api/v5/query_range) | on an edge: rate (per second: what the series that match counted over the window, divided by the window) and error_rate (the percentage of it that the series matching errors make up); on a database: rate, its transactions per second; a rate of 0 when the series that match were counted within known (a week) and not within the window; no rate when no series matches in either; detail: the metric, the series matched, the window, count (what they counted in it), last_seen (the end of the last step that counted anything), unit | `url (required)`, `metric (required)`, `plus`, `match`, `errors`, `window`, `known`, `unit`, `interval`, `user_env`, `password_env`, `token_env` | HTTP access to SigNoz, and a user with the viewer role: its name and password in the environment variables named by user_env and password_env (default SIGNOZ_USER, SIGNOZ_PASSWORD), or an API key in the one named by token_env. wassup signs in with a POST and asks with a POST; neither changes anything in SigNoz. A query costs SigNoz's database a read over the window, once per metric and interval, however many bindings use the metric; while the window holds nothing of a binding, one more over the last day every ten minutes, in steps of five minutes, and when that holds nothing either, one over known (a week) in steps of an hour | shipped |
 | `signoz.health` | 1 | ObservabilityFacet | SigNoz's own health and ingestion metrics (otel-collector, query-service, ClickHouse) | ingest_rate (spans and metrics per second), disk_pct of the ClickHouse volume; NoData when the collector stops receiving, so every signoz.edge reads as no data instead of healthy | `url`, `token_env` | HTTP access to the SigNoz query service; a SigNoz API key in token_env when auth is on | spec only, not implemented yet |
 | `terraform.state` | 0 |  | terraform show -json in a working directory | terraform events per added, removed or changed resource, the rules count of hcloud firewalls and FirewallDenied when no firewall allows inbound TCP to the edge's port | `dir`, `interval`, `watch`, `resource`, `port`, `binary` | the terraform binary, an initialised working directory and read access to its state backend | shipped |

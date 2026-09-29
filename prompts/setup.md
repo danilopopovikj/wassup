@@ -43,11 +43,13 @@ writes to the cluster or the infrastructure.
    `wassup validate` and `wassup probe --tier <n>`, fix what is unbound
    (`wassup probe <id>` tests one element), tell me what you found, and stop
    until I say go on.
-6. A box that nothing counts reads `no rate measured`. That is not a
-   fault. Tell me which probe would count it (`k8s.scrape`, `signoz.edge`,
-   `pg.stats`) and what that probe needs. Every service of others should
-   say a rate: bind the edge from each component that calls it, run
-   `wassup probe <id>` on each, and give what is called a few times an
-   hour `window: 1h`. Name the reason for every one that still has none.
+6. Find the rates with `wassup measure` (with `--signoz https://…` when
+   no binding names SigNoz yet). Show me its report: what it found and
+   the evidence, what cannot be counted and why, and what it saw that no
+   box stands for. Add the components and edges it lists once you have
+   checked them against the code or the egress allowlist, run it again,
+   then `wassup measure --write` and `wassup probe`. A box that still reads
+   `no rate measured` (◌) is up and uncounted, not broken: tell me the
+   reason `measure` gave for each.
 7. Commit `.wassup/` after I approve (its `state/` and `proposed/`
    directories and `local.env` are gitignored).
