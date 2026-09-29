@@ -6,6 +6,7 @@ package state
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -264,6 +265,40 @@ func (c *ctx) evalComponent(comp model.Component) (model.ElementState, bool) {
 	return es, false
 }
 
+// minFailedPings is the fewest failed attempts a share of failures is said
+// on: one slow answer of ten is one slow answer.
+const minFailedPings = 2
+
+// attempts is how many attempts of a ping a share stands for, from the
+// window the ping reports; without one, the share is taken as it is.
+func attempts(j *bind.Joined, pct float64) float64 {
+	n := toInt(j.Detail["window"])
+	if n == 0 {
+		return minFailedPings
+	}
+	return math.Round(pct * float64(n) / 100)
+}
+
+// callsSucceed reports whether the system's own calls to a component were
+// counted on an edge that ends at it, and failed less than the threshold.
+func (c *ctx) callsSucceed(id string, th model.ThresholdSet) bool {
+	for _, e := range c.t.Edges {
+		if e.To != id {
+			continue
+		}
+		j := c.joined(e.ID())
+		if j == nil || !j.Bound {
+			continue
+		}
+		r, okR := j.Metrics["rate"]
+		er, okE := j.Metrics["error_rate"]
+		if okR && okE && r > 0 && er <= th.ErrorRatePct {
+			return true
+		}
+	}
+	return false
+}
+
 // shortErr makes a probe error fit a label: without the probe's name, and
 // when it is long, the last part, which is where a wrapped error says what
 // happened ("connection refused"). The whole error stays in the detail.
@@ -368,10 +403,16 @@ func (c *ctx) failingReason(comp model.Component, j *bind.Joined, th model.Thres
 			}
 			return s
 		}
-		if v, ok := metric(j, "timeout_rate"); ok && v > th.TimeoutRatePct {
+		// The share of failed pings says what wassup's machine sees. Where
+		// the system's own calls to the service were counted and succeed,
+		// they say more, and one ping in ten that timed out says little.
+		if c.callsSucceed(comp.ID, th) {
+			break
+		}
+		if v, ok := metric(j, "timeout_rate"); ok && v > th.TimeoutRatePct && attempts(j, v) >= minFailedPings {
 			return fmt.Sprintf("%s timeouts", Pct(v))
 		}
-		if v, ok := metric(j, "error_rate"); ok && v > th.ErrorRatePct {
+		if v, ok := metric(j, "error_rate"); ok && v > th.ErrorRatePct && attempts(j, v) >= minFailedPings {
 			return fmt.Sprintf("%s errors", Pct(v))
 		}
 	case "scheduledjob":
