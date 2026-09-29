@@ -984,10 +984,13 @@ func (c *ctx) evalEdge(e model.Edge) model.ElementState {
 			es.Label = "no data"
 			return es
 		}
-		if r := c.derivedRate(e, src, dst); r > 0 {
+		if r, known := c.derivedRate(e, src, dst); r > 0 {
 			es.State = model.Flowing
 			es.Rate = r
 			es.Label = "flowing, " + Rate(r, es.Unit)
+			return es
+		} else if known {
+			es.State, es.Label = model.Idle, "idle" // its end was measured at nothing
 			return es
 		}
 	}
@@ -1015,15 +1018,24 @@ func (c *ctx) baseline(edgeID string, es model.ElementState) float64 {
 	return 0
 }
 
-// derivedRate uses component-level rate metrics when an edge has none.
-func (c *ctx) derivedRate(e model.Edge, src, dst model.ElementState) float64 {
-	if r, ok := dst.Metrics["rate"]; ok && r > 0 && len(c.t.Incoming(e.To)) == 1 {
-		return r
+// derivedRate uses component-level rate metrics when an edge has none: the
+// rate of its destination when nothing else reaches it, or of its source
+// when it sends nowhere else. known says one of them was read, at zero too.
+func (c *ctx) derivedRate(e model.Edge, src, dst model.ElementState) (float64, bool) {
+	var known bool
+	if r, ok := dst.Metrics["rate"]; ok && len(c.t.Incoming(e.To)) == 1 {
+		if r > 0 {
+			return r, true
+		}
+		known = true
 	}
-	if r, ok := src.Metrics["rate"]; ok && r > 0 && len(c.t.Outgoing(e.From)) == 1 {
-		return r
+	if r, ok := src.Metrics["rate"]; ok && len(c.t.Outgoing(e.From)) == 1 {
+		if r > 0 {
+			return r, true
+		}
+		known = true
 	}
-	return 0
+	return 0, known
 }
 
 // rollupRoles makes a db with roles inherit its primary's state and note
