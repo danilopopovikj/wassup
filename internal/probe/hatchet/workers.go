@@ -257,9 +257,13 @@ func (p *WorkersProbe) poll(ctx context.Context, st *workersState) probe.Observa
 			pool.TypicalDuration = time.Duration(percentile(durations, 95) * float64(time.Second))
 		}
 		o.Detail["completed_last_hour"] = len(done)
-		if len(done) < runPage {
+		switch {
+		case st.name != "":
+			// the runs of the tenant are not the runs of one fleet
+			o.Detail["rate_note"] = "no rate is said for a fleet chosen by name: Hatchet's list of finished tasks does not say which worker ran them"
+		case len(done) < runPage:
 			pool.Rate = facet.N(float64(len(done)) / p95Window.Seconds())
-		} else {
+		default:
 			o.Detail["rate_note"] = fmt.Sprintf("at least %d tasks finished in the last hour, as many as one page holds: no rate is said", runPage)
 		}
 	}

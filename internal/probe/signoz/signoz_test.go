@@ -722,7 +722,7 @@ func TestTheUnitOfACountIsSaid(t *testing.T) {
 	for _, c := range []struct {
 		metric, unit, want string
 	}{
-		{"signoz_external_call_latency_count", "", "req/s"},
+		{"signoz_external_call_latency_count", "", ""}, // the edge's kind says it
 		{"signoz_db_latency_count", "", "queries/s"},
 		{"signoz_calls_total", "spans", "spans/s"},
 		{"signoz_calls_total", "spans/s", "spans/s"},

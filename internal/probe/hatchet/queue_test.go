@@ -285,7 +285,7 @@ func TestQueueTaskStatsFilters(t *testing.T) {
 		"a queue its tasks alone wait in": {map[string]any{"queue": "emails"}, 6, -1, 120, "queue", true},
 		"a queue shared with another":     {map[string]any{"queue": "default"}, 3, -1, 600, "tenant", true},
 		"an unknown queue":                {map[string]any{"queue": "nothing"}, 0, -1, -1, "", false},
-		"a workflow and its tasks":        {map[string]any{"workflow": "send-email"}, 6, 2, 120, "workflow", true},
+		"a workflow and its tasks":        {map[string]any{"workflow": "send-email"}, 5, 2, 120, "workflow", true}, // not send-email-digest
 		"a workflow with nothing queued":  {map[string]any{"workflow": "idle"}, 0, 3, -1, "", true},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -358,5 +358,22 @@ func TestQueueDeprecatedQueueMetricsFallsBack(t *testing.T) {
 	st, _ = p.setup(specFor(t, srv, nil))
 	if o := p.poll(context.Background(), st); !strings.Contains(o.Err, "invalid tenant") {
 		t.Fatalf("err = %q", o.Err)
+	}
+}
+
+func TestATaskBelongsToItsWorkflowAndNotToOneWhoseNameItStartsWith(t *testing.T) {
+	for _, c := range []struct {
+		task, workflow string
+		want           bool
+	}{
+		{"process", "process", true},
+		{"process:resize", "process", true},
+		{"process.resize", "process", true},
+		{"process-image", "process", false},
+		{"processing", "process", false},
+	} {
+		if got := taskOf(c.task, c.workflow); got != c.want {
+			t.Errorf("taskOf(%q, %q) = %v", c.task, c.workflow, got)
+		}
 	}
 }
