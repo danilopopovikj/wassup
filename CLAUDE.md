@@ -11,8 +11,9 @@ already taken so they are not re-litigated in every session.
 1. **One diagram.** The general view and the issue view are the same picture,
    filtered. Never add a second screen, tab or mode to learn.
 2. **Six states, one glyph and one color each.** flowing, idle, waiting,
-   processing, blocked, failing. Two markers describe wassup itself, not the
-   system: unbound (no probe data) and stale (data older than 3 ticks), plus
+   processing, blocked, failing. Three markers describe wassup itself, not the
+   system: unbound (no probe data), stale (data older than 3 ticks) and
+   unmetered (`◌`, bound and in order while nothing counts its traffic), plus
    "no data" on edges when the traffic source is down. Nothing else may
    introduce a state, a glyph or a color.
 3. **Plain words.** Labels read "waiting, 38 queued, at the database", never
@@ -34,8 +35,12 @@ already taken so they are not re-litigated in every session.
 6. **Never fabricate.** A number the provider did not report is omitted
    (`facet.Num` unset), never written as 0. A component with no probe data is
    drawn unbound, never healthy. Idle, unbound, stale and no data must look
-   different at a glance. Idle is a rate that was read at zero: what nothing
-   counts reads `no rate measured`. A probe that failed, timed out or may not read
+   different at a glance, and so must unmetered: a box that is up while
+   nothing counts it is neither idle nor broken. Idle is a rate that was read
+   at zero, and says when work was last seen where a probe knows; what
+   nothing counts reads `no rate measured`. A rate is a count over a window,
+   never an average of the moments that had a count; a counter that started
+   over is not a burst. A probe that failed, timed out or may not read
    its source says nothing about the system: the element reads "no data"
    with the reason, and failing is only ever concluded from data that was
    read. A value the source hides from the role (NULL) is not known.

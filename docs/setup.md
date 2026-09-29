@@ -113,11 +113,12 @@ Rules:
 - A database or a service inside the cluster is reached with
   `via: k8s.service/<namespace>/<service>:<port>`. Never ask me to run
   `kubectl port-forward`.
-- A box that nothing counts reads "no rate measured"; that is not a fault.
-  Tell me which probe would count it (k8s.scrape, signoz.edge, pg.stats)
-  and what that probe needs. Every service of others should say a rate:
-  bind the edge from each component that calls it, run `wassup probe <id>`
-  on each, and name the reason for every one that still has none.
+- Rates come from `wassup measure` (with `--signoz https://…` when no
+  binding names SigNoz yet): show me its report, add the components and
+  edges it saw that no box stands for once you checked them in the code or
+  the egress allowlist, then `wassup measure --write` and `wassup probe`.
+  A box that still reads "no rate measured" (◌) is up and uncounted, not a
+  fault: tell me the reason measure gave for each.
 - Never guess. A connection you cannot back with evidence is left out and
   reported, not drawn.
 - Commit .wassup/ only after I approve the result (its state/ directory is
@@ -147,6 +148,9 @@ wassup export                       # the picture, before any live data
 wassup validate                     # schemas and id cross-checks
 wassup probe --tier 0               # Kubernetes, DNS, certificates, pings
 wassup probe --tier 1               # adds what needs a token
+wassup measure --signoz https://signoz.example.com
+                                    # a counter for every edge: found, or why not
+wassup measure --write              # adds the bindings it found
 wassup probe                        # everything
 wassup probe db                     # one element, with every value it read
 wassup                              # the diagram

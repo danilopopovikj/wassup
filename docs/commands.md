@@ -12,6 +12,7 @@ one command.
 | `wassup validate` | schemas plus id cross-checks |
 | `wassup probe [--tier <n>]` | runs every binding (two samples) and prints a line per probe as it finishes; reports bound/unbound per component and edge with the probe that failed, why, and what to do; `--tier` runs the bindings up to a tier and leaves the rest for later; `--json` adds per-probe status, error and metrics |
 | `wassup probe <id>` | runs the bindings of one component or edge and prints every value, condition and detail they read |
+| `wassup measure [--signoz <url>] [--lookback 168h] [--write]` | reads the cluster, the router's counters and SigNoz, and says for every edge without a binding: the binding that counts it with the evidence, why none can with the fix, or that it needs no rate; lists what was seen that no box stands for; `--write` adds the bindings found |
 | `wassup access [--logs] [--manifest]` | prints the smallest read-only account for the probes in `bindings.yaml` and the commands for a kubeconfig with a token that expires; contacts nothing |
 | `wassup snapshot [--watch <ref> --until <state> --timeout <d>]` | prints or waits |
 | `wassup explain <ref> [@time]` | everything about an element, under 200 lines |

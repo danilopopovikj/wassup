@@ -188,23 +188,44 @@ how far you go, with the result of the last tier in front of them.
    - `k8s.ingress` does not read TLS secrets unless `read_tls_secret: true`
      is set; leave it off unless there is no cert-manager Certificate and
      the ingress host cannot be reached for a handshake.
-   - **Rates.** A box without a rate reads `no rate measured`, which is
-     not a fault and not idle: nothing counts what goes through it. Bind
-     what counts: `k8s.scrape` on the router or ingress controller and on
-     its edges (tier 0, the counters the pods keep themselves),
-     `signoz.edge` on the edges of every service that sends traces
-     (tier 1), `pg.stats` on a database. `reference/probes.md` has both
-     shapes. Write a `match`, run `wassup probe <id>`, and read `series`
-     in the detail. A `match` that finds nothing reports no rate, and
-     `label_values` lists the values there are.
-   - **Every service of others gets a rate.** Bind `signoz.edge` on the
-     edge from each component that calls it, and run `wassup probe <id>`
-     on every one of them: a binding that was not run is not known to
-     work. One that is called a few times an hour takes `window: 1h` and
-     reads `12 req/h`; one nobody called within the window reads `idle`,
-     because its series was counted within the last day. What stays at
-     `no rate measured` has a reason, and you say it: the caller sends no
-     traces, or the address was never called.
+   - **Rates: run `wassup measure`, do not write them by hand.** A box
+     that nothing counts reads `no rate measured` with the glyph `◌`: it is
+     up, and whether work goes through it is not known. That is not a
+     fault and not idle. `wassup measure` reads the cluster (which Service
+     each Ingress routes to), one metrics page of the router (the services
+     and routes Traefik counts) and SigNoz over a week (the calls, queries
+     and requests of every service that sends traces), and says for every
+     edge without a binding: the binding that counts it with the evidence,
+     why nothing can yet with the fix, or that it needs no rate. Without a
+     `signoz.edge` binding yet, pass `--signoz https://…`; it signs in with
+     `SIGNOZ_USER`/`SIGNOZ_PASSWORD`, or `SIGNOZ_API_KEY`, from
+     `local.env`. Read the report with the user, then
+     `wassup measure --write` adds the bindings found and touches none that
+     is there. Run `wassup probe` after it.
+   - **What measure saw and no box stands for** is listed at the end: a
+     host a service called (`backend called licenseplatedata.com 130
+     times`), a service that sends traces and is no component. Add the
+     component and the edge (confirm the host in the egress allowlist or
+     the code first), then run `measure` again: it binds the new edge.
+   - **What cannot be counted** keeps its reason, and you tell the user:
+     the caller sends metrics but no span of its calls (a span processor
+     that drops spans without a parent does that to a worker), two hosts
+     share a Service and the router counts by service (the fix is Traefik's
+     `addRoutersLabels`), the router serves no metrics at all (Traefik's
+     `metrics.prometheus` is off), nothing called the address this week.
+   - A binding by hand, where `measure` has no rule: `k8s.scrape` on the
+     router's counters (tier 0), `signoz.edge` on any counter SigNoz holds
+     (tier 1), `pg.stats` on a database. Write a `match`, run
+     `wassup probe <id>`, read `series` in the detail; a `match` that finds
+     nothing lists the values there are in `label_values`. A database's
+     transactions are its commits and its rollbacks: `metric:
+     cnpg_pg_stat_database_xact_commit`, `plus:
+     cnpg_pg_stat_database_xact_rollback`, `match: {datname: <db>}`, as
+     `pg.stats` counts them.
+   - **Idle says when.** An edge or a service of others that SigNoz counted
+     within the week and not within the window reads `idle, last call 3 h
+     ago`; a scheduled job reads `idle, ran 12 min ago`, or `idle, no run
+     in 24 h` when it did not run: that one is worth telling the user.
    - **A service inside the cluster** that a tier 1 or 2 probe reads
      (Hatchet, Redis, Electric, Flower) takes `via` as a database does.
    - **Say what is not there yet.** `signoz.health` and `kubelet.stats` are
@@ -233,6 +254,10 @@ proposal against the committed files:
 - `+ binding`: an existing component is unbound and the scanner knows a
   probe for it.
 - `~`: a type or edge kind that disagrees between the repo and the diagram.
+
+`wassup measure` belongs to the same round: a service the application
+started calling this week shows under "no box stands for it" before anyone
+writes it down, and a new edge gets its binding from `measure --write`.
 
 Then `wassup sync --apply` merges the additions (labels, groups, notes and
 `layout.json` are never touched; new boxes take auto positions), and
@@ -300,6 +325,7 @@ metrics, conditions, since, gauges, notes}}`, `edges{id: {state, label, rate,
 queued, error_rate, since}}`, `probe_health{kind: ok|degraded|failed}`,
 `issues[{id, cause, severity, path, story}]`. Markers `unbound`, `stale` and
 `nodata` describe wassup, not the system: treat them as "unknown", never as
-healthy and never as failing. An element whose probes failed reads
+healthy and never as failing. `unmetered` is an element that is bound and in
+order while nothing counts what goes through it: up, traffic unknown. An element whose probes failed reads
 `no data, <reason>`; the whole error of every failed probe is in
 `detail.probe_errors`, also on an element that other probes keep bound.
