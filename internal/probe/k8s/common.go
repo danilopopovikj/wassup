@@ -257,9 +257,16 @@ type usage struct {
 // chosen basis are left out of both sides. The booleans say whether a
 // percentage could be computed at all.
 func podUsage(pods []*corev1.Pod, metrics map[string]*metricsv1beta1.PodMetrics) (cpu, mem float64, haveCPU, haveMem bool) {
+	return podUsageOf(pods, pods, metrics)
+}
+
+// podUsageOf is podUsage over pods with the basis (limits or requests)
+// chosen from all, the whole set they belong to: the share of one machine's
+// pods is then measured against the same thing as the workload's.
+func podUsageOf(all, pods []*corev1.Pod, metrics map[string]*metricsv1beta1.PodMetrics) (cpu, mem float64, haveCPU, haveMem bool) {
 	basis := func(res corev1.ResourceName) func(c *corev1.Container) (float64, bool) {
 		anyLimit := false
-		for _, p := range pods {
+		for _, p := range all {
 			for _, c := range p.Spec.Containers {
 				if _, ok := c.Resources.Limits[res]; ok {
 					anyLimit = true

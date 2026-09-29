@@ -24,9 +24,10 @@ const kindWorkload = "k8s.workload"
 
 func init() {
 	probe.Register(probe.Access{
-		Kind:     kindWorkload,
-		Source:   "Kubernetes API (informers on pods, deployments, statefulsets, daemonsets, replicasets, events) and metrics.k8s.io PodMetrics",
-		Delivers: "replicas_ready, replicas_desired, restarts, restart_window_s, cpu_pct, mem_pct, killed, evicted; CrashLoopBackOff, ImagePullBackOff, OOMKilled, Evicted; deploy and scale events",
+		Kind:   kindWorkload,
+		Source: "Kubernetes API (informers on pods, deployments, statefulsets, daemonsets, replicasets, events) and metrics.k8s.io PodMetrics",
+		Delivers: "replicas_ready, replicas_desired, restarts, restart_window_s, cpu_pct, mem_pct, killed, evicted; CrashLoopBackOff, ImagePullBackOff, OOMKilled, Evicted; deploy and scale events; " +
+			"detail: placement (per node: pods, ready, restarts, and cpu_pct and mem_pct when the usage of its pods was read)",
 		SpecFields: []string{
 			"namespace (required)",
 			"selector (label selector; required unless name and kind are set)",
@@ -357,9 +358,12 @@ func (w *workloadProbe) observe(ctx context.Context, c *Clients, ls workloadList
 	restartCounts := map[string]any{}
 	evicted := 0
 	ready := 0
-	// placement is node name -> pods, ready, restarts (in the window): the
-	// machine view draws it as "API ×2" inside each node.
-	placement := map[string]map[string]int{}
+	// placement is node name -> pods, ready, restarts (in the window), and
+	// cpu_pct and mem_pct when the pods' usage was read: the machine view
+	// draws it as "API ×2" inside each node. The values are any so the cpu
+	// and memory shares can sit beside the counts.
+	placement := map[string]map[string]any{}
+	onNode := map[string][]*corev1.Pod{}
 	nodeOfPod := map[string]string{}
 	for _, p := range pods {
 		// A pod that ran to its end (a migration that finished, a pod that
@@ -368,11 +372,12 @@ func (w *workloadProbe) observe(ctx context.Context, c *Clients, ls workloadList
 		if n := p.Spec.NodeName; n != "" && !podEnded(p) {
 			nodeOfPod[p.Name] = n
 			if placement[n] == nil {
-				placement[n] = map[string]int{}
+				placement[n] = map[string]any{"pods": 0, "ready": 0}
 			}
-			placement[n]["pods"]++
+			onNode[n] = append(onNode[n], p)
+			placement[n]["pods"] = placement[n]["pods"].(int) + 1
 			if podReady(p) {
-				placement[n]["ready"]++
+				placement[n]["ready"] = placement[n]["ready"].(int) + 1
 			}
 		}
 		if podReady(p) {
@@ -420,6 +425,17 @@ func (w *workloadProbe) observe(ctx context.Context, c *Clients, ls workloadList
 		if haveMem {
 			wl.MemPct = facet.N(mem)
 		}
+		// Each machine's share, against the basis the workload's is taken
+		// on; a machine whose pods have no usage yet is left without one.
+		for n, on := range onNode {
+			cpu, mem, haveCPU, haveMem := podUsageOf(pods, on, metrics)
+			if haveCPU {
+				placement[n]["cpu_pct"] = cpu
+			}
+			if haveMem {
+				placement[n]["mem_pct"] = mem
+			}
+		}
 	} else {
 		o.Detail["metrics_error"] = err.Error()
 	}
@@ -455,11 +471,18 @@ func (w *workloadProbe) observe(ctx context.Context, c *Clients, ls workloadList
 	o.Detail["pods"] = len(pods)
 	for _, r := range w.restarts {
 		if n := nodeOfPod[r.pod]; n != "" && within(r.at, restartWindow, now) {
-			placement[n]["restarts"]++
+			r, _ := placement[n]["restarts"].(int)
+			placement[n]["restarts"] = r + 1
 		}
 	}
 	if len(placement) > 0 {
-		o.Detail["placement"] = placement
+		// map[string]any, the shape a placement has after a round trip
+		// through JSON, is the one its readers take.
+		out := make(map[string]any, len(placement))
+		for n, f := range placement {
+			out[n] = f
+		}
+		o.Detail["placement"] = out
 	}
 	o.Detail["ready_pods"] = readyPods
 	o.Detail["restart_counts"] = restartCounts

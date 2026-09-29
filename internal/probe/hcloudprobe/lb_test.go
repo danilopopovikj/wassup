@@ -57,6 +57,75 @@ func TestSummarize(t *testing.T) {
 	}
 }
 
+// lbOverlapJSON is a balancer that lists its six servers directly and again
+// through a label selector that matches all of them: the API returns twelve
+// entries for six machines. Server 3 is listed directly before its first
+// check ran (unknown) while the selector entry says healthy; server 6 fails
+// 443 on both entries. An IP target listed twice counts once too.
+const lbOverlapJSON = `{"load_balancer": {
+  "id": 6, "name": "edge", "algorithm": {"type": "round_robin"}, "location": {"name": "fsn1"},
+  "targets": [
+    {"type": "server", "server": {"id": 1}, "health_status": [{"listen_port": 80, "status": "healthy"}, {"listen_port": 443, "status": "healthy"}]},
+    {"type": "server", "server": {"id": 2}, "health_status": [{"listen_port": 80, "status": "healthy"}, {"listen_port": 443, "status": "healthy"}]},
+    {"type": "server", "server": {"id": 3}, "health_status": [{"listen_port": 80, "status": "unknown"}, {"listen_port": 443, "status": "unknown"}]},
+    {"type": "server", "server": {"id": 4}, "health_status": [{"listen_port": 80, "status": "healthy"}, {"listen_port": 443, "status": "healthy"}]},
+    {"type": "server", "server": {"id": 5}, "health_status": [{"listen_port": 80, "status": "healthy"}, {"listen_port": 443, "status": "healthy"}]},
+    {"type": "server", "server": {"id": 6}, "health_status": [{"listen_port": 80, "status": "healthy"}, {"listen_port": 443, "status": "unhealthy"}]},
+    {"type": "label_selector", "label_selector": {"selector": "role=node"}, "targets": [
+      {"type": "server", "server": {"id": 1}, "health_status": [{"listen_port": 80, "status": "healthy"}, {"listen_port": 443, "status": "healthy"}]},
+      {"type": "server", "server": {"id": 2}, "health_status": [{"listen_port": 80, "status": "healthy"}, {"listen_port": 443, "status": "healthy"}]},
+      {"type": "server", "server": {"id": 3}, "health_status": [{"listen_port": 80, "status": "healthy"}, {"listen_port": 443, "status": "healthy"}]},
+      {"type": "server", "server": {"id": 4}, "health_status": [{"listen_port": 80, "status": "healthy"}, {"listen_port": 443, "status": "healthy"}]},
+      {"type": "server", "server": {"id": 5}, "health_status": [{"listen_port": 80, "status": "healthy"}, {"listen_port": 443, "status": "healthy"}]},
+      {"type": "server", "server": {"id": 6}, "health_status": [{"listen_port": 80, "status": "healthy"}, {"listen_port": 443, "status": "unhealthy"}]}
+    ]}
+  ]
+}}`
+
+func TestSummarizeCountsEachServerOnce(t *testing.T) {
+	var resp struct {
+		LoadBalancer LoadBalancer `json:"load_balancer"`
+	}
+	if err := json.Unmarshal([]byte(lbOverlapJSON), &resp); err != nil {
+		t.Fatal(err)
+	}
+	s := Summarize(resp.LoadBalancer)
+	if s.Healthy != 5 || s.Total != 6 {
+		t.Errorf("healthy/total = %d/%d, want 5/6", s.Healthy, s.Total)
+	}
+	byID := map[int64]TargetHealth{}
+	for _, th := range s.Targets {
+		byID[th.ServerID] = th
+	}
+	if th := byID[3]; !th.Healthy || th.Status != "80 healthy, 443 healthy" || th.Via != "role=node" {
+		t.Errorf("server 3 = %+v", th)
+	}
+	if th := byID[6]; th.Healthy || th.Status != "80 healthy, 443 unhealthy" {
+		t.Errorf("server 6 = %+v", th)
+	}
+
+	// Every entry healthy: 6/6, not 12/12.
+	all := strings.ReplaceAll(strings.ReplaceAll(lbOverlapJSON, `"unhealthy"`, `"healthy"`), `"unknown"`, `"healthy"`)
+	if err := json.Unmarshal([]byte(all), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if s := Summarize(resp.LoadBalancer); s.Healthy != 6 || s.Total != 6 {
+		t.Errorf("healthy/total = %d/%d, want 6/6", s.Healthy, s.Total)
+	}
+
+	ips := LoadBalancer{Targets: []LoadBalancerTarget{
+		{Type: "ip", IP: &struct {
+			IP string `json:"ip"`
+		}{IP: "203.0.113.7"}, HealthStatus: []LoadBalancerTargetHealthStatus{{ListenPort: 80, Status: "healthy"}}},
+		{Type: "ip", IP: &struct {
+			IP string `json:"ip"`
+		}{IP: "203.0.113.7"}, HealthStatus: []LoadBalancerTargetHealthStatus{{ListenPort: 80, Status: "healthy"}}},
+	}}
+	if s := Summarize(ips); s.Total != 1 || s.Healthy != 1 || s.Targets[0].IP != "203.0.113.7" {
+		t.Errorf("ip targets = %+v", s)
+	}
+}
+
 func TestLastValue(t *testing.T) {
 	var m LoadBalancerMetricsResponse
 	if err := json.Unmarshal([]byte(metricsJSON), &m); err != nil {

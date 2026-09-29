@@ -245,17 +245,28 @@ func TestWorkloadPlacementLeavesOutPodsThatEnded(t *testing.T) {
 		apiDeployment("ghcr.io/bookstore/api:b7e9f21", 2),
 		apiPod("api-7d9f4b-aaaa", true, 0, nil, nil), elsewhere, migrated, evicted,
 	}
-	p := &workloadProbe{base: base{kind: kindWorkload, clients: newTestClients(objs, nil, nil)}}
+	// the pod on node-2 has no usage yet: node-2 has no share, not 0 %
+	metrics := []runtime.Object{podMetrics("api-7d9f4b-aaaa", 250, 256<<20)}
+	p := &workloadProbe{base: base{kind: kindWorkload, clients: newTestClients(objs, metrics, nil)}}
 	out, _ := startProbe(t, p, testSpec("api", "namespace", "prod", "selector", "app=api"))
 	o := firstOK(t, out)
-	placement, _ := o.Detail["placement"].(map[string]map[string]int)
-	want := map[string]map[string]int{"node-1": {"pods": 1, "ready": 1}, "node-2": {"pods": 1, "ready": 1}}
+	placement, _ := o.Detail["placement"].(map[string]any)
+	want := map[string]map[string]any{
+		"node-1": {"pods": 1, "ready": 1, "cpu_pct": 25.0, "mem_pct": 25.0},
+		"node-2": {"pods": 1, "ready": 1},
+	}
 	if len(placement) != len(want) {
 		t.Fatalf("placement = %v", o.Detail["placement"])
 	}
 	for node, w := range want {
-		if got := placement[node]; got["pods"] != w["pods"] || got["ready"] != w["ready"] {
+		got, _ := placement[node].(map[string]any)
+		if len(got) != len(w) {
 			t.Errorf("%s = %v, want %v", node, got, w)
+		}
+		for k, v := range w {
+			if got[k] != v {
+				t.Errorf("%s %s = %v, want %v", node, k, got[k], v)
+			}
 		}
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -296,5 +297,96 @@ func TestScrapeAReadThatWasStoppedIsNotKept(t *testing.T) {
 	}
 	if _, _, err := store.read(context.Background(), c, "/metrics", time.Minute); err != nil || reads != 2 {
 		t.Errorf("reads = %d err = %v: a page that was read is kept for the interval", reads, err)
+	}
+}
+
+// A match that finds nothing lists what the pages hold, busiest first, so
+// the binding can be corrected.
+func TestScrapeListsTheValuesWhenNothingMatches(t *testing.T) {
+	r := &router{step: func(_ string, read int) (int, int) { return 100 * read, 0 }}
+	out := startScrape(t, r, []runtime.Object{apiPod("router-1", true, 0, nil, nil)}, "interval", "1s", "match_service", "shop-apii-.*")
+	o := firstOK(t, out)
+	values, _ := o.Detail["label_values"].(map[string][]string)
+	if got := values["service"]; len(got) != 2 || got[0] != "shop-api-8000@kubernetes" || got[1] != "shop-web-80@kubernetes" {
+		t.Errorf("label_values = %v", o.Detail["label_values"])
+	}
+	if note, _ := o.Detail["match_note"].(string); !strings.Contains(note, "label_values") {
+		t.Errorf("match_note = %q", note)
+	}
+}
+
+// Each machine gets the rate of the pods on it, and a machine with a pod
+// that could not be read is left out, never read as zero.
+func TestScrapeRateByNode(t *testing.T) {
+	r := &router{broken: map[string]bool{"router-4": true}, step: func(pod string, read int) (int, int) {
+		if pod == "router-3" {
+			return 1000 + 180*read, 20 * read // twice as busy
+		}
+		return 1000 + 90*read, 10 * read
+	}}
+	onNode := func(name, node string) runtime.Object {
+		pd := apiPod(name, true, 0, nil, nil)
+		pd.Spec.NodeName = node
+		return pd
+	}
+	out := startScrape(t, r, []runtime.Object{onNode("router-1", "node-1"), onNode("router-2", "node-1"), onNode("router-3", "node-2"), onNode("router-4", "node-3")}, "interval", "1s")
+	o := waitFor(t, out, func(o probe.Observation) bool { return hasRate(o) && o.Detail["rate_by_node"] != nil })
+	rates, _ := o.Detail["rate_by_node"].(map[string]float64)
+	errs, _ := o.Detail["error_rate_by_node"].(map[string]float64)
+	if len(rates) != 2 || rates["node-1"] <= 0 || rates["node-2"] <= 0 {
+		t.Fatalf("rate_by_node = %v", rates)
+	}
+	if _, ok := rates["node-3"]; ok {
+		t.Errorf("node-3's only pod was not read: %v", rates)
+	}
+	if sum := rates["node-1"] + rates["node-2"]; math.Abs(sum-o.Metrics["rate"]) > 0.002 {
+		t.Errorf("the machines add up to %v, the rate is %v", sum, o.Metrics["rate"])
+	}
+	if len(errs) != 2 || errs["node-1"] != 10 || errs["node-2"] != 10 {
+		t.Errorf("error_rate_by_node = %v", errs)
+	}
+}
+
+// A counter that did not move between two readings a few seconds apart says
+// nothing about the window: no rate until it has been watched that long,
+// then a rate of zero.
+func TestScrapeZeroNeedsTheWholeWindow(t *testing.T) {
+	r := &router{step: func(string, int) (int, int) { return 500, 0 }}
+	out := startScrape(t, r, []runtime.Object{apiPod("router-1", true, 0, nil, nil), apiPod("router-2", true, 0, nil, nil)}, "interval", "1s", "window", "40s")
+	o := waitFor(t, out, func(o probe.Observation) bool { return o.Err == "" && o.Detail["quiet_note"] != nil })
+	if _, ok := o.Metrics["rate"]; ok {
+		t.Errorf("a quiet span shorter than the window is no rate: %v", o.Metrics)
+	}
+	if _, ok := o.Metrics["error_rate"]; ok {
+		t.Errorf("nor an error rate: %v", o.Metrics)
+	}
+	o = waitFor(t, out, hasRate)
+	if o.Metrics["rate"] != 0 || o.Metrics["error_rate"] != 0 {
+		t.Errorf("watched for the whole window, nothing counted: %v", o.Metrics)
+	}
+	if span, _ := o.Detail["span_s"].(int); span < 30 {
+		t.Errorf("span_s = %v", o.Detail["span_s"])
+	}
+}
+
+// A pod with one reading so far is left out of the rate and named, and its
+// machine has no rate yet.
+func TestScrapeNamesThePodsWithoutARate(t *testing.T) {
+	p := &scrapeProbe{pods: map[string]*history{}}
+	at := time.Date(2026, 9, 28, 10, 0, 0, 0, time.UTC)
+	p.keep("a", reading{at: at, total: 10}, time.Minute)
+	p.keep("a", reading{at: at.Add(10 * time.Second), total: 60}, time.Minute)
+	p.keep("b", reading{at: at.Add(10 * time.Second), total: 60}, time.Minute)
+	if _, ok := p.podRate("b", time.Minute); ok {
+		t.Error("one reading is no rate")
+	}
+	g, ok := p.growth([]string{"a", "b"}, time.Minute)
+	if !ok || g.rate != 5 || g.span != 10*time.Second || g.watched {
+		t.Errorf("growth = %+v %v", g, ok)
+	}
+	// the counter started over: no rate until it is read again
+	p.keep("a", reading{at: at.Add(20 * time.Second), total: 3}, time.Minute)
+	if _, ok := p.podRate("a", time.Minute); ok {
+		t.Error("a counter that started over has no rate")
 	}
 }
