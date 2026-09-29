@@ -92,10 +92,10 @@ func Surveyed(ctx context.Context, spec map[string]any, lookback time.Duration) 
 	s.PooledOver = min(lookback, time.Hour)
 	if tab, err := ask(ctx, sess, MetricPooled, []string{"k8s.pod.name", "database"}, s.PooledOver, now); err == nil {
 		rows := tab.rows
+		// kept at zero too: a pooler that passed nothing this hour is quiet,
+		// not one whose metrics nobody scrapes
 		for _, r := range rows {
-			if r.count > 0 {
-				s.Pooled = append(s.Pooled, Call{Service: r.labels["k8s.pod.name"], Address: r.labels["database"], Count: r.count, Last: r.last})
-			}
+			s.Pooled = append(s.Pooled, Call{Service: r.labels["k8s.pod.name"], Address: r.labels["database"], Count: r.count, Last: r.last})
 		}
 	}
 	if rows, err = read(metricClientHTTP, "service.name"); err == nil {

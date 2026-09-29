@@ -1,6 +1,8 @@
 package measure
 
 import (
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -159,12 +161,12 @@ func TestAHostThatSharesAServiceNeedsRouterLabels(t *testing.T) {
 		t.Errorf("dns-shop->lb = %+v", e)
 	}
 	src := sources()
-	src.Router.Routers = map[string]bool{"shop-web-shop-example@kubernetes": true, "shop-api-api-example@kubernetes": true}
+	src.Router.Routers = map[string]bool{"shop-web-shop-example@kubernetes": true, "shop-web-shop-example-api-3f2a@kubernetes": true, "shop-api-api-example@kubernetes": true}
 	e := verdicts(Plan(bookstore(), src))["dns-shop->lb"]
 	if e.Status != Found || e.Binding["metric"] != RouterRouterMetric {
 		t.Fatalf("with router labels: %+v", e)
 	}
-	if got := e.Binding["match"].(map[string]any)["router"]; got != `.*-shop-example.*` {
+	if got := e.Binding["match"].(map[string]any)["router"]; got != `(shop-web-shop-example)[-@].*` {
 		t.Errorf("match = %v", got)
 	}
 }
@@ -265,5 +267,60 @@ func TestComponentsThatShareAServiceNameAreNotBound(t *testing.T) {
 	e := verdicts(Plan(cfg, src))["mailer->maps"]
 	if e.Status != Missing || !strings.Contains(e.Reason, "as jobs, as worker do") {
 		t.Errorf("mailer->maps = %+v", e)
+	}
+}
+
+// The routes of example.com are not those of api.example.com, and the
+// Service api is not api-admin.
+func TestRoutesAndServicesAreMatchedWholeNotByPrefix(t *testing.T) {
+	cfg := bookstore()
+	src := sources()
+	src.Inventory.Ingresses = append(src.Inventory.Ingresses, k8s.IngressInfo{Namespace: "shop", Name: "admin", Hosts: []string{"admin.shop.example"}, Backends: []string{"api-admin:80 /"}})
+	src.Router.Services["shop-api-admin-80@kubernetes"] = true
+	e := verdicts(Plan(cfg, src))["ingress->api"]
+	if got := e.Binding["match"].(map[string]any)["service"]; got != `shop-api-8000@kubernetes` {
+		t.Errorf("ingress->api match = %v", got)
+	}
+	src.Router.Routers = map[string]bool{"shop-web-shop-example@kubernetes": true, "shop-admin-admin-shop-example@kubernetes": true}
+	re := regexp.MustCompile("^(?:" + fmt.Sprint(verdicts(Plan(cfg, src))["dns-shop->lb"].Binding["match"].(map[string]any)["router"]) + ")$")
+	if re.MatchString("shop-admin-admin-shop-example@kubernetes") || !re.MatchString("shop-web-shop-example@kubernetes") {
+		t.Errorf("the routes of shop.example: %v", re)
+	}
+}
+
+func TestAnAddressIsWidenedToItsDomainOnlyWhereThatMeansOneService(t *testing.T) {
+	for _, c := range []struct {
+		host, addr string
+		want       bool
+	}{
+		{"quickvin.carfax.com", "servicesocket.carfax.com", true},
+		{"api.ns.svc.cluster.local", "billing.ns.svc.cluster.local:8080", false},
+		{"10.0.0.5", "192.168.0.5", false},
+		{"bucket.s3.amazonaws.com", "sqs.us-east-1.amazonaws.com", false},
+		{"bucket.s3.amazonaws.com", "bucket.s3.amazonaws.com:443", true},
+		{"vendor-catalogs", "vendor-catalogs.app.svc.cluster.local:80", true},
+	} {
+		re := regexp.MustCompile("^(?:" + addressExpr([]string{c.host}) + ")$")
+		if got := re.MatchString(c.addr); got != c.want {
+			t.Errorf("%s matches %s: %v, want %v", c.host, c.addr, got, c.want)
+		}
+	}
+}
+
+// A pooler that passed nothing in the last hour is bound all the same: its
+// counter is there, and it reads idle.
+func TestAQuietPoolerIsBound(t *testing.T) {
+	cfg := bookstore()
+	cfg.Topology.Components = append(cfg.Topology.Components, model.Component{ID: "pool", Type: "workload"})
+	cfg.Topology.Edges = append(cfg.Topology.Edges, model.Edge{From: "pool", To: "db", Kind: "sql"})
+	cfg.Bindings.Components["pool"] = []model.ProbeSpec{{"probe": "k8s.workload", "namespace": "shop", "selector": "cnpg.io/poolerName=shop-db-pooler-rw"}}
+	src := sources()
+	src.Survey.Pooled = []signoz.Call{{Service: "shop-db-pooler-rw-7c9-abc", Address: "shop", Count: 0}}
+	if e := verdicts(Plan(cfg, src))["pool->db"]; e.Status != Found {
+		t.Errorf("pool->db = %+v", e)
+	}
+	src.Survey.Pooled = nil
+	if e := verdicts(Plan(cfg, src))["pool->db"]; e.Status != Missing || !strings.Contains(e.Reason, "not scraped") {
+		t.Errorf("without a series: %+v", e)
 	}
 }
