@@ -108,7 +108,7 @@ draws on the diagram; wassup itself needs no AI to run.`,
 	root.AddCommand(
 		initCmd(), discoverCmd(), validateCmd(), probeCmd(), snapshotCmd(), explainCmd(),
 		logsCmd(), eventsCmd(), annotateCmd(), clearAnnotationsCmd(), exportCmd(), remapCmd(),
-		replayCmd(), skillCmd(), demoCmd(), probesCmd(), syncCmd(), versionCmd(), accessCmd(),
+		replayCmd(), skillCmd(), demoCmd(), probesCmd(), syncCmd(), versionCmd(), accessCmd(), measureCmd(),
 	)
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "wassup:", err)
