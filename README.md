@@ -92,6 +92,17 @@ cd wassup
 make install
 ```
 
+To update, whichever way you installed:
+
+```sh
+wassup update          # the latest release, checked against checksums.txt
+wassup update --check  # only says whether there is a newer one
+```
+
+wassup never updates on its own and never checks in the background. If
+your repository has the Claude Code skill, run `wassup skill install`
+after an update: the skill there is a copy.
+
 ## Set up your system
 
 ### Install with AI
@@ -205,6 +216,7 @@ one.
 | `wassup measure [--write]` | finds a counter for every edge that has none, from the router and SigNoz, with the evidence, or says why none can |
 | `wassup access` | prints the smallest read-only account for the probes you use |
 | `wassup explain <ref>` | everything known about one element |
+| `wassup update` | replaces the binary with the latest release |
 
 Every command accepts `--json`. The full list is in
 [docs/commands.md](docs/commands.md).
