@@ -34,12 +34,19 @@ Press `?` in the TUI for this list.
 | Action | Does |
 | --- | --- |
 | click | selects |
+| double click | opens the detail panel, like `enter` |
+| scroll | pans the diagram up and down, and scrolls the panel when the pointer is over it |
+| scroll sideways, or shift + scroll | pans the diagram left and right |
 | drag a box | moves it |
 | drag the bottom-right corner | resizes it |
 | click a group title | collapses the group |
 | click the timeline strip | jumps the scrub cursor |
 
 Positions are saved to `.wassup/layout.json`. Boxes never move on their own.
+
+Scrolling sideways with two fingers needs a terminal that reports it
+(iTerm2, Ghostty, kitty, WezTerm). Where it does nothing, hold shift and
+scroll, or pan with `H` and `L`.
 
 ## States
 

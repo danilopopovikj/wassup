@@ -216,3 +216,89 @@ func TestNetsCrossAndTheirRoutesJoin(t *testing.T) {
 		t.Errorf("crossings %d, joints %d: the picture has both", crossings, joints)
 	}
 }
+
+// TestMouseMovesAroundAndOpensDetail says what the mouse promises beyond
+// selecting: the wheel pans the diagram both ways, and a double click on a
+// box opens its detail panel as enter does.
+func TestMouseMovesAroundAndOpensDetail(t *testing.T) {
+	dir := "../../testdata/scenarios/04-node-memory-pressure"
+	fx, err := fixture.Load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rt, err := app.New(app.Options{Dir: dir, Replay: fx, Speed: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := New(rt, Options{NoColor: true})
+	// A window smaller than the picture, so there is somewhere to pan to.
+	m.Update(tea.WindowSizeMsg{Width: 60, Height: 20})
+	m.onUpdate(app.Update{Snapshot: scenarioSnapshot(t, dir)})
+	m.panelOpen = false
+	if m.graph.W <= 60 || m.graph.H <= 20 {
+		t.Fatalf("the picture (%dx%d) fits the window, nothing to pan", m.graph.W, m.graph.H)
+	}
+
+	wheel := func(b tea.MouseButton, mod tea.KeyMod) {
+		m.Update(tea.MouseWheelMsg{X: 10, Y: 5, Button: b, Mod: mod})
+	}
+	wheel(tea.MouseWheelRight, 0)
+	if m.viewX <= 0 {
+		t.Error("a wheel to the right should pan right")
+	}
+	wheel(tea.MouseWheelLeft, 0)
+	if m.viewX != 0 {
+		t.Errorf("a wheel to the left should pan back, viewX = %d", m.viewX)
+	}
+	wheel(tea.MouseWheelLeft, 0)
+	if m.viewX != 0 {
+		t.Errorf("the view should stop at the left edge, viewX = %d", m.viewX)
+	}
+	wheel(tea.MouseWheelDown, tea.ModShift)
+	if m.viewX <= 0 || m.viewY != 0 {
+		t.Errorf("shift and the wheel should pan sideways only, view = %d,%d", m.viewX, m.viewY)
+	}
+	wheel(tea.MouseWheelUp, tea.ModShift)
+	wheel(tea.MouseWheelDown, 0)
+	if m.viewX != 0 || m.viewY <= 0 {
+		t.Errorf("the wheel should pan down, view = %d,%d", m.viewX, m.viewY)
+	}
+	wheel(tea.MouseWheelUp, 0)
+
+	// Any box that is on screen will do.
+	gx, gy, gw, gh := m.graphRect()
+	x, y := -1, -1
+	for _, b := range m.graph.Boxes {
+		if b.X+1 < gw && b.Y+1 < gh && m.graph.BoxAt(b.X+1, b.Y+1) != nil && m.graph.GroupTitleAt(b.X+1, b.Y+1) == nil {
+			x, y = gx+b.X+1, gy+b.Y+1
+			break
+		}
+	}
+	if x < 0 {
+		t.Fatal("no box in the window")
+	}
+	click := tea.MouseClickMsg{X: x, Y: y, Button: tea.MouseLeft}
+	m.selected = ""
+	m.Update(click)
+	m.Update(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+	if m.selected == "" {
+		t.Fatal("a click should select the box")
+	}
+	if m.panelOpen {
+		t.Error("one click should not open the panel")
+	}
+	m.Update(click)
+	if !m.panelOpen || m.panelMode != panelDetail {
+		t.Error("a double click should open the detail panel")
+	}
+
+	// Two slow clicks are two clicks.
+	m.panelOpen = false
+	m.Update(tea.MouseReleaseMsg{X: x, Y: y, Button: tea.MouseLeft})
+	m.Update(click)
+	m.lastClickAt = m.lastClickAt.Add(-time.Second)
+	m.Update(click)
+	if m.panelOpen {
+		t.Error("two clicks a second apart should not open the panel")
+	}
+}
