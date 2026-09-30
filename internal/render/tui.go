@@ -79,6 +79,9 @@ type Model struct {
 	viewX   int
 	viewY   int
 
+	lastClick   string
+	lastClickAt time.Time
+
 	toast      string
 	toastUntil time.Time
 	confirm    string
@@ -185,25 +188,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.MouseMotionMsg:
 		return m.onMotion(msg.Mouse())
 	case tea.MouseWheelMsg:
-		mm := msg.Mouse()
-		if m.inPanel(mm.X, mm.Y) {
-			if mm.Button == tea.MouseWheelUp {
-				m.panelScroll -= 3
-			} else if mm.Button == tea.MouseWheelDown {
-				m.panelScroll += 3
-			}
-			if m.panelScroll < 0 {
-				m.panelScroll = 0
-			}
-		} else {
-			if mm.Button == tea.MouseWheelUp {
-				m.viewY -= 2
-			} else if mm.Button == tea.MouseWheelDown {
-				m.viewY += 2
-			}
-			m.clampView()
-		}
-		return m, nil
+		return m.onWheel(msg.Mouse())
 	}
 	return m, nil
 }
@@ -420,9 +405,7 @@ func (m *Model) onKey(k tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		m.viewY += 4
 		m.clampView()
 	case "enter":
-		m.panelOpen = true
-		m.panelMode = panelDetail
-		m.panelScroll = 0
+		m.openDetail()
 	case "tab":
 		m.panelOpen = !m.panelOpen
 	case "i":
@@ -744,6 +727,67 @@ func abs(v int) int {
 
 // ---- mouse ----------------------------------------------------------------
 
+// doubleClick is how close two clicks on one element have to be to open
+// its detail panel.
+const doubleClick = 400 * time.Millisecond
+
+// onWheel pans the diagram the way the fingers move: up and down, and left
+// and right where the terminal reports a sideways wheel. Shift and the
+// wheel pans sideways too, for the terminals that report no sideways wheel.
+// Over the panel the wheel scrolls the panel.
+func (m *Model) onWheel(mm tea.Mouse) (tea.Model, tea.Cmd) {
+	if m.inPanel(mm.X, mm.Y) {
+		switch mm.Button {
+		case tea.MouseWheelUp:
+			m.panelScroll = max(0, m.panelScroll-3)
+		case tea.MouseWheelDown:
+			m.panelScroll += 3
+		}
+		return m, nil
+	}
+	sideways := mm.Mod.Contains(tea.ModShift)
+	switch mm.Button {
+	case tea.MouseWheelLeft:
+		m.viewX -= 4
+	case tea.MouseWheelRight:
+		m.viewX += 4
+	case tea.MouseWheelUp:
+		if sideways {
+			m.viewX -= 4
+		} else {
+			m.viewY -= 2
+		}
+	case tea.MouseWheelDown:
+		if sideways {
+			m.viewX += 4
+		} else {
+			m.viewY += 2
+		}
+	}
+	m.clampView()
+	return m, nil
+}
+
+// clicked selects an element and says whether this click is the second of
+// a double click on it.
+func (m *Model) clicked(id string) bool {
+	now := time.Now()
+	twice := id == m.lastClick && now.Sub(m.lastClickAt) < doubleClick
+	m.selected = id
+	m.lastClick, m.lastClickAt = id, now
+	if twice {
+		m.lastClick = "" // a third click starts over
+	}
+	return twice
+}
+
+// openDetail is what enter does: the detail panel of the selection.
+func (m *Model) openDetail() {
+	m.panelOpen = true
+	m.panelMode = panelDetail
+	m.panelScroll = 0
+}
+
 func (m *Model) onClick(mm tea.Mouse) (tea.Model, tea.Cmd) {
 	if mm.Button != tea.MouseLeft {
 		return m, nil
@@ -774,7 +818,10 @@ func (m *Model) onClick(mm tea.Mouse) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if b := m.graph.BoxAt(gx, gy); b != nil {
-		m.selected = b.Element()
+		if m.clicked(b.Element()) {
+			m.openDetail()
+			return m, nil
+		}
 		if b.Instance != "" {
 			return m, nil // an instance moves with its node
 		}
@@ -783,8 +830,10 @@ func (m *Model) onClick(mm tea.Mouse) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	if r := m.graph.RouteAt(gx, gy); r != nil {
-		m.selected = edgeOf(r)
 		m.panelMode = panelDetail
+		if m.clicked(edgeOf(r)) {
+			m.openDetail()
+		}
 	}
 	return m, nil
 }
@@ -802,6 +851,7 @@ func (m *Model) onMotion(mm tea.Mouse) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.drag.moved = true
+	m.lastClick = "" // a drag is not the first half of a double click
 	b := m.graph.Boxes[m.drag.id]
 	if b == nil {
 		return m, nil
