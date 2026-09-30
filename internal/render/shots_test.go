@@ -33,6 +33,13 @@ func TestShots(t *testing.T) {
 			m.panelMode = panelDetail
 			m.follow()
 		}},
+		// The README picture: the lens on and no panel, in a window large
+		// enough to hold the whole diagram (see size below).
+		{"02-pool-exhausted-lens", "02-connection-pool-exhausted", func(m *Model) {
+			m.lensOn = true
+			m.selected = "api->db"
+			m.follow()
+		}},
 		{"04-node-memory-lens", "04-node-memory-pressure", func(m *Model) { m.lensOn = true; m.selected = "node-2"; m.follow() }},
 		{"07-node-dropped-timeline", "07-node-dropped-from-lb", func(m *Model) { m.lensOn = false; m.selected = "node-3"; m.follow() }},
 		{"08-firewall-nodata", "08-firewall-blocked-observability", func(m *Model) { m.lensOn = true; m.selected = "signoz"; m.follow() }},
@@ -58,6 +65,8 @@ func TestShots(t *testing.T) {
 			m.follow()
 		}},
 	}
+	// A shot not named here is taken in a window of 190 by 100.
+	size := map[string][2]int{"02-pool-exhausted-lens": {220, 111}}
 	for _, sh := range shots {
 		dir := filepath.Join("..", "..", "testdata", "scenarios", sh.dir)
 		fx, err := fixture.Load(dir)
@@ -74,7 +83,11 @@ func TestShots(t *testing.T) {
 		rt.Ring().AddAll(run.Frames)
 		rt.Binder().Seed(run.Binder.Events())
 		m := New(rt, Options{})
-		m.Update(tea.WindowSizeMsg{Width: 190, Height: 100})
+		wh, ok := size[sh.name]
+		if !ok {
+			wh = [2]int{190, 100}
+		}
+		m.Update(tea.WindowSizeMsg{Width: wh[0], Height: wh[1]})
 		m.snap, m.view = snap, snap
 		m.frame = 7
 		sh.setup(m)
