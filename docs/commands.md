@@ -27,6 +27,7 @@ one command.
 | `wassup demo [n]` | replays a bundled scenario |
 | `wassup probes` | lists the probe kinds this build ships |
 | `wassup version` | prints the version |
+| `wassup update [--check] [--version <v>]` | replaces the binary with the latest release, checked against `checksums.txt`; `--check` only says whether there is a newer one |
 
 `wassup export` writes PNG next to SVG when `resvg` or `rsvg-convert` is on
 the `PATH`.
