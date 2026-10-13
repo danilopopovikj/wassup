@@ -400,7 +400,16 @@ func (w *workloadProbe) observe(ctx context.Context, c *Clients, ls workloadList
 
 	desired, readyN := t.desired, t.ready
 	if !t.haveStatus {
-		desired, readyN = float64(len(pods)), float64(ready)
+		// Pods with no owner to say how many there should be: every pod
+		// is wanted but one that finished its work, such as a job's run
+		// next to the services a selector also picks.
+		wanted := 0
+		for _, p := range pods {
+			if p.Status.Phase != corev1.PodSucceeded {
+				wanted++
+			}
+		}
+		desired, readyN = float64(wanted), float64(ready)
 	}
 	wl.ReplicasReady, wl.ReplicasDesired = facet.N(readyN), facet.N(desired)
 	wl.Restarts = facet.NI(len(w.restarts))

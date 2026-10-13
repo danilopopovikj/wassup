@@ -290,3 +290,17 @@ func TestPodUsageMixedBasis(t *testing.T) {
 		t.Errorf("mem_pct = %v (have %v), want 5 GiB of 10 GiB", mem, haveMem)
 	}
 }
+
+// Pods with no single owner: a job's run that finished is not a copy that
+// should be up, and does not make the rest read as one not ready.
+func TestWorkloadBarePodsLeaveOutFinishedRuns(t *testing.T) {
+	migrated := apiPod("schema-migrate-x7k2p", false, 0, nil, nil)
+	migrated.Status.Phase = corev1.PodSucceeded
+	objs := []runtime.Object{apiPod("query-0", true, 0, nil, nil), apiPod("store-0", true, 0, nil, nil), migrated}
+	p := &workloadProbe{base: base{kind: kindWorkload, clients: newTestClients(objs, nil, nil)}}
+	out, _ := startProbe(t, p, testSpec("monitoring", "namespace", "prod", "selector", "app=api"))
+	o := firstOK(t, out)
+	if o.Metrics["replicas_desired"] != 2 || o.Metrics["replicas_ready"] != 2 {
+		t.Errorf("replicas = %v of %v, want 2 of 2", o.Metrics["replicas_ready"], o.Metrics["replicas_desired"])
+	}
+}
