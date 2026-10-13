@@ -2,6 +2,8 @@ package k8s
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,5 +108,45 @@ func TestNodeProxyDenied(t *testing.T) {
 	}
 	if o.Detail["stats_error"] == nil {
 		t.Errorf("expected stats_error in detail: %v", o.Detail)
+	}
+}
+
+// The file cache of the container runtime is left out of ram: on k3s it
+// sits in the kubelet's unit, and a machine whose processes hold 9 GiB
+// otherwise reads 25 GiB.
+func TestNodeMemLeavesOutRuntimeCache(t *testing.T) {
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node-1"},
+		Status: corev1.NodeStatus{
+			Allocatable: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("30Gi")},
+			Conditions:  []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+		}}
+	nm := &metricsv1beta1.NodeMetrics{ObjectMeta: metav1.ObjectMeta{Name: "node-1"}, Usage: corev1.ResourceList{
+		corev1.ResourceCPU: resource.MustParse("100m"), corev1.ResourceMemory: resource.MustParse("25Gi")}}
+	c := newTestClients([]runtime.Object{node}, []runtime.Object{nm}, nil)
+	const gi = 1 << 30
+	c.proxyGet = func(context.Context, string) ([]byte, error) {
+		return []byte(fmt.Sprintf(`{"node":{"nodeName":"node-1","memory":{"workingSetBytes":%d,"rssBytes":%d},
+			"systemContainers":[{"name":"pods","memory":{"workingSetBytes":%d,"rssBytes":%d}},
+			{"name":"kubelet","memory":{"workingSetBytes":%d,"rssBytes":%d}}]}}`,
+			25*gi, 7*gi, 8*gi, 6*gi, 16*gi, gi/2)), nil
+	}
+	p := &nodeProbe{base: base{kind: kindNode, clients: c}}
+	out, _ := startProbe(t, p, testSpec("node-1", "name", "node-1"))
+	o := firstOK(t, out)
+	if o.Metrics["mem_pct"] != 31.7 {
+		t.Errorf("mem_pct = %v, want the 9.5 GiB processes hold against 30 GiB", o.Metrics["mem_pct"])
+	}
+	if note, _ := o.Detail["mem_note"].(string); !strings.Contains(note, "15.5 GiB") {
+		t.Errorf("mem_note = %q", note)
+	}
+
+	// Without the runtime's memory the working set metrics-server reports stands.
+	c.proxyGet = func(context.Context, string) ([]byte, error) {
+		return []byte(`{"node":{"nodeName":"node-1","memory":{"workingSetBytes":1}}}`), nil
+	}
+	p = &nodeProbe{base: base{kind: kindNode, clients: c}}
+	out, _ = startProbe(t, p, testSpec("node-1", "name", "node-1"))
+	if o := firstOK(t, out); o.Metrics["mem_pct"] != 83.3 || o.Detail["mem_note"] != nil {
+		t.Errorf("fallback mem_pct = %v note %v", o.Metrics["mem_pct"], o.Detail["mem_note"])
 	}
 }

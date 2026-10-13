@@ -23,10 +23,10 @@ const kindNode = "k8s.node"
 func init() {
 	probe.Register(probe.Access{
 		Kind:        kindNode,
-		Source:      "Kubernetes API (node, pod and event informers), metrics.k8s.io NodeMetrics and the kubelet /stats/summary through the API server proxy",
+		Source:      "Kubernetes API (node, pod and event informers), metrics.k8s.io NodeMetrics and the kubelet /stats/summary through the API server proxy (disk, and ram without the container runtime's file cache)",
 		Delivers:    "cpu_pct, mem_pct, disk_pct, pods, killed; NotReady, MemoryPressure, DiskPressure, Rebooted; node (reboot) events",
 		SpecFields:  []string{"name (required)", "kubeconfig", "context"},
-		Needs:       "get/list/watch on nodes, pods and events; get on nodes.metrics.k8s.io; get on nodes/proxy for disk usage (optional)",
+		Needs:       "get/list/watch on nodes, pods and events; get on nodes.metrics.k8s.io; get on nodes/proxy for disk usage and for ram without the runtime's file cache (optional; without it ram is the working set metrics-server reports)",
 		Implemented: true,
 		Facets:      []string{facet.NameNode},
 		// Not nodes/proxy: it reaches every endpoint of the kubelet, not
@@ -216,6 +216,12 @@ func (n *nodeProbe) observe(ctx context.Context, c *Clients, nodes corelisters.N
 		if p, ok := s.Node.Fs.pctOf(); ok {
 			nf.DiskPct = facet.N(p)
 		}
+		if p, cache, ok := memWithoutRuntimeCache(s, node); ok {
+			nf.MemPct = facet.N(p)
+			if cache > 0 {
+				o.Detail["mem_note"] = fmt.Sprintf("ram leaves out %.1f GiB of file cache the container runtime holds (container logs, image layers); the kernel frees it when a process needs the memory", float64(cache)/(1<<30))
+			}
+		}
 		if within(s.Node.StartTime, rebootWindow, now) && s.Node.StartTime.After(n.rebootAt) {
 			n.rebootAt = s.Node.StartTime
 		}
@@ -256,4 +262,27 @@ func (n *nodeProbe) observe(ctx context.Context, c *Clients, nodes corelisters.N
 		o.Detail["taints"] = taints
 	}
 	return o, nil
+}
+
+// memWithoutRuntimeCache is the node's working set against allocatable, less
+// the file cache of the kubelet and the container runtime. metrics-server
+// reports the working set alone, and on a machine that writes many logs or
+// pulled images lately that cache can be most of it: a machine whose
+// processes hold 9 GiB reads 25 GiB. The pods' own cache stays counted, as
+// the kubelet counts it when it evicts.
+func memWithoutRuntimeCache(s *statsSummary, node *corev1.Node) (pctUsed float64, cache uint64, ok bool) {
+	alloc := node.Status.Allocatable.Memory()
+	m := s.Node.Memory
+	if alloc == nil || alloc.Value() <= 0 || m == nil || m.WorkingSetBytes == nil {
+		return 0, 0, false
+	}
+	cache, found := s.runtimeCacheBytes()
+	if !found {
+		return 0, 0, false
+	}
+	used := *m.WorkingSetBytes
+	if cache > used {
+		cache = used
+	}
+	return pct(float64(used-cache), float64(alloc.Value())), cache, true
 }
