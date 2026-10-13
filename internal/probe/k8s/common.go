@@ -9,7 +9,6 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/cache"
 	metricsv1beta1 "k8s.io/metrics/pkg/apis/metrics/v1beta1"
@@ -252,33 +251,17 @@ type usage struct {
 	memUsed, memBasis float64
 }
 
-// podUsage computes cpu_pct and mem_pct for pods against their limits when
-// any container sets one, else against requests. Containers without the
-// chosen basis are left out of both sides. The booleans say whether a
-// percentage could be computed at all.
+// podUsage computes cpu_pct and mem_pct for pods against what each
+// container may use: its limit, else its request. Containers with neither
+// are left out of both sides. A workload whose parts differ (one container
+// limited, another only requested, as in a monitoring stack of several
+// charts) is then measured whole, not by the limited part alone. The
+// booleans say whether a percentage could be computed at all.
 func podUsage(pods []*corev1.Pod, metrics map[string]*metricsv1beta1.PodMetrics) (cpu, mem float64, haveCPU, haveMem bool) {
-	return podUsageOf(pods, pods, metrics)
-}
-
-// podUsageOf is podUsage over pods with the basis (limits or requests)
-// chosen from all, the whole set they belong to: the share of one machine's
-// pods is then measured against the same thing as the workload's.
-func podUsageOf(all, pods []*corev1.Pod, metrics map[string]*metricsv1beta1.PodMetrics) (cpu, mem float64, haveCPU, haveMem bool) {
 	basis := func(res corev1.ResourceName) func(c *corev1.Container) (float64, bool) {
-		anyLimit := false
-		for _, p := range all {
-			for _, c := range p.Spec.Containers {
-				if _, ok := c.Resources.Limits[res]; ok {
-					anyLimit = true
-				}
-			}
-		}
 		return func(c *corev1.Container) (float64, bool) {
-			var q resource.Quantity
-			var ok bool
-			if anyLimit {
-				q, ok = c.Resources.Limits[res]
-			} else {
+			q, ok := c.Resources.Limits[res]
+			if !ok {
 				q, ok = c.Resources.Requests[res]
 			}
 			if !ok {

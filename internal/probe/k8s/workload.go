@@ -425,10 +425,10 @@ func (w *workloadProbe) observe(ctx context.Context, c *Clients, ls workloadList
 		if haveMem {
 			wl.MemPct = facet.N(mem)
 		}
-		// Each machine's share, against the basis the workload's is taken
-		// on; a machine whose pods have no usage yet is left without one.
+		// Each machine's share; a machine whose pods have no usage yet is
+		// left without one.
 		for n, on := range onNode {
-			cpu, mem, haveCPU, haveMem := podUsageOf(pods, on, metrics)
+			cpu, mem, haveCPU, haveMem := podUsage(on, metrics)
 			if haveCPU {
 				placement[n]["cpu_pct"] = cpu
 			}

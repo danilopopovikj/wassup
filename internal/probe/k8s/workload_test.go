@@ -270,3 +270,23 @@ func TestWorkloadPlacementLeavesOutPodsThatEnded(t *testing.T) {
 		}
 	}
 }
+
+// A container with a limit is measured against it and one with only a
+// request against that, so a workload of differing parts is measured whole.
+func TestPodUsageMixedBasis(t *testing.T) {
+	mk := func(name string, res corev1.ResourceRequirements) *corev1.Pod {
+		return &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: name},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "c", Resources: res}}}}
+	}
+	limited := mk("query", corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("2Gi")}})
+	requested := mk("store", corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("8Gi")}})
+	use := func(name, mem string) *metricsv1beta1.PodMetrics {
+		return &metricsv1beta1.PodMetrics{ObjectMeta: metav1.ObjectMeta{Name: name},
+			Containers: []metricsv1beta1.ContainerMetrics{{Name: "c", Usage: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse(mem)}}}}
+	}
+	metrics := map[string]*metricsv1beta1.PodMetrics{"query": use("query", "1Gi"), "store": use("store", "4Gi")}
+	_, mem, _, haveMem := podUsage([]*corev1.Pod{limited, requested}, metrics)
+	if !haveMem || mem != 50 {
+		t.Errorf("mem_pct = %v (have %v), want 5 GiB of 10 GiB", mem, haveMem)
+	}
+}
